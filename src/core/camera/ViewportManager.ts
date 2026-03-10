@@ -1,9 +1,10 @@
-// src/core/ViewportManager.ts
+// src/core/camera/ViewportManager.ts
 export class ViewportManager {
     public x: number = 0;
     public y: number = 0;
     public zoom: number = 1;
     public angle: number = 0;
+    public scaleX: number = 1; // <--- NUEVO: Control del Espejo (-1 o 1)
 
     private container: HTMLElement;
 
@@ -21,13 +22,13 @@ export class ViewportManager {
         this.applyTransform();
     }
 
-    // === MAGIA MATEMÁTICA: Proyectar pantalla a lienzo rotado ===
+    // === MATRIZ ACTUALIZADA (Soporta Escala Negativa) ===
     public screenToCanvas(screenX: number, screenY: number) {
-        // 1. Quitamos la traslación y la escala
-        const sx = (screenX - this.x) / this.zoom;
+        // 1. Quitamos traslación y escala (Considerando si está espejado)
+        const sx = (screenX - this.x) / (this.zoom * this.scaleX);
         const sy = (screenY - this.y) / this.zoom;
 
-        // 2. Quitamos la rotación usando la Matriz de Rotación Inversa
+        // 2. Rotación inversa
         const rad = this.angle * Math.PI / 180;
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
@@ -45,26 +46,22 @@ export class ViewportManager {
         newZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, newZoom));
         if (newZoom === oldZoom) return;
 
-        // Anclamos la coordenada para que no tiemble al hacer zoom
         const canvasPt = this.screenToCanvas(screenX, screenY);
         this.zoom = newZoom;
 
-        // Recalculamos X e Y proyectando de vuelta (Matriz de Rotación Directa)
         const rad = this.angle * Math.PI / 180;
         const rx = canvasPt.x * Math.cos(rad) - canvasPt.y * Math.sin(rad);
         const ry = canvasPt.x * Math.sin(rad) + canvasPt.y * Math.cos(rad);
 
-        this.x = screenX - (rx * this.zoom);
+        this.x = screenX - (rx * this.zoom * this.scaleX);
         this.y = screenY - (ry * this.zoom);
 
         this.applyTransform();
     }
 
-    // === NUEVO: Establecer ángulo pivoteando sobre un punto de la pantalla ===
     public setAngle(newAngle: number, pivotScreenX: number, pivotScreenY: number) {
         const canvasPt = this.screenToCanvas(pivotScreenX, pivotScreenY);
 
-        // Normalizamos el ángulo entre 0 y 360
         this.angle = newAngle % 360;
         if (this.angle < 0) this.angle += 360;
 
@@ -72,15 +69,33 @@ export class ViewportManager {
         const rx = canvasPt.x * Math.cos(rad) - canvasPt.y * Math.sin(rad);
         const ry = canvasPt.x * Math.sin(rad) + canvasPt.y * Math.cos(rad);
 
-        // Compensamos X e Y para que el centro de rotación no se mueva de su sitio
-        this.x = pivotScreenX - (rx * this.zoom);
+        this.x = pivotScreenX - (rx * this.zoom * this.scaleX);
+        this.y = pivotScreenY - (ry * this.zoom);
+
+        this.applyTransform();
+    }
+
+    // === NUEVA FUNCIÓN: ESPEJO ===
+    public flipHorizontal(pivotScreenX: number, pivotScreenY: number) {
+        // 1. Dónde está mirando el usuario ahora
+        const canvasPt = this.screenToCanvas(pivotScreenX, pivotScreenY);
+
+        // 2. Volteamos
+        this.scaleX *= -1;
+
+        // 3. Compensamos X e Y para que la pantalla no salga volando y pivotee en el centro
+        const rad = this.angle * Math.PI / 180;
+        const rx = canvasPt.x * Math.cos(rad) - canvasPt.y * Math.sin(rad);
+        const ry = canvasPt.x * Math.sin(rad) + canvasPt.y * Math.cos(rad);
+
+        this.x = pivotScreenX - (rx * this.zoom * this.scaleX);
         this.y = pivotScreenY - (ry * this.zoom);
 
         this.applyTransform();
     }
 
     private applyTransform() {
-        // El orden de CSS es vital: Traslada -> Escala -> Rota
-        this.container.style.transform = `translate3d(${this.x}px, ${this.y}px, 0) scale(${this.zoom}) rotate(${this.angle}deg)`;
+        // CSS requiere escala X y escala Y separadas
+        this.container.style.transform = `translate3d(${this.x}px, ${this.y}px, 0) scale(${this.zoom * this.scaleX}, ${this.zoom}) rotate(${this.angle}deg)`;
     }
 }

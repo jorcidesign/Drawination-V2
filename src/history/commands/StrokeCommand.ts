@@ -8,46 +8,46 @@ import { ProfileRegistry } from '../../core/render/profiles/ProfileRegistry';
 
 export class StrokeCommand implements ICommand {
     private event: TimelineEvent;
-    private brush: BrushEngine; // <-- AQUÍ
+    private brush: BrushEngine;
+    // Añade estas variables en la clase
+    public dx: number = 0;
+    public dy: number = 0;
 
     constructor(event: TimelineEvent, brush: BrushEngine) {
         this.event = event;
         this.brush = brush;
     }
 
-    // Getters para cumplir con la interfaz
     public get id() { return this.event.id; }
     public get type() { return this.event.type; }
     public get bbox() { return this.event.bbox; }
 
     public async loadDataIfNeeded(storage: StorageManager): Promise<void> {
-        if (!this.event.data) {
-            console.log(`Paginación Command: Rescatando ${this.id.substring(0, 5)}...`);
-            this.event.data = await storage.loadEventData(this.id);
-        }
+        if (!this.event.data) this.event.data = await storage.loadEventData(this.id);
     }
 
     public execute(ctx: CanvasRenderingContext2D): void {
         if (!this.event.data) return;
         const pts = BinarySerializer.decode(this.event.data);
 
-        // 1. Guardamos el perfil actual del usuario
         const originalProfile = this.brush.profile;
-
-        // 2. Buscamos el perfil con el que se dibujó esta línea originalmente
         const savedProfile = ProfileRegistry[this.event.profileId];
-        if (savedProfile) {
-            this.brush.setProfile(savedProfile);
+        if (savedProfile) this.brush.setProfile(savedProfile);
+
+        // === MAGIA NO DESTRUCTIVA ===
+        ctx.save();
+        if (this.dx !== 0 || this.dy !== 0) {
+            ctx.translate(this.dx, this.dy);
         }
 
-        // 3. Dibujamos
+        // Si es StrokeCommand usa event.color, si es EraseCommand usa '#000000'
         this.brush.reproduceStroke(ctx, this.event.color, this.event.size, this.event.opacity, pts);
 
-        // 4. Devolvemos el pincel al estado del usuario para no arruinarle su herramienta actual
+        ctx.restore();
+        // ===========================
+
         this.brush.setProfile(originalProfile);
     }
 
-    public getRawData(): ArrayBuffer | null {
-        return this.event.data;
-    }
+    public getRawData(): ArrayBuffer | null { return this.event.data; }
 }

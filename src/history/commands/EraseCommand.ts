@@ -8,8 +8,10 @@ import { ProfileRegistry } from '../../core/render/profiles/ProfileRegistry';
 
 export class EraseCommand implements ICommand {
     private event: TimelineEvent;
-    private brush: BrushEngine; // <-- AQUÍ
+    private brush: BrushEngine;
 
+    public dx: number = 0;
+    public dy: number = 0;
     constructor(event: TimelineEvent, brush: BrushEngine) {
         this.event = event;
         this.brush = brush;
@@ -20,30 +22,31 @@ export class EraseCommand implements ICommand {
     public get bbox() { return this.event.bbox; }
 
     public async loadDataIfNeeded(storage: StorageManager): Promise<void> {
-        if (!this.event.data) {
-            this.event.data = await storage.loadEventData(this.id);
-        }
+        if (!this.event.data) this.event.data = await storage.loadEventData(this.id);
     }
 
+    // Actualiza el método execute:
     public execute(ctx: CanvasRenderingContext2D): void {
         if (!this.event.data) return;
         const pts = BinarySerializer.decode(this.event.data);
 
         const originalProfile = this.brush.profile;
         const savedProfile = ProfileRegistry[this.event.profileId];
-        if (savedProfile) {
-            this.brush.setProfile(savedProfile);
+        if (savedProfile) this.brush.setProfile(savedProfile);
+
+        // === MAGIA NO DESTRUCTIVA ===
+        ctx.save();
+        if (this.dx !== 0 || this.dy !== 0) {
+            ctx.translate(this.dx, this.dy);
         }
 
-        // === CORRECCIÓN BUG 2 ===
-        // Usamos la opacidad guardada en la historia (this.event.opacity)
-        // El color negro da igual porque usamos destination-out
-        this.brush.reproduceStroke(ctx, '#000000', this.event.size, this.event.opacity, pts);
+        // Si es StrokeCommand usa event.color, si es EraseCommand usa '#000000'
+        this.brush.reproduceStroke(ctx, this.event.color, this.event.size, this.event.opacity, pts);
+
+        ctx.restore();
+        // ===========================
 
         this.brush.setProfile(originalProfile);
     }
-
-    public getRawData(): ArrayBuffer | null {
-        return this.event.data;
-    }
+    public getRawData(): ArrayBuffer | null { return this.event.data; }
 }

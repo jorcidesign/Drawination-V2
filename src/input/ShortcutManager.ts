@@ -1,4 +1,4 @@
-// src/core/ShortcutManager.ts
+// src/input/ShortcutManager.ts
 export class ShortcutManager {
     public onUndo: (() => void) | null = null;
     public onRedo: (() => void) | null = null;
@@ -10,12 +10,19 @@ export class ShortcutManager {
     public onZoomDown: (() => void) | null = null;
     public onZoomUp: (() => void) | null = null;
 
-    // === NUEVOS: Eventos para Rotación (Tecla R) ===
     public onRotateDown: (() => void) | null = null;
     public onRotateUp: (() => void) | null = null;
 
     public onPencil: (() => void) | null = null;
     public onEraser: (() => void) | null = null;
+
+    // === NUEVOS ===
+    public onFlipHorizontal: (() => void) | null = null;
+    public onAltDown: (() => void) | null = null;
+    public onAltUp: (() => void) | null = null;
+
+    // === NUEVO: Escape para limpiar selecciones ===
+    public onEscape: (() => void) | null = null;
 
     constructor() {
         this.bindEvents();
@@ -26,40 +33,59 @@ export class ShortcutManager {
         window.addEventListener('keyup', this.handleKeyUp.bind(this), { passive: false });
     }
 
-    // En el método handleKeyDown:
     private handleKeyDown(e: KeyboardEvent) {
+        // === ESCAPE ===
+        if (e.code === 'Escape') {
+            e.preventDefault();
+            this.onEscape?.();
+            return;
+        }
+        // Atajo del Gotero (Alt)
+        if (e.code === 'AltLeft' || e.code === 'AltRight') {
+            e.preventDefault();
+            if (!e.repeat) this.onAltDown?.();
+            return;
+        }
+
         if (e.code === 'Space') {
             e.preventDefault();
-            if (!e.repeat && this.onSpaceDown) this.onSpaceDown();
+            if (!e.repeat) this.onSpaceDown?.();
             return;
         }
         if (e.code === 'KeyZ' && !e.ctrlKey && !e.metaKey) {
             e.preventDefault();
-            if (!e.repeat && this.onZoomDown) this.onZoomDown();
+            if (!e.repeat) this.onZoomDown?.();
             return;
         }
         if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
             e.preventDefault();
-            if (!e.repeat && this.onRotateDown) this.onRotateDown();
+            if (!e.repeat) this.onRotateDown?.();
             return;
         }
 
         const isModifierPressed = e.ctrlKey || e.metaKey;
 
-        // === NUEVOS ATAJOS (SIN MODIFICADORES) ===
+        // === TECLAS SIN MODIFICADOR (Aquí estaba el código inalcanzable) ===
         if (!isModifierPressed) {
             const key = e.key.toLowerCase();
+
             if (key === 'b') {
-                if (this.onPencil) this.onPencil();
+                this.onPencil?.(); // El ?.() evita el error de "posibly null"
                 return;
             }
             if (key === 'e') {
-                if (this.onEraser) this.onEraser();
+                this.onEraser?.();
                 return;
             }
-            return;
+            if (key === 'h') {
+                this.onFlipHorizontal?.();
+                return;
+            }
+
+            return; // ESTE return corta la ejecución. Todo lo de arriba debe estar antes de él.
         }
 
+        // === TECLAS CON MODIFICADOR (Ctrl / Cmd) ===
         const key = e.key.toLowerCase();
 
         if (key === '+' || key === '-' || key === '=' || key === '0') {
@@ -70,39 +96,42 @@ export class ShortcutManager {
             e.preventDefault();
             e.stopPropagation();
             if (e.shiftKey) {
-                if (this.onRedo) this.onRedo();
+                this.onRedo?.();
             } else {
-                if (this.onUndo) this.onUndo();
+                this.onUndo?.();
             }
             return;
         }
         if (key === 'y') {
             e.preventDefault();
             e.stopPropagation();
-            if (this.onRedo) this.onRedo();
+            this.onRedo?.();
             return;
         }
         if (key === 's') {
             e.preventDefault();
             e.stopPropagation();
-            if (this.onSave) this.onSave();
+            this.onSave?.();
             return;
         }
     }
 
     private handleKeyUp(e: KeyboardEvent) {
+        if (e.code === 'AltLeft' || e.code === 'AltRight') {
+            e.preventDefault();
+            this.onAltUp?.();
+        }
         if (e.code === 'Space') {
             e.preventDefault();
-            if (this.onSpaceUp) this.onSpaceUp();
+            this.onSpaceUp?.();
         }
         if (e.code === 'KeyZ') {
             e.preventDefault();
-            if (this.onZoomUp) this.onZoomUp();
+            this.onZoomUp?.();
         }
-        // === SOLTAR TECLA R ===
         if (e.code === 'KeyR') {
             e.preventDefault();
-            if (this.onRotateUp) this.onRotateUp();
+            this.onRotateUp?.();
         }
     }
 

@@ -1,10 +1,7 @@
-// src/core/CanvasEngine.ts
+// src/core/engine/CanvasEngine.ts
 export class CanvasEngine {
     public container: HTMLDivElement;
-
-    // === NUEVO CONTENEDOR MÓVIL ===
     public transformContainer: HTMLDivElement;
-
     public width: number;
     public height: number;
 
@@ -25,25 +22,22 @@ export class CanvasEngine {
         this.container.style.height = `${this.height}px`;
         this.container.style.touchAction = 'none';
         this.container.style.userSelect = 'none';
-        this.container.style.overflow = 'hidden'; // Evita que se vea el lienzo cuando paneas fuera del recuadro
+        this.container.style.overflow = 'hidden';
 
-        // === CREAMOS EL CONTENEDOR DE TRANSFORMACIÓN ===
         this.transformContainer = document.createElement('div');
         this.transformContainer.style.position = 'absolute';
         this.transformContainer.style.width = '100%';
         this.transformContainer.style.height = '100%';
-        this.transformContainer.style.transformOrigin = '0 0'; // Crucial para que el zoom nazca desde la esquina
+        this.transformContainer.style.transformOrigin = '0 0';
         this.container.appendChild(this.transformContainer);
 
         this.paintingCanvas = document.createElement('canvas');
         this.setupCanvasDimensions(this.paintingCanvas);
         this.paintingCanvas.style.zIndex = '10000';
         this.paintingCanvas.style.pointerEvents = 'none';
-        this.paintingContext = this.paintingCanvas.getContext('2d', { willReadFrequently: true })!;
+        this.paintingContext = this.paintingCanvas.getContext('2d')!;
 
-        // Apendamos al transformContainer en lugar del main container
         this.transformContainer.appendChild(this.paintingCanvas);
-
         this.addLayer();
     }
 
@@ -63,7 +57,6 @@ export class CanvasEngine {
         layer.style.zIndex = this.layers.length.toString();
 
         this.layers.push(layer);
-        // Apendamos al transformContainer
         this.transformContainer.insertBefore(layer, this.paintingCanvas);
 
         this.activeLayerIndex = this.layers.length - 1;
@@ -76,7 +69,17 @@ export class CanvasEngine {
 
     public commitPaintingCanvas() {
         const activeContext = this.getActiveLayerContext();
+
+        // === BLINDAJE CONTRA CORRUPCIÓN DE OPACIDAD ===
+        activeContext.save();
+        activeContext.globalAlpha = 1.0; // Transfiere el dibujo exactamente como se ve, sin atenuarlo
+        activeContext.globalCompositeOperation = 'source-over';
+
         activeContext.drawImage(this.paintingCanvas, 0, 0);
+
+        activeContext.restore(); // Quitamos el candado
+        // ==============================================
+
         this.clearPaintingCanvas();
     }
 

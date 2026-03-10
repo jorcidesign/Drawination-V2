@@ -1,4 +1,4 @@
-// src/core/StorageManager.ts
+// src/storage/StorageManager.ts
 import type { TimelineEvent } from '../history/HistoryManager';
 
 export class StorageManager {
@@ -52,8 +52,7 @@ export class StorageManager {
         });
     }
 
-    // === NUEVO: Recuperador Quirúrgico ===
-    // Busca un solo trazo en el disco y lo descomprime al vuelo
+    // === LA FUNCIÓN QUE VITE NO ESTABA ENCONTRANDO ===
     public async loadEventData(id: string): Promise<ArrayBuffer | null> {
         if (!this.db) return null;
         return new Promise((resolve, reject) => {
@@ -83,10 +82,8 @@ export class StorageManager {
             request.onsuccess = async () => {
                 const events = request.result as TimelineEvent[];
                 events.sort((a, b) => a.timestamp - b.timestamp);
-                // Al cargar la app por primera vez, NO descomprimimos la data (ahorramos RAM).
-                // Dejamos que el Controller pida los datos solo cuando los necesite pintar.
                 for (const ev of events) {
-                    ev.data = null; // Vaciamos la RAM inicial
+                    ev.data = null;
                 }
                 resolve(events);
             };

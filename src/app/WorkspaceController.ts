@@ -1,23 +1,19 @@
-// src/controllers/WorkspaceController.ts
+// src/app/WorkspaceController.ts
 import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { InputManager } from '../input/InputManager';
 import type { ShortcutManager } from '../input/ShortcutManager';
 import type { HistoryManager } from '../history/HistoryManager';
 import type { TimelapsePlayer } from '../history/TimelapsePlayer';
-// === CAMBIAMOS EL IMPORT ===
 import type { BrushEngine } from '../core/render/BrushEngine';
 import { InkProfile } from '../core/render/profiles/InkProfile';
 import { PencilProfile } from '../core/render/profiles/PencilProfiles';
 import { FillProfile } from '../core/render/profiles/FillProfile';
-// import { HardEraserProfile } from '../core/render/profiles/HardEraserProfile';
 import type { IBrushProfile } from '../core/render/profiles/IBrushProfile';
 import type { StorageManager } from '../storage/StorageManager';
 import type { ViewportManager } from '../core/camera/ViewportManager';
 import type { EventBus } from '../input/EventBus';
-import { BBoxUtils, type BoundingBox } from '../core/math/BoundingBox';
 import { BinarySerializer } from '../core/io/BinarySerializer';
 
-// Imports de Herramientas
 import { ToolManager } from '../tools/core/ToolManager';
 import { PanTool } from '../tools/interaction/PanTool';
 import { ZoomTool } from '../tools/interaction/ZoomTool';
@@ -25,6 +21,8 @@ import { RotateTool } from '../tools/interaction/RotateTool';
 import { PencilTool } from '../tools/draw/PencilTool';
 import { EraserTool } from '../tools/draw/EraserTool';
 import { HardEraserProfile } from '../core/render/profiles/HardEraserProfile';
+import { MoveTool } from '../tools/interaction/MoveTool'; // <--- IMPORTACIÓN DE MOVER
+import { LassoTool } from '../tools/interaction/LassoTool';
 
 export class WorkspaceController {
     private engine: CanvasEngine;
@@ -37,34 +35,21 @@ export class WorkspaceController {
     private viewport: ViewportManager;
     private eventBus: EventBus;
 
-    // === EL NUEVO GESTOR DE ESTADOS ===
+    private isRebuilding = false;
     private toolManager: ToolManager;
-    // === NUEVO: Memoria del último perfil de dibujo usado ===
     private lastDrawingProfile: IBrushProfile = PencilProfile;
+
     constructor(
-        engine: CanvasEngine,
-        input: InputManager,
-        shortcuts: ShortcutManager,
-        history: HistoryManager,
-        timelapse: TimelapsePlayer,
-        activeBrush: BrushEngine,
-        storage: StorageManager,
-        viewport: ViewportManager,
-        eventBus: EventBus
+        engine: CanvasEngine, input: InputManager, shortcuts: ShortcutManager,
+        history: HistoryManager, timelapse: TimelapsePlayer, activeBrush: BrushEngine,
+        storage: StorageManager, viewport: ViewportManager, eventBus: EventBus
     ) {
-        this.engine = engine;
-        this.input = input;
-        this.shortcuts = shortcuts;
-        this.history = history;
-        this.timelapse = timelapse;
-        this.activeBrush = activeBrush;
-        this.storage = storage;
-        this.viewport = viewport;
-        this.eventBus = eventBus;
+        this.engine = engine; this.input = input; this.shortcuts = shortcuts;
+        this.history = history; this.timelapse = timelapse; this.activeBrush = activeBrush;
+        this.storage = storage; this.viewport = viewport; this.eventBus = eventBus;
 
         this.toolManager = new ToolManager();
         this.setupTools();
-
         this.bindEvents();
         this.bindBusEvents();
         this.bootUp();
@@ -72,19 +57,17 @@ export class WorkspaceController {
 
     private setupTools() {
         const ctx = {
-            engine: this.engine,
-            viewport: this.viewport,
-            history: this.history,
-            storage: this.storage,
-            activeBrush: this.activeBrush
+            engine: this.engine, viewport: this.viewport, history: this.history,
+            storage: this.storage, activeBrush: this.activeBrush
         };
 
         this.toolManager.registerTool(new PanTool(ctx));
         this.toolManager.registerTool(new ZoomTool(ctx));
         this.toolManager.registerTool(new RotateTool(ctx));
         this.toolManager.registerTool(new PencilTool(ctx));
-        this.toolManager.registerTool(new EraserTool(ctx)); // NUEVA
-
+        this.toolManager.registerTool(new EraserTool(ctx));
+        this.toolManager.registerTool(new MoveTool(ctx)); // <--- REGISTRAR MOVER
+        this.toolManager.registerTool(new LassoTool(ctx));
         this.toolManager.setDefaultTool('pencil');
     }
 
@@ -100,28 +83,59 @@ export class WorkspaceController {
 
     private syncUI() {
         this.eventBus.emit('SYNC_UI_SLIDERS', {
-            size: this.activeBrush.profile.baseSize,
-            opacity: this.activeBrush.profile.baseOpacity
+            size: this.activeBrush.profile.baseSize, opacity: this.activeBrush.profile.baseOpacity
         });
     }
 
-    private async rebuildCanvas(dirtyRegion?: BoundingBox) {
-        const ctx = this.engine.getActiveLayerContext();
-        const activeCommands = this.history.getActiveCommands(this.activeBrush);
+    private async rebuildCanvas() {
+        if (this.isRebuilding) return;
+        this.isRebuilding = true;
 
-        // BORRADO TOTAL: Adiós bugs de rectángulos y recortes.
-        ctx.save();
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.globalAlpha = 1.0;
-        this.engine.clearActiveLayer();
-        ctx.restore();
+        try {
+            const ctx = this.engine.getActiveLayerContext();
+            const activeCommands = this.history.getActiveCommands(this.activeBrush);
 
-        // REDIBUJADO RELÁMPAGO
-        for (const command of activeCommands) {
-            await command.loadDataIfNeeded(this.storage);
-            command.execute(ctx);
+            let snapshot: ImageBitmap | null = null;
+            let startIndex = 0;
+
+            for (let i = activeCommands.length - 1; i >= 0; i--) {
+                snapshot = await this.history.cacheManager.getSnapshot(activeCommands[i].id);
+                if (snapshot) {
+                    startIndex = i + 1;
+                    break;
+                }
+            }
+
+            for (let i = startIndex; i < activeCommands.length; i++) {
+                await activeCommands[i].loadDataIfNeeded(this.storage);
+            }
+
+            ctx.save();
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.globalAlpha = 1.0;
+            this.engine.clearActiveLayer();
+            ctx.restore();
+
+            if (snapshot) ctx.drawImage(snapshot, 0, 0);
+
+            // En WorkspaceController.ts, dentro de rebuildCanvas():
+            for (let i = startIndex; i < activeCommands.length; i++) {
+                const command = activeCommands[i];
+
+                // ACTUALIZADO: ERASE y MOVE actúan sobre la capa final
+                if (command.type === 'ERASE' || command.type === 'MOVE') {
+                    command.execute(ctx);
+                } else {
+                    this.engine.clearPaintingCanvas();
+                    command.execute(this.engine.paintingContext);
+                    this.engine.commitPaintingCanvas();
+                }
+            }
+        } finally {
+            this.isRebuilding = false;
         }
     }
+
     private debugDrawPoints() {
         const ctx = this.engine.getActiveLayerContext();
         const activeCommands = this.history.getActiveCommands(this.activeBrush);
@@ -143,23 +157,22 @@ export class WorkspaceController {
     private bindEvents() {
         this.shortcuts.onUndo = async () => {
             if (this.timelapse.isPlaying || this.toolManager.activeTool.isBusy()) return;
-            const dirtyRegion = this.history.applyUndo();
-            if (dirtyRegion) {
-                await this.rebuildCanvas(dirtyRegion);
+            const undoneBbox = this.history.applyUndo();
+            if (undoneBbox) {
+                await this.rebuildCanvas();
                 this.storage.saveEvent(this.history.timeline[this.history.timeline.length - 1]);
             }
         };
 
         this.shortcuts.onRedo = async () => {
             if (this.timelapse.isPlaying || this.toolManager.activeTool.isBusy()) return;
-            const dirtyRegion = this.history.applyRedo();
-            if (dirtyRegion) {
-                await this.rebuildCanvas(dirtyRegion);
+            const redoneBbox = this.history.applyRedo();
+            if (redoneBbox) {
+                await this.rebuildCanvas();
                 this.storage.saveEvent(this.history.timeline[this.history.timeline.length - 1]);
             }
         };
 
-        // === CAMBIO DINÁMICO DE HERRAMIENTAS ===
         this.shortcuts.onSpaceDown = () => this.toolManager.switchTool('pan');
         this.shortcuts.onSpaceUp = () => this.toolManager.revertTool();
 
@@ -169,7 +182,19 @@ export class WorkspaceController {
         this.shortcuts.onRotateDown = () => this.toolManager.switchTool('rotate');
         this.shortcuts.onRotateUp = () => this.toolManager.revertTool();
 
-        // === RUTA DE INPUT DELEGADA AL STATE ===
+        let isPickingColor = false;
+
+        this.shortcuts.onAltDown = () => {
+            if (this.timelapse.isPlaying || this.toolManager.activeTool.isBusy()) return;
+            isPickingColor = true;
+            this.engine.container.style.cursor = 'crosshair';
+        };
+
+        this.shortcuts.onAltUp = () => {
+            isPickingColor = false;
+            this.toolManager.activeTool.onActivate();
+        };
+
         this.input.onWheel = (e, data) => {
             if (this.timelapse.isPlaying) return;
             const isZoom = e.ctrlKey || e.metaKey;
@@ -181,66 +206,105 @@ export class WorkspaceController {
             }
         };
 
+        const originalPointerDown = this.input.onPointerDown;
+
         this.input.onPointerDown = (data) => {
             if (this.timelapse.isPlaying) return;
+
+            if (isPickingColor) {
+                const canvasPos = this.viewport.screenToCanvas(data.x, data.y);
+                const activeCtx = this.engine.getActiveLayerContext();
+                const pixel = activeCtx.getImageData(canvasPos.x, canvasPos.y, 1, 1).data;
+
+                if (pixel[3] > 0) {
+                    const hex = '#' + [pixel[0], pixel[1], pixel[2]].map(x => {
+                        const h = x.toString(16);
+                        return h.length === 1 ? '0' + h : h;
+                    }).join('');
+
+                    this.eventBus.emit('SET_COLOR', hex);
+                    console.log(`🎨 Color robado: ${hex}`);
+                }
+                return;
+            }
+
             this.toolManager.activeTool.onPointerDown(data);
         };
 
         this.input.onPointerMove = (data) => {
-            if (this.timelapse.isPlaying) return;
+            if (this.timelapse.isPlaying || isPickingColor) return;
             this.toolManager.activeTool.onPointerMove(data);
         };
 
         this.input.onPointerUp = (data) => {
-            if (this.timelapse.isPlaying) return;
+            if (this.timelapse.isPlaying || isPickingColor) return;
             this.toolManager.activeTool.onPointerUp(data);
         };
 
-        // 2. En bindEvents(), conecta las teclas:
         this.shortcuts.onPencil = () => {
-            this.toolManager.switchTool('pencil');
-            this.toolManager.setDefaultTool('pencil');
-        };
-        this.shortcuts.onEraser = () => {
-            this.toolManager.switchTool('eraser');
-            this.toolManager.setDefaultTool('eraser');
-        };
-
-        // 3. En bindBusEvents(), conecta los botones de la UI:
-        this.eventBus.on('SET_TOOL_PENCIL', () => {
-            this.toolManager.switchTool('pencil');
-            this.toolManager.setDefaultTool('pencil');
-        });
-
-        this.eventBus.on('SET_TOOL_ERASER', () => {
-            this.toolManager.switchTool('eraser');
-            this.toolManager.setDefaultTool('eraser');
-        });
-
-        // 2. En bindEvents(), conecta las teclas:
-        this.shortcuts.onPencil = () => {
-            // Regresamos al pincel, PERO cargamos el perfil que usábamos antes (Tinta o Lápiz)
             this.activeBrush.setProfile(this.lastDrawingProfile);
             this.toolManager.switchTool('pencil');
             this.toolManager.setDefaultTool('pencil');
-            this.syncUI(); // Actualizamos los sliders
+            this.syncUI();
         };
+
         this.shortcuts.onEraser = () => {
-            // Cambiamos a borrador duro
             this.activeBrush.setProfile(HardEraserProfile);
             this.toolManager.switchTool('eraser');
             this.toolManager.setDefaultTool('eraser');
-            this.syncUI(); // Actualizamos los sliders
+            this.syncUI();
         };
+
+        this.shortcuts.onFlipHorizontal = () => {
+            this.eventBus.emit('FLIP_HORIZONTAL');
+        };
+
+        // === TECLA V PARA MOVER ===
+        window.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey) {
+                this.toolManager.switchTool('move');
+                this.toolManager.setDefaultTool('move');
+            }
+        });
+
+        // window.addEventListener('keydown', (e) => {
+        //     if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey) {
+        //         this.toolManager.switchTool('lasso');
+        //         this.toolManager.setDefaultTool('lasso');
+        //     }
+        // });
+
+        this.shortcuts.onEscape = () => {
+            if (this.toolManager.activeTool.id === 'lasso') {
+                this.toolManager.revertTool(); // Sale del lazo y limpia la pantalla
+            }
+        };
+
+        // === TECLA L (LAZO MAGICO) ===
+        window.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey) {
+                this.toolManager.switchTool('lasso');
+                this.toolManager.setDefaultTool('lasso');
+            }
+        });
     }
 
     private bindBusEvents() {
-        this.eventBus.on('PLAY_TIMELAPSE', () => {
-            if (this.timelapse.isPlaying || this.toolManager.activeTool.isBusy()) return;
-            const activeStrokes = this.history.getActiveEvents();
-            if (activeStrokes.length > 0) this.timelapse.play(activeStrokes, this.activeBrush, 30);
+        // === ESCUCHAR EVENTO DESDE LA HERRAMIENTA MOVE ===
+        // document.addEventListener('DRAWINATION_FORCE_REBUILD', () => {
+        //     this.rebuildCanvas();
+        // });
+
+        document.addEventListener('DRAWINATION_FORCE_REBUILD', () => {
+            this.rebuildCanvas();
         });
 
+        this.eventBus.on('PLAY_TIMELAPSE', () => {
+            if (this.timelapse.isPlaying || this.toolManager.activeTool.isBusy()) return;
+            // AHORA MANDAMOS LA ESPINA COMPLETA (Trazos + Transformaciones)
+            const spine = this.history.getTimelineSpine();
+            if (spine.length > 0) this.timelapse.play(spine, this.activeBrush, 30);
+        });
         this.eventBus.on('DEBUG_DRAW_POINTS', () => {
             this.debugDrawPoints();
         });
@@ -257,6 +321,7 @@ export class WorkspaceController {
             this.history.timeline = [];
             this.history.spatialGrid.clear();
             this.engine.clearActiveLayer();
+            this.history.cacheManager.clearAll();
         });
 
         this.eventBus.on('SET_TOOL_PENCIL', () => {
@@ -266,7 +331,6 @@ export class WorkspaceController {
             this.syncUI();
         });
 
-        // Seleccionó la herramienta Goma
         this.eventBus.on('SET_TOOL_ERASER', () => {
             this.activeBrush.setProfile(HardEraserProfile);
             this.toolManager.switchTool('eraser');
@@ -274,25 +338,22 @@ export class WorkspaceController {
             this.syncUI();
         });
 
-        // Cambió de perfil (Tinta)
         this.eventBus.on('SET_PROFILE_INK', () => {
-            this.lastDrawingProfile = InkProfile; // Memorizamos
+            this.lastDrawingProfile = InkProfile;
             this.activeBrush.setProfile(InkProfile);
             this.toolManager.switchTool('pencil');
             this.toolManager.setDefaultTool('pencil');
             this.syncUI();
         });
 
-        // Cambió de perfil (Lápiz)
         this.eventBus.on('SET_PROFILE_PENCIL', () => {
-            this.lastDrawingProfile = PencilProfile; // Memorizamos
+            this.lastDrawingProfile = PencilProfile;
             this.activeBrush.setProfile(PencilProfile);
             this.toolManager.switchTool('pencil');
             this.toolManager.setDefaultTool('pencil');
             this.syncUI();
         });
 
-        // Sliders
         this.eventBus.on('UPDATE_BRUSH_SIZE', (size: number) => {
             this.activeBrush.profile.baseSize = size;
             this.activeBrush.setProfile(this.activeBrush.profile);
@@ -303,22 +364,25 @@ export class WorkspaceController {
         });
 
         this.eventBus.on('SET_COLOR', (colorHex: string) => {
-            // Le pasamos el color al motor, lo cual regenerará el sello teñido
             this.activeBrush.setColor(colorHex);
-
-            // Si el usuario eligió un color, probablemente quiera volver a dibujar
-            // (por si estaba usando el borrador)
             this.activeBrush.setProfile(this.lastDrawingProfile);
             this.toolManager.switchTool('pencil');
             this.toolManager.setDefaultTool('pencil');
             this.syncUI();
         });
+
         this.eventBus.on('SET_PROFILE_FILL', () => {
             this.lastDrawingProfile = FillProfile;
             this.activeBrush.setProfile(FillProfile);
             this.toolManager.switchTool('pencil');
             this.toolManager.setDefaultTool('pencil');
             this.syncUI();
+        });
+
+        this.eventBus.on('FLIP_HORIZONTAL', () => {
+            if (this.toolManager.activeTool.isBusy()) return;
+            const rect = this.engine.container.getBoundingClientRect();
+            this.viewport.flipHorizontal(rect.width / 2, rect.height / 2);
         });
     }
 }

@@ -28,9 +28,10 @@ export class DebugToolbar {
 
     private buildButtons() {
         // Herramientas de Dibujo
-        this.createButton('✏️ Pincel (B)', '#2c3e50', () => this.eventBus.emit('SET_TOOL_PENCIL'));
+        // this.createButton('✏️ Pincel (B)', '#2c3e50', () => this.eventBus.emit('SET_TOOL_PENCIL'));
         this.createButton('🧽 Goma (E)', '#2c3e50', () => this.eventBus.emit('SET_TOOL_ERASER'));
         this.createButton('🪣 Relleno', '#8e44ad', () => this.eventBus.emit('SET_PROFILE_FILL'));
+        this.createButton('🪞 Flip (H)', '#e67e22', () => this.eventBus.emit('FLIP_HORIZONTAL'));
 
         // === NUEVO: PALETA DE COLORES (MANGA) ===
         const colorContainer = document.createElement('div');
@@ -73,7 +74,7 @@ export class DebugToolbar {
 
         // Acciones Globales
         this.createButton('▶ Timelapse', '#3498db', () => this.eventBus.emit('PLAY_TIMELAPSE'));
-        this.createButton('🐞 Puntos', '#9b59b6', () => this.eventBus.emit('DEBUG_DRAW_POINTS'));
+        // this.createButton('🐞 Puntos', '#9b59b6', () => this.eventBus.emit('DEBUG_DRAW_POINTS'));
         this.createButton('⬆️ Rot', '#f39c12', () => this.eventBus.emit('RESET_ROTATION'));
         this.createButton('🗑️ Borrar', '#e74c3c', () => {
             if (confirm('¿Seguro?')) this.eventBus.emit('CLEAR_ALL');

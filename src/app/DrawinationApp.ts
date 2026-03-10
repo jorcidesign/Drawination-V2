@@ -36,7 +36,7 @@ export class DrawinationApp {
         if (!container) throw new Error(`Container #${containerId} not found`);
 
         this.eventBus = new EventBus();
-        this.engine = new CanvasEngine(700, 700);
+        this.engine = new CanvasEngine(1180, 1180);
 
         this.engine.container.style.backgroundColor = '#ecf0f1';
         this.engine.transformContainer.style.backgroundColor = '#ffffff';

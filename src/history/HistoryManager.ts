@@ -1,6 +1,5 @@
 // src/history/HistoryManager.ts
 import type { CanvasEngine } from '../core/engine/CanvasEngine';
-// === CAMBIAMOS EL IMPORT ===
 import type { BrushEngine } from '../core/render/BrushEngine';
 import type { StrokePoint } from '../core/io/BinarySerializer';
 import type { BoundingBox } from '../core/math/BoundingBox';
@@ -9,23 +8,29 @@ import { ObjectPool } from '../core/memory/ObjectPool';
 import type { ICommand } from './commands/ICommand';
 import { StrokeCommand } from './commands/StrokeCommand';
 import { EraseCommand } from './commands/EraseCommand';
+import { CacheManager } from './CacheManager';
 
-export type ActionType = 'STROKE' | 'ERASE' | 'FLIP_H' | 'UNDO' | 'REDO' | 'FILL';
+// Tipos oficiales para el Historial No Destructivo
+export type ActionType = 'STROKE' | 'ERASE' | 'FLIP_H' | 'UNDO' | 'REDO' | 'FILL' | 'TRANSFORM';
 
 export interface TimelineEvent {
     id: string;
     type: ActionType;
     toolId: string;
-    profileId: string; // <--- ¡NUEVO!
+    profileId: string;
     layerIndex: number;
     color: string;
     size: number;
-    opacity: number; // <--- ¡NUEVO!
+    opacity: number;
     timestamp: number;
     data: ArrayBuffer | null;
     compressedData?: ArrayBuffer;
     isCompressed?: boolean;
     bbox?: BoundingBox;
+    // NUEVOS: Para guardar el movimiento sin tocar los vectores
+    targetIds?: string[];
+    transformDx?: number;
+    transformDy?: number;
 }
 
 export class HistoryManager {
@@ -40,19 +45,48 @@ export class HistoryManager {
     private currentBrushData = { color: '', size: 0, opacity: 0, type: 'STROKE' as ActionType, profileId: '' };
 
     private worker: Worker;
+    public cacheManager: CacheManager;
 
     private readonly MAX_RAM_EVENTS = 50;
 
     constructor(engine: CanvasEngine) {
         this.engine = engine;
         this.worker = new Worker(new URL('../workers/CompressionWorker.ts', import.meta.url), { type: 'module' });
+        this.cacheManager = new CacheManager(this.engine.width, this.engine.height);
+    }
+
+    // === TRANSFORMACIONES NO DESTRUCTIVAS ===
+    public async commitTransform(targetIds: string[], dx: number, dy: number): Promise<TimelineEvent> {
+        const event: TimelineEvent = {
+            id: crypto.randomUUID(), type: 'TRANSFORM', toolId: 'lasso', profileId: 'system',
+            layerIndex: this.engine.activeLayerIndex, color: '', size: 0, opacity: 1,
+            timestamp: Date.now(), data: null,
+            targetIds: targetIds, transformDx: dx, transformDy: dy
+        };
+        this.timeline.push(event);
+        this.enforceRamLimit();
+
+        // Rompemos el caché porque el pasado cambió visualmente y necesita recalcularse
+        this.cacheManager.clearAll();
+        return event;
     }
 
     public rebuildSpatialGrid() {
         this.spatialGrid.clear();
-        for (const event of this.timeline) {
-            if (event.type === 'STROKE' && event.bbox) {
-                this.spatialGrid.insert(event.id, event.bbox);
+        const { active, transforms } = this.computeTimelineState();
+
+        for (const event of active) {
+            if ((event.type === 'STROKE' || event.type === 'ERASE') && event.bbox) {
+                const t = transforms.get(event.id);
+                if (t) {
+                    // Si el trazo fue transformado, movemos su hitbox en la grilla espacial
+                    this.spatialGrid.insert(event.id, {
+                        minX: event.bbox.minX + t.dx, minY: event.bbox.minY + t.dy,
+                        maxX: event.bbox.maxX + t.dx, maxY: event.bbox.maxY + t.dy,
+                    });
+                } else {
+                    this.spatialGrid.insert(event.id, event.bbox);
+                }
             }
         }
     }
@@ -71,7 +105,6 @@ export class HistoryManager {
         this.currentStrokeStart = performance.now();
         this.currentToolId = toolId;
 
-        // ¡Cápsula del tiempo activada! Guardamos size, color y opacity del momento exacto
         this.currentBrushData = {
             color: brush.color,
             size: brush.profile.baseSize,
@@ -86,8 +119,32 @@ export class HistoryManager {
     public addPoint(x: number, y: number, pressure: number) {
         if (this.currentRawPoints.length === 0) return;
         const t = Math.round(performance.now() - this.currentStrokeStart);
-
         this.currentRawPoints.push(ObjectPool.getStrokePoint(x, y, pressure, t));
+    }
+
+    private async printSystemDiagnostics(actionTimeMs: number) {
+        const estimate = navigator.storage && navigator.storage.estimate
+            ? await navigator.storage.estimate()
+            : { usage: 0, quota: 0 };
+
+        const usageMB = (estimate.usage || 0) / (1024 * 1024);
+        const quotaMB = (estimate.quota || 0) / (1024 * 1024);
+
+        let jsHeap = 0;
+        if ((performance as any).memory) {
+            jsHeap = (performance as any).memory.usedJSHeapSize / (1024 * 1024);
+        }
+
+        const memSnaps = this.cacheManager.getStats ? this.cacheManager.getStats().memoryCacheSize : 0;
+        const totalEvents = this.getActiveEvents().length;
+        const bytesRam = this.timeline.reduce((acc, ev) => acc + (ev.data ? ev.data.byteLength : 0), 0);
+
+        console.groupCollapsed(`%c🖌️ Trazo #${totalEvents} procesado en ${actionTimeMs.toFixed(1)}ms`, 'color: #00d2ff; font-weight: bold;');
+        console.log(`%c💾 Disco (IndexedDB): %c${usageMB.toFixed(2)} MB usados %c(de ${quotaMB.toFixed(0)} MB disp.)`, 'font-weight: bold;', 'color: #ffaa00;', 'color: gray;');
+        console.log(`%c🧠 Memoria RAM (V8): %c${jsHeap > 0 ? jsHeap.toFixed(2) + ' MB' : 'No soportado'}`, 'font-weight: bold;', 'color: #00ff00;');
+        console.log(`%c⚡ Caché Híbrido: %c${memSnaps} / 20 fotos en RAM`, 'font-weight: bold;', 'color: #00ff00;');
+        console.log(`%c🗜️ Vectores en VIVO: %c${(bytesRam / 1024).toFixed(2)} KB en RAM activa`, 'font-weight: bold;', 'color: #ff00ff;');
+        console.groupEnd();
     }
 
     public async commitStroke(): Promise<TimelineEvent | null> {
@@ -99,6 +156,7 @@ export class HistoryManager {
         const layerIndex = this.engine.activeLayerIndex;
 
         this.currentRawPoints = [];
+        const startTime = performance.now();
 
         return new Promise((resolve) => {
             const msgId = crypto.randomUUID();
@@ -111,11 +169,11 @@ export class HistoryManager {
                         id: msgId,
                         type: brushData.type,
                         toolId: toolId,
-                        profileId: brushData.profileId, // <--- ¡NUEVO!
+                        profileId: brushData.profileId,
                         layerIndex: layerIndex,
                         color: brushData.color,
                         size: brushData.size,
-                        opacity: brushData.opacity, // <--- ¡NUEVO!
+                        opacity: brushData.opacity,
                         timestamp: Date.now(),
                         data: e.data.binaryData,
                         compressedData: e.data.compressedData,
@@ -125,11 +183,20 @@ export class HistoryManager {
 
                     this.timeline.push(event);
 
-                    if (event.bbox) {
+                    if (event.bbox && (event.type === 'STROKE' || event.type === 'ERASE')) {
                         this.spatialGrid.insert(event.id, event.bbox);
                     }
 
                     this.enforceRamLimit();
+
+                    const active = this.getActiveEvents();
+                    if (active.length > 0 && active.length % 20 === 0) {
+                        const activeCanvas = this.engine.getActiveLayerContext().canvas;
+                        this.cacheManager.bake(event.id, activeCanvas);
+                    }
+
+                    const timeTaken = performance.now() - startTime;
+                    this.printSystemDiagnostics(timeTaken);
                     resolve(event);
                 }
             };
@@ -140,13 +207,13 @@ export class HistoryManager {
     }
 
     public applyUndo(): BoundingBox | null {
-        const activeEvents = this.getActiveEventsRaw();
-        if (activeEvents.length === 0) return null;
+        const { active } = this.computeTimelineState();
+        if (active.length === 0) return null;
 
-        const lastEvent = activeEvents[activeEvents.length - 1];
+        const lastEvent = active[active.length - 1];
 
         this.timeline.push({
-            id: crypto.randomUUID(), type: 'UNDO', toolId: 'system', profileId: 'system', // <--- ¡NUEVO!
+            id: crypto.randomUUID(), type: 'UNDO', toolId: 'system', profileId: 'system',
             layerIndex: this.engine.activeLayerIndex, color: '', size: 0,
             timestamp: Date.now(), data: null, bbox: lastEvent.bbox,
             opacity: 1
@@ -156,13 +223,13 @@ export class HistoryManager {
     }
 
     public applyRedo(): BoundingBox | null {
-        const undoneEvents = this.getUndoneEventsRaw();
-        if (undoneEvents.length === 0) return null;
+        const { undone } = this.computeTimelineState();
+        if (undone.length === 0) return null;
 
-        const nextRedo = undoneEvents[undoneEvents.length - 1];
+        const nextRedo = undone[undone.length - 1];
 
         this.timeline.push({
-            id: crypto.randomUUID(), type: 'UNDO', toolId: 'system', profileId: 'system', // <--- ¡NUEVO!
+            id: crypto.randomUUID(), type: 'REDO', toolId: 'system', profileId: 'system',
             layerIndex: this.engine.activeLayerIndex, color: '', size: 0,
             timestamp: Date.now(), data: null, bbox: nextRedo.bbox,
             opacity: 1
@@ -171,58 +238,60 @@ export class HistoryManager {
         return nextRedo.bbox || null;
     }
 
-    // ====================================================================
-    // LA MAGIA DEL PATRÓN COMMAND OCURRE AQUÍ
-    // Devolvemos ICommand (objetos inteligentes) en lugar de TimelineEvent (objetos tontos)
-    // ====================================================================
     public getActiveCommands(brush: BrushEngine): ICommand[] {
-        const active = this.getActiveEventsRaw();
+        const { active, transforms } = this.computeTimelineState();
 
         return active.map(ev => {
-            if (ev.type === 'ERASE') {
-                return new EraseCommand(ev, brush);
+            let cmd: ICommand;
+            if (ev.type === 'ERASE') cmd = new EraseCommand(ev, brush);
+            else cmd = new StrokeCommand(ev, brush);
+
+            const t = transforms.get(ev.id);
+            if (t) {
+                cmd.dx = t.dx;
+                cmd.dy = t.dy;
             }
-            return new StrokeCommand(ev, brush);
+            return cmd;
         });
     }
-    // Mantenemos esta función pública si el Storage o la UI necesitan la data cruda,
-    // pero el motor de renderizado debe usar getActiveCommands()
-    public getActiveEvents(): TimelineEvent[] {
-        return this.getActiveEventsRaw();
-    }
 
-    // Funciones helper privadas para calcular el estado actual de la línea de tiempo
-    private getActiveEventsRaw(): TimelineEvent[] {
-        const active: TimelineEvent[] = [];
+    public getActiveEvents(): TimelineEvent[] { return this.computeTimelineState().active; }
+
+    public getTimelineSpine(): TimelineEvent[] { return this.computeTimelineState().spine; }
+
+    public computeTimelineState() {
+        const spine: TimelineEvent[] = [];
         const undone: TimelineEvent[] = [];
 
+        // Fase 1: Resolver Ctrl+Z / Ctrl+Y
         for (const event of this.timeline) {
-            if (event.type === 'STROKE' || event.type === 'ERASE') {
-                active.push(event);
-                undone.length = 0;
-            } else if (event.type === 'UNDO') {
-                if (active.length > 0) undone.push(active.pop()!);
+            if (event.type === 'UNDO') {
+                if (spine.length > 0) undone.push(spine.pop()!);
             } else if (event.type === 'REDO') {
-                if (undone.length > 0) active.push(undone.pop()!);
+                if (undone.length > 0) spine.push(undone.pop()!);
+            } else {
+                spine.push(event);
+                undone.length = 0;
             }
         }
-        return active;
-    }
 
-    private getUndoneEventsRaw(): TimelineEvent[] {
+        // Fase 2: Acumular transformaciones
         const active: TimelineEvent[] = [];
-        const undone: TimelineEvent[] = [];
+        const transforms = new Map<string, { dx: number, dy: number }>();
 
-        for (const event of this.timeline) {
-            if (event.type === 'STROKE' || event.type === 'ERASE') {
-                active.push(event);
-                undone.length = 0;
-            } else if (event.type === 'UNDO') {
-                if (active.length > 0) undone.push(active.pop()!);
-            } else if (event.type === 'REDO') {
-                if (undone.length > 0) active.push(undone.pop()!);
+        for (const ev of spine) {
+            if (ev.type === 'TRANSFORM' && ev.targetIds) {
+                for (const id of ev.targetIds) {
+                    const current = transforms.get(id) || { dx: 0, dy: 0 };
+                    current.dx += ev.transformDx || 0;
+                    current.dy += ev.transformDy || 0;
+                    transforms.set(id, current);
+                }
+            } else {
+                active.push(ev);
             }
         }
-        return undone;
+
+        return { spine, active, transforms, undone };
     }
 }
