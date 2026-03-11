@@ -1,7 +1,7 @@
 // src/tools/interaction/MoveTool.ts
 import type { ITool, ToolContext } from '../core/ITool';
 import type { PointerData } from '../../input/InputManager';
-
+import { ToolRegistry } from '../core/ToolRegistry';
 export class MoveTool implements ITool {
     public readonly id = 'move';
     private ctx: ToolContext;
@@ -74,3 +74,5 @@ export class MoveTool implements ITool {
         this.snapshot = null;
     }
 }
+
+ToolRegistry.register({ id: 'move', factory: (ctx) => new MoveTool(ctx), downShortcut: 'v', isSticky: true });

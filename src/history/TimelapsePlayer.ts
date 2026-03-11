@@ -4,8 +4,7 @@ import type { BrushEngine } from '../core/render/BrushEngine';
 import type { TimelineEvent } from './HistoryManager';
 import type { StorageManager } from '../storage/StorageManager';
 import type { ICommand } from './commands/ICommand';
-import { StrokeCommand } from './commands/StrokeCommand';
-import { EraseCommand } from './commands/EraseCommand';
+import { CommandFactory } from './commands/CommandFactory';
 
 export class TimelapsePlayer {
     private engine: CanvasEngine;
@@ -25,28 +24,31 @@ export class TimelapsePlayer {
         const ctx = this.engine.getActiveLayerContext();
 
         const drawnCommands: ICommand[] = [];
-        const currentTransforms = new Map<string, { dx: number, dy: number }>();
+        // === NUEVO: Acumulador de Matrices ===
+        const currentTransforms = new Map<string, DOMMatrix>();
 
         console.log(`🎬 Iniciando Timelapse Inteligente...`);
 
         for (const event of spine) {
             if (!this.isPlaying) break;
 
-            // Si es un evento de transformación, actualizamos coordenadas y hacemos FLASH
-            if (event.type === 'TRANSFORM' && event.targetIds) {
+            // === EVENTO DE MATRIZ ===
+            if (event.type === 'TRANSFORM' && event.targetIds && event.transformMatrix) {
+                const newMatrix = new DOMMatrix(event.transformMatrix);
+
                 for (const id of event.targetIds) {
-                    const t = currentTransforms.get(id) || { dx: 0, dy: 0 };
-                    t.dx += event.transformDx || 0;
-                    t.dy += event.transformDy || 0;
-                    currentTransforms.set(id, t);
+                    const current = currentTransforms.get(id) || new DOMMatrix();
+                    current.multiplySelf(newMatrix); // Acumulamos las transformaciones
+                    currentTransforms.set(id, current);
                 }
 
-                // Flash visual: Limpiamos y redibujamos todo a máxima velocidad
+                // Flash visual: Limpiamos y redibujamos todo en su nueva posición
                 this.engine.clearActiveLayer();
                 for (const cmd of drawnCommands) {
                     const t = currentTransforms.get(cmd.id);
-                    cmd.dx = t?.dx || 0;
-                    cmd.dy = t?.dy || 0;
+                    if (t) {
+                        cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                    }
                     cmd.execute(ctx);
                 }
 
@@ -55,15 +57,19 @@ export class TimelapsePlayer {
                 continue;
             }
 
-            // Si es un trazo normal o borrador
+            // === TRAZOS NORMALES ===
             if (event.type === 'STROKE' || event.type === 'ERASE') {
-                let cmd: ICommand;
-                if (event.type === 'ERASE') cmd = new EraseCommand(event, brush);
-                else cmd = new StrokeCommand(event, brush);
-
+                // Usamos la Factory respetando el Principio Open/Closed
+                const cmd = CommandFactory.create(event, brush);
                 await cmd.loadDataIfNeeded(this.storage);
 
-                // Para el timelapse rápido, ejecutamos todo directo en el ctx
+                // Aplicamos la matriz si por alguna razón ya tuviera una
+                const t = currentTransforms.get(cmd.id);
+                if (t) {
+                    cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                }
+
+                // Para el timelapse rápido, ejecutamos todo directo en la capa final
                 cmd.execute(ctx);
                 drawnCommands.push(cmd);
 

@@ -6,11 +6,10 @@ import type { BoundingBox } from '../core/math/BoundingBox';
 import { SpatialHashGrid } from '../core/math/SpatialHashGrid';
 import { ObjectPool } from '../core/memory/ObjectPool';
 import type { ICommand } from './commands/ICommand';
-import { StrokeCommand } from './commands/StrokeCommand';
-import { EraseCommand } from './commands/EraseCommand';
 import { CacheManager } from './CacheManager';
+import { CommandFactory } from './commands/CommandFactory';
+import { DiagnosticsService } from './DiagnosticsService';
 
-// Tipos oficiales para el Historial No Destructivo
 export type ActionType = 'STROKE' | 'ERASE' | 'FLIP_H' | 'UNDO' | 'REDO' | 'FILL' | 'TRANSFORM';
 
 export interface TimelineEvent {
@@ -27,16 +26,14 @@ export interface TimelineEvent {
     compressedData?: ArrayBuffer;
     isCompressed?: boolean;
     bbox?: BoundingBox;
-    // NUEVOS: Para guardar el movimiento sin tocar los vectores
     targetIds?: string[];
-    transformDx?: number;
-    transformDy?: number;
+    transformMatrix?: number[];
+    isSaved?: boolean;
 }
 
 export class HistoryManager {
     private engine: CanvasEngine;
     public timeline: TimelineEvent[] = [];
-
     public spatialGrid = new SpatialHashGrid(128);
 
     private currentRawPoints: StrokePoint[] = [];
@@ -48,26 +45,42 @@ export class HistoryManager {
     public cacheManager: CacheManager;
 
     private readonly MAX_RAM_EVENTS = 50;
+    private unsnapshottedPoints: number = 0;
+    private readonly POINTS_SNAPSHOT_THRESHOLD = 5000;
 
-    constructor(engine: CanvasEngine) {
+    public hiddenEventIds: Set<string> = new Set();
+    private cachedState: { spine: TimelineEvent[], active: TimelineEvent[], transforms: Map<string, DOMMatrix>, undone: TimelineEvent[] } | null = null;
+
+    constructor(engine: CanvasEngine, worker: Worker, cacheManager: CacheManager) {
         this.engine = engine;
-        this.worker = new Worker(new URL('../workers/CompressionWorker.ts', import.meta.url), { type: 'module' });
-        this.cacheManager = new CacheManager(this.engine.width, this.engine.height);
+        this.worker = worker;
+        this.cacheManager = cacheManager;
     }
 
-    // === TRANSFORMACIONES NO DESTRUCTIVAS ===
-    public async commitTransform(targetIds: string[], dx: number, dy: number): Promise<TimelineEvent> {
+    private invalidateCache() {
+        this.cachedState = null;
+    }
+
+    public async commitTransform(targetIds: string[], matrix: number[]): Promise<TimelineEvent> {
+        const startTime = performance.now();
         const event: TimelineEvent = {
             id: crypto.randomUUID(), type: 'TRANSFORM', toolId: 'lasso', profileId: 'system',
             layerIndex: this.engine.activeLayerIndex, color: '', size: 0, opacity: 1,
             timestamp: Date.now(), data: null,
-            targetIds: targetIds, transformDx: dx, transformDy: dy
+            targetIds: targetIds, transformMatrix: matrix,
+            isSaved: false
         };
         this.timeline.push(event);
-        this.enforceRamLimit();
+        this.invalidateCache();
 
-        // Rompemos el caché porque el pasado cambió visualmente y necesita recalcularse
+        // === FIX 1: ACTUALIZAR LA GRILLA PARA QUE EL LAZO NO SE QUEDE CIEGO ===
+        this.rebuildSpatialGrid();
+
         this.cacheManager.clearAll();
+
+        // === FIX 2: MOSTRAR LOGS AL MOVER ===
+        DiagnosticsService.printMetrics(performance.now() - startTime, this, this.cacheManager);
+
         return event;
     }
 
@@ -78,11 +91,10 @@ export class HistoryManager {
         for (const event of active) {
             if ((event.type === 'STROKE' || event.type === 'ERASE') && event.bbox) {
                 const t = transforms.get(event.id);
-                if (t) {
-                    // Si el trazo fue transformado, movemos su hitbox en la grilla espacial
+                if (t && (t.e !== 0 || t.f !== 0 || t.a !== 1 || t.d !== 1)) {
                     this.spatialGrid.insert(event.id, {
-                        minX: event.bbox.minX + t.dx, minY: event.bbox.minY + t.dy,
-                        maxX: event.bbox.maxX + t.dx, maxY: event.bbox.maxY + t.dy,
+                        minX: event.bbox.minX + t.e, minY: event.bbox.minY + t.f,
+                        maxX: event.bbox.maxX + t.e, maxY: event.bbox.maxY + t.f,
                     });
                 } else {
                     this.spatialGrid.insert(event.id, event.bbox);
@@ -91,12 +103,13 @@ export class HistoryManager {
         }
     }
 
-    private enforceRamLimit() {
-        if (this.timeline.length > this.MAX_RAM_EVENTS) {
-            for (let i = 0; i < this.timeline.length - this.MAX_RAM_EVENTS; i++) {
-                if (this.timeline[i].data !== null) {
-                    this.timeline[i].data = null;
-                }
+    public enforceRamLimit() {
+        let activeCount = 0;
+        for (let i = this.timeline.length - 1; i >= 0; i--) {
+            const ev = this.timeline[i];
+            if (ev.data !== null) {
+                activeCount++;
+                if (activeCount > this.MAX_RAM_EVENTS && ev.isSaved) ev.data = null;
             }
         }
     }
@@ -104,15 +117,7 @@ export class HistoryManager {
     public beginStroke(type: ActionType, toolId: string, x: number, y: number, pressure: number, brush: BrushEngine) {
         this.currentStrokeStart = performance.now();
         this.currentToolId = toolId;
-
-        this.currentBrushData = {
-            color: brush.color,
-            size: brush.profile.baseSize,
-            opacity: brush.profile.baseOpacity,
-            type,
-            profileId: brush.profile.id
-        };
-
+        this.currentBrushData = { color: brush.color, size: brush.profile.baseSize, opacity: brush.profile.baseOpacity, type, profileId: brush.profile.id };
         this.currentRawPoints = [ObjectPool.getStrokePoint(x, y, pressure, 0)];
     }
 
@@ -122,148 +127,103 @@ export class HistoryManager {
         this.currentRawPoints.push(ObjectPool.getStrokePoint(x, y, pressure, t));
     }
 
-    private async printSystemDiagnostics(actionTimeMs: number) {
-        const estimate = navigator.storage && navigator.storage.estimate
-            ? await navigator.storage.estimate()
-            : { usage: 0, quota: 0 };
-
-        const usageMB = (estimate.usage || 0) / (1024 * 1024);
-        const quotaMB = (estimate.quota || 0) / (1024 * 1024);
-
-        let jsHeap = 0;
-        if ((performance as any).memory) {
-            jsHeap = (performance as any).memory.usedJSHeapSize / (1024 * 1024);
-        }
-
-        const memSnaps = this.cacheManager.getStats ? this.cacheManager.getStats().memoryCacheSize : 0;
-        const totalEvents = this.getActiveEvents().length;
-        const bytesRam = this.timeline.reduce((acc, ev) => acc + (ev.data ? ev.data.byteLength : 0), 0);
-
-        console.groupCollapsed(`%c🖌️ Trazo #${totalEvents} procesado en ${actionTimeMs.toFixed(1)}ms`, 'color: #00d2ff; font-weight: bold;');
-        console.log(`%c💾 Disco (IndexedDB): %c${usageMB.toFixed(2)} MB usados %c(de ${quotaMB.toFixed(0)} MB disp.)`, 'font-weight: bold;', 'color: #ffaa00;', 'color: gray;');
-        console.log(`%c🧠 Memoria RAM (V8): %c${jsHeap > 0 ? jsHeap.toFixed(2) + ' MB' : 'No soportado'}`, 'font-weight: bold;', 'color: #00ff00;');
-        console.log(`%c⚡ Caché Híbrido: %c${memSnaps} / 20 fotos en RAM`, 'font-weight: bold;', 'color: #00ff00;');
-        console.log(`%c🗜️ Vectores en VIVO: %c${(bytesRam / 1024).toFixed(2)} KB en RAM activa`, 'font-weight: bold;', 'color: #ff00ff;');
-        console.groupEnd();
+    private async compressStrokeData(rawPoints: StrokePoint[], brushSize: number): Promise<any> {
+        return new Promise((resolve) => {
+            const msgId = crypto.randomUUID();
+            const handleMessage = (e: MessageEvent) => {
+                if (e.data.id === msgId) {
+                    this.worker.removeEventListener('message', handleMessage);
+                    resolve(e.data);
+                }
+            };
+            this.worker.addEventListener('message', handleMessage);
+            this.worker.postMessage({ id: msgId, rawPoints, brushSize });
+        });
     }
 
     public async commitStroke(): Promise<TimelineEvent | null> {
         if (this.currentRawPoints.length === 0) return null;
-
-        const rawPoints = this.currentRawPoints;
-        const brushData = this.currentBrushData;
-        const toolId = this.currentToolId;
-        const layerIndex = this.engine.activeLayerIndex;
-
-        this.currentRawPoints = [];
         const startTime = performance.now();
+        const rawPoints = this.currentRawPoints;
+        const ptsCount = rawPoints.length;
+        const brushData = this.currentBrushData;
+        this.currentRawPoints = [];
 
-        return new Promise((resolve) => {
-            const msgId = crypto.randomUUID();
+        const compressedData = await this.compressStrokeData(rawPoints, brushData.size);
 
-            const handleMessage = (e: MessageEvent) => {
-                if (e.data.id === msgId) {
-                    this.worker.removeEventListener('message', handleMessage);
+        const event: TimelineEvent = {
+            id: compressedData.id, type: brushData.type, toolId: this.currentToolId, profileId: brushData.profileId,
+            layerIndex: this.engine.activeLayerIndex, color: brushData.color, size: brushData.size,
+            opacity: brushData.opacity, timestamp: Date.now(), data: compressedData.binaryData,
+            compressedData: compressedData.compressedData, isCompressed: false, bbox: compressedData.bbox,
+            isSaved: false
+        };
 
-                    const event: TimelineEvent = {
-                        id: msgId,
-                        type: brushData.type,
-                        toolId: toolId,
-                        profileId: brushData.profileId,
-                        layerIndex: layerIndex,
-                        color: brushData.color,
-                        size: brushData.size,
-                        opacity: brushData.opacity,
-                        timestamp: Date.now(),
-                        data: e.data.binaryData,
-                        compressedData: e.data.compressedData,
-                        isCompressed: false,
-                        bbox: e.data.bbox
-                    };
+        this.timeline.push(event);
+        this.invalidateCache();
 
-                    this.timeline.push(event);
+        if (event.bbox && (event.type === 'STROKE' || event.type === 'ERASE')) {
+            this.spatialGrid.insert(event.id, event.bbox);
+        }
 
-                    if (event.bbox && (event.type === 'STROKE' || event.type === 'ERASE')) {
-                        this.spatialGrid.insert(event.id, event.bbox);
-                    }
-
-                    this.enforceRamLimit();
-
-                    const active = this.getActiveEvents();
-                    if (active.length > 0 && active.length % 20 === 0) {
-                        const activeCanvas = this.engine.getActiveLayerContext().canvas;
-                        this.cacheManager.bake(event.id, activeCanvas);
-                    }
-
-                    const timeTaken = performance.now() - startTime;
-                    this.printSystemDiagnostics(timeTaken);
-                    resolve(event);
-                }
-            };
-
-            this.worker.addEventListener('message', handleMessage);
-            this.worker.postMessage({ id: msgId, rawPoints: rawPoints, brushSize: brushData.size });
-        });
+        this.unsnapshottedPoints += ptsCount;
+        if (this.unsnapshottedPoints > this.POINTS_SNAPSHOT_THRESHOLD) {
+            this.cacheManager.bake(event.id, this.engine.getActiveLayerContext().canvas);
+            this.unsnapshottedPoints = 0;
+        }
+        DiagnosticsService.printMetrics(performance.now() - startTime, this, this.cacheManager);
+        return event;
     }
 
-    public applyUndo(): BoundingBox | null {
+    public applyUndo(): boolean {
         const { active } = this.computeTimelineState();
-        if (active.length === 0) return null;
-
+        if (active.length === 0) return false;
         const lastEvent = active[active.length - 1];
 
         this.timeline.push({
-            id: crypto.randomUUID(), type: 'UNDO', toolId: 'system', profileId: 'system',
-            layerIndex: this.engine.activeLayerIndex, color: '', size: 0,
-            timestamp: Date.now(), data: null, bbox: lastEvent.bbox,
-            opacity: 1
+            id: crypto.randomUUID(), type: 'UNDO', toolId: 'system', profileId: 'system', layerIndex: this.engine.activeLayerIndex,
+            color: '', size: 0, timestamp: Date.now(), data: null, bbox: lastEvent.bbox, opacity: 1, isSaved: false
         });
-
-        return lastEvent.bbox || null;
+        this.invalidateCache();
+        return true;
     }
 
-    public applyRedo(): BoundingBox | null {
+    public applyRedo(): boolean {
         const { undone } = this.computeTimelineState();
-        if (undone.length === 0) return null;
-
+        if (undone.length === 0) return false;
         const nextRedo = undone[undone.length - 1];
 
         this.timeline.push({
-            id: crypto.randomUUID(), type: 'REDO', toolId: 'system', profileId: 'system',
-            layerIndex: this.engine.activeLayerIndex, color: '', size: 0,
-            timestamp: Date.now(), data: null, bbox: nextRedo.bbox,
-            opacity: 1
+            id: crypto.randomUUID(), type: 'REDO', toolId: 'system', profileId: 'system', layerIndex: this.engine.activeLayerIndex,
+            color: '', size: 0, timestamp: Date.now(), data: null, bbox: nextRedo.bbox, opacity: 1, isSaved: false
         });
-
-        return nextRedo.bbox || null;
+        this.invalidateCache();
+        return true;
     }
 
     public getActiveCommands(brush: BrushEngine): ICommand[] {
         const { active, transforms } = this.computeTimelineState();
-
-        return active.map(ev => {
-            let cmd: ICommand;
-            if (ev.type === 'ERASE') cmd = new EraseCommand(ev, brush);
-            else cmd = new StrokeCommand(ev, brush);
-
-            const t = transforms.get(ev.id);
-            if (t) {
-                cmd.dx = t.dx;
-                cmd.dy = t.dy;
-            }
-            return cmd;
-        });
+        return active
+            .filter(ev => !this.hiddenEventIds.has(ev.id))
+            .map(ev => {
+                const cmd = CommandFactory.create(ev, brush);
+                const t = transforms.get(ev.id);
+                if (t) {
+                    cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                }
+                return cmd;
+            });
     }
 
     public getActiveEvents(): TimelineEvent[] { return this.computeTimelineState().active; }
-
     public getTimelineSpine(): TimelineEvent[] { return this.computeTimelineState().spine; }
 
     public computeTimelineState() {
+        if (this.cachedState) return this.cachedState;
+
         const spine: TimelineEvent[] = [];
         const undone: TimelineEvent[] = [];
 
-        // Fase 1: Resolver Ctrl+Z / Ctrl+Y
         for (const event of this.timeline) {
             if (event.type === 'UNDO') {
                 if (spine.length > 0) undone.push(spine.pop()!);
@@ -275,16 +235,15 @@ export class HistoryManager {
             }
         }
 
-        // Fase 2: Acumular transformaciones
         const active: TimelineEvent[] = [];
-        const transforms = new Map<string, { dx: number, dy: number }>();
+        const transforms = new Map<string, DOMMatrix>();
 
         for (const ev of spine) {
-            if (ev.type === 'TRANSFORM' && ev.targetIds) {
+            if (ev.type === 'TRANSFORM' && ev.targetIds && ev.transformMatrix) {
+                const newMatrix = new DOMMatrix(ev.transformMatrix);
                 for (const id of ev.targetIds) {
-                    const current = transforms.get(id) || { dx: 0, dy: 0 };
-                    current.dx += ev.transformDx || 0;
-                    current.dy += ev.transformDy || 0;
+                    const current = transforms.get(id) || new DOMMatrix();
+                    current.multiplySelf(newMatrix);
                     transforms.set(id, current);
                 }
             } else {
@@ -292,6 +251,7 @@ export class HistoryManager {
             }
         }
 
-        return { spine, active, transforms, undone };
+        this.cachedState = { spine, active, transforms, undone };
+        return this.cachedState;
     }
 }

@@ -1,31 +1,28 @@
 // src/input/ShortcutManager.ts
 export class ShortcutManager {
-    public onUndo: (() => void) | null = null;
-    public onRedo: (() => void) | null = null;
-    public onSave: (() => void) | null = null;
-
-    public onSpaceDown: (() => void) | null = null;
-    public onSpaceUp: (() => void) | null = null;
-
-    public onZoomDown: (() => void) | null = null;
-    public onZoomUp: (() => void) | null = null;
-
-    public onRotateDown: (() => void) | null = null;
-    public onRotateUp: (() => void) | null = null;
-
-    public onPencil: (() => void) | null = null;
-    public onEraser: (() => void) | null = null;
-
-    // === NUEVOS ===
-    public onFlipHorizontal: (() => void) | null = null;
-    public onAltDown: (() => void) | null = null;
-    public onAltUp: (() => void) | null = null;
-
-    // === NUEVO: Escape para limpiar selecciones ===
-    public onEscape: (() => void) | null = null;
+    // Patrón de Registro: Mapas dinámicos que asocian un string ('ctrl+z') con una función
+    private bindingsDown = new Map<string, (e: KeyboardEvent) => void>();
+    private bindingsUp = new Map<string, (e: KeyboardEvent) => void>();
 
     constructor() {
         this.bindEvents();
+    }
+
+    // === API DINÁMICA DE REGISTRO ===
+    public bindDown(keyCombination: string, handler: (e: KeyboardEvent) => void) {
+        this.bindingsDown.set(keyCombination.toLowerCase(), handler);
+    }
+
+    public bindUp(keyCombination: string, handler: (e: KeyboardEvent) => void) {
+        this.bindingsUp.set(keyCombination.toLowerCase(), handler);
+    }
+
+    public unbindDown(keyCombination: string) {
+        this.bindingsDown.delete(keyCombination.toLowerCase());
+    }
+
+    public unbindUp(keyCombination: string) {
+        this.bindingsUp.delete(keyCombination.toLowerCase());
     }
 
     private bindEvents() {
@@ -33,110 +30,58 @@ export class ShortcutManager {
         window.addEventListener('keyup', this.handleKeyUp.bind(this), { passive: false });
     }
 
-    private handleKeyDown(e: KeyboardEvent) {
-        // === ESCAPE ===
-        if (e.code === 'Escape') {
-            e.preventDefault();
-            this.onEscape?.();
-            return;
-        }
-        // Atajo del Gotero (Alt)
-        if (e.code === 'AltLeft' || e.code === 'AltRight') {
-            e.preventDefault();
-            if (!e.repeat) this.onAltDown?.();
-            return;
+    // Traduce el evento crudo del navegador a un string limpio (Ej: "ctrl+z", "space", "b")
+    private normalizeEvent(e: KeyboardEvent): string {
+        const keys: string[] = [];
+
+        if (e.ctrlKey || e.metaKey) keys.push('ctrl');
+        if (e.shiftKey) keys.push('shift');
+
+        // Si la tecla física presionada es Alt, la agregamos (evitamos duplicar si es combinada)
+        if (e.altKey && e.code !== 'AltLeft' && e.code !== 'AltRight') {
+            keys.push('alt');
         }
 
         if (e.code === 'Space') {
-            e.preventDefault();
-            if (!e.repeat) this.onSpaceDown?.();
-            return;
-        }
-        if (e.code === 'KeyZ' && !e.ctrlKey && !e.metaKey) {
-            e.preventDefault();
-            if (!e.repeat) this.onZoomDown?.();
-            return;
-        }
-        if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
-            e.preventDefault();
-            if (!e.repeat) this.onRotateDown?.();
-            return;
+            keys.push('space');
+        } else if (e.code === 'Escape') {
+            keys.push('escape');
+        } else if (e.code === 'AltLeft' || e.code === 'AltRight') {
+            keys.push('alt');
+        } else if (e.key && !['control', 'shift', 'alt', 'meta'].includes(e.key.toLowerCase())) {
+            keys.push(e.key.toLowerCase());
         }
 
-        const isModifierPressed = e.ctrlKey || e.metaKey;
+        return keys.join('+');
+    }
 
-        // === TECLAS SIN MODIFICADOR (Aquí estaba el código inalcanzable) ===
-        if (!isModifierPressed) {
-            const key = e.key.toLowerCase();
+    private handleKeyDown(e: KeyboardEvent) {
+        // Ignoramos si el usuario está escribiendo dentro de un input real (por si a futuro agregas texto)
+        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-            if (key === 'b') {
-                this.onPencil?.(); // El ?.() evita el error de "posibly null"
-                return;
-            }
-            if (key === 'e') {
-                this.onEraser?.();
-                return;
-            }
-            if (key === 'h') {
-                this.onFlipHorizontal?.();
-                return;
-            }
+        const shortcut = this.normalizeEvent(e);
 
-            return; // ESTE return corta la ejecución. Todo lo de arriba debe estar antes de él.
-        }
-
-        // === TECLAS CON MODIFICADOR (Ctrl / Cmd) ===
-        const key = e.key.toLowerCase();
-
-        if (key === '+' || key === '-' || key === '=' || key === '0') {
-            e.preventDefault();
-            return;
-        }
-        if (key === 'z') {
+        if (this.bindingsDown.has(shortcut)) {
             e.preventDefault();
             e.stopPropagation();
-            if (e.shiftKey) {
-                this.onRedo?.();
-            } else {
-                this.onUndo?.();
-            }
-            return;
-        }
-        if (key === 'y') {
-            e.preventDefault();
-            e.stopPropagation();
-            this.onRedo?.();
-            return;
-        }
-        if (key === 's') {
-            e.preventDefault();
-            e.stopPropagation();
-            this.onSave?.();
-            return;
+            // Ejecutamos la función guardada y le pasamos el evento para que decida si ignorar el auto-repeat
+            this.bindingsDown.get(shortcut)!(e);
         }
     }
 
     private handleKeyUp(e: KeyboardEvent) {
-        if (e.code === 'AltLeft' || e.code === 'AltRight') {
+        const shortcut = this.normalizeEvent(e);
+
+        if (this.bindingsUp.has(shortcut)) {
             e.preventDefault();
-            this.onAltUp?.();
-        }
-        if (e.code === 'Space') {
-            e.preventDefault();
-            this.onSpaceUp?.();
-        }
-        if (e.code === 'KeyZ') {
-            e.preventDefault();
-            this.onZoomUp?.();
-        }
-        if (e.code === 'KeyR') {
-            e.preventDefault();
-            this.onRotateUp?.();
+            this.bindingsUp.get(shortcut)!(e);
         }
     }
 
     public destroy() {
         window.removeEventListener('keydown', this.handleKeyDown.bind(this));
         window.removeEventListener('keyup', this.handleKeyUp.bind(this));
+        this.bindingsDown.clear();
+        this.bindingsUp.clear();
     }
 }

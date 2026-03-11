@@ -2,11 +2,14 @@
 import type { ICommand } from './ICommand';
 import type { TimelineEvent } from '../HistoryManager';
 import type { StorageManager } from '../../storage/StorageManager';
+import type { BrushEngine } from '../../core/render/BrushEngine';
+import { CommandFactory } from './CommandFactory';
 
 export class MoveCommand implements ICommand {
     private event: TimelineEvent;
 
-    constructor(event: TimelineEvent) {
+    // === ACTUALIZADO: Debe aceptar el BrushEngine para cumplir con el contrato de la Factory ===
+    constructor(event: TimelineEvent, _brush: BrushEngine) {
         this.event = event;
     }
 
@@ -42,3 +45,6 @@ export class MoveCommand implements ICommand {
         return null;
     }
 }
+
+// === REGISTRO AUTOMÁTICO ===
+CommandFactory.register('TRANSFORM', MoveCommand);

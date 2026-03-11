@@ -6,6 +6,7 @@ import type { IBrushProfile } from './profiles/IBrushProfile';
 export class BrushEngine {
     public color: string = '#2c3e50';
     public profile: IBrushProfile;
+    public lastDrawingProfile: IBrushProfile;
 
     private tipCanvas: HTMLCanvasElement;
     private tipCtx: CanvasRenderingContext2D;
@@ -14,8 +15,13 @@ export class BrushEngine {
     private leftoverDistance: number = 0;
     private points: BasePoint[] = [];
 
+    // === CONSTANTE MÁGICA PARA RENDIMIENTO ===
+    // Si el pincel es menor a este tamaño, dibujamos vectores crudos en vez de estampar
+    private readonly TEXTURE_THRESHOLD = 3.0;
+
     constructor(profile: IBrushProfile) {
         this.profile = profile;
+        this.lastDrawingProfile = profile;
         this.tipCanvas = document.createElement('canvas');
         this.tipCtx = this.tipCanvas.getContext('2d', { willReadFrequently: true })!;
         this.generateBrushTip();
@@ -84,14 +90,25 @@ export class BrushEngine {
     }
 
     private stamp(ctx: CanvasRenderingContext2D, x: number, y: number, pressure: number) {
-        // Libre de ctx.save() para máxima velocidad
         const sizeMultiplier = 1 + (pressure - 0.5) * this.profile.pressureSizeSensitivity * 2;
-        const finalSize = Math.max(1, this.profile.baseSize * sizeMultiplier);
+        const finalSize = Math.max(0.5, this.profile.baseSize * sizeMultiplier); // Bajé a 0.5 el mínimo
 
         const opacityMultiplier = 1 + (pressure - 0.5) * this.profile.pressureOpacitySensitivity * 2;
         const finalOpacity = Math.max(0.01, Math.min(1, this.profile.baseOpacity * opacityMultiplier));
 
         ctx.globalAlpha = finalOpacity;
+
+        // === ADAPTIVE SPACING: MODO TURBO ===
+        // Si el tamaño final del pincel es muy pequeño (ej. Lineart fino), 
+        // hacer un "fill" es 100x más rápido que dibujar una imagen miniatura.
+        if (finalSize < this.TEXTURE_THRESHOLD && this.profile.textureType === 'solid') {
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            // Respetamos el aspecto ratio y el ángulo incluso en el modo turbo
+            ctx.ellipse(x, y, (finalSize / 2) * this.profile.aspectRatio, finalSize / 2, (this.profile.angle * Math.PI) / 180, 0, Math.PI * 2);
+            ctx.fill();
+            return;
+        }
 
         const halfSize = finalSize / 2;
         ctx.drawImage(this.tipCanvas, x - halfSize, y - halfSize, finalSize, finalSize);
@@ -137,9 +154,12 @@ export class BrushEngine {
         const dx = data.x - this.lastPoint.x;
         const dy = data.y - this.lastPoint.y;
         const distance = Math.sqrt(dx * dx + dy * dy);
-        const step = Math.max(0.5, this.profile.baseSize * this.profile.spacing);
 
-        // Lógica matemática oficial y robusta de interpolación de distancia
+        // === LA OTRA MITAD DEL ADAPTIVE SPACING ===
+        // Limitamos qué tan juntos pueden estar los puntos. Nunca menos de 1 píxel de distancia.
+        // Si el pincel es muy grueso, el spacing se respeta.
+        const step = Math.max(1.0, this.profile.baseSize * this.profile.spacing);
+
         let traveled = step - this.leftoverDistance;
 
         if (traveled <= distance) {
@@ -159,7 +179,6 @@ export class BrushEngine {
             ctx.restore();
         }
 
-        // Remanente para el siguiente frame
         this.leftoverDistance = distance - (traveled - step);
         this.lastPoint = { ...data, pressure: currentPressure };
     }

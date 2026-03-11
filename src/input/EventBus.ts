@@ -1,25 +1,33 @@
 // src/input/EventBus.ts
 
-// Definimos los eventos exactos que existen en la app para tener autocompletado y tipado estricto
-// Añade 'SET_TOOL_PENCIL' y 'SET_TOOL_ERASER' a tus AppEvents en EventBus.ts
-// src/input/EventBus.ts (Actualiza la línea de AppEvent)
-export type AppEvent =
-    'PLAY_TIMELAPSE' | 'DEBUG_DRAW_POINTS' | 'CLEAR_ALL' | 'RESET_ROTATION' | 'FLIP_HORIZONTAL' |
-    'SET_TOOL_PENCIL' | 'SET_TOOL_ERASER' | 'SET_PROFILE_INK' | 'SET_PROFILE_PENCIL' |
-    'UPDATE_BRUSH_SIZE' | 'UPDATE_BRUSH_OPACITY' | 'SYNC_UI_SLIDERS' | 'SET_COLOR' | 'SET_PROFILE_FILL'; // <--- AQUÍ ESTÁ EL INVITADO
-type EventHandler = (payload?: any) => void;
+// === MAGIA: Usamos 'interface' en lugar de 'type' ===
+// Aquí solo declaramos los eventos GLOBALES del Core.
+// Las herramientas inyectarán sus propios eventos desde sus propios archivos.
+export interface AppEventMap {
+    'PLAY_TIMELAPSE': void;
+    'DEBUG_DRAW_POINTS': void;
+    'CLEAR_ALL': void;
+    'RESET_ROTATION': void;
+    'FLIP_HORIZONTAL': void;
+    'SYNC_UI_SLIDERS': { size: number, opacity: number };
+    'SET_COLOR': string;
+    'UPDATE_BRUSH_SIZE': number;
+    'UPDATE_BRUSH_OPACITY': number;
+    'REQUEST_TOOL_SWITCH': string;
+}
 
 export class EventBus {
-    private listeners: Map<AppEvent, EventHandler[]> = new Map();
+    // El mapa ahora está fuertemente tipado según las llaves de AppEventMap
+    private listeners: Map<keyof AppEventMap, Array<(payload?: any) => void>> = new Map();
 
-    public on(event: AppEvent, callback: EventHandler) {
+    public on<K extends keyof AppEventMap>(event: K, callback: (payload: AppEventMap[K]) => void) {
         if (!this.listeners.has(event)) {
             this.listeners.set(event, []);
         }
         this.listeners.get(event)!.push(callback);
     }
 
-    public emit(event: AppEvent, payload?: any) {
+    public emit<K extends keyof AppEventMap>(event: K, payload?: AppEventMap[K]) {
         const callbacks = this.listeners.get(event);
         if (callbacks) {
             callbacks.forEach(cb => cb(payload));

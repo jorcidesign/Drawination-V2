@@ -1,7 +1,7 @@
 // src/tools/interaction/PanTool.ts
 import type { ITool, ToolContext } from '../core/ITool';
 import type { PointerData } from '../../input/InputManager';
-
+import { ToolRegistry } from '../core/ToolRegistry';
 export class PanTool implements ITool {
     public readonly id = 'pan';
     private ctx: ToolContext;
@@ -42,3 +42,5 @@ export class PanTool implements ITool {
         this.ctx.engine.container.style.cursor = 'grab';
     }
 }
+
+ToolRegistry.register({ id: 'pan', factory: (ctx) => new PanTool(ctx), downShortcut: 'space', upShortcut: 'space', isSticky: false });

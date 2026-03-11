@@ -1,6 +1,7 @@
 // src/tools/interaction/ZoomTool.ts
 import type { ITool, ToolContext } from '../core/ITool';
 import type { PointerData } from '../../input/InputManager';
+import { ToolRegistry } from '../core/ToolRegistry';
 
 export class ZoomTool implements ITool {
     public readonly id = 'zoom';
@@ -43,3 +44,5 @@ export class ZoomTool implements ITool {
         this.ctx.engine.container.style.cursor = 'zoom-in';
     }
 }
+
+ToolRegistry.register({ id: 'zoom', factory: (ctx) => new ZoomTool(ctx), downShortcut: 'z', upShortcut: 'z', isSticky: false });

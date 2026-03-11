@@ -3,27 +3,25 @@ import type { ITool, ToolContext } from '../core/ITool';
 import type { BasePoint, PointerData } from '../../input/InputManager';
 import { Geometry } from '../../core/math/Geometry';
 import { BinarySerializer } from '../../core/io/BinarySerializer';
-import { BBoxUtils, type BoundingBox } from '../../core/math/BoundingBox';
-import { StrokeCommand } from '../../history/commands/StrokeCommand';
-import { EraseCommand } from '../../history/commands/EraseCommand';
-import type { ICommand } from '../../history/commands/ICommand';
+import { ToolRegistry } from '../core/ToolRegistry';
+import { CommandFactory } from '../../history/commands/CommandFactory';
 
 export class LassoTool implements ITool {
     public readonly id = 'lasso';
     private ctx: ToolContext;
 
-    // Máquina de Estados
     private mode: 'idle' | 'drawing' | 'selected' | 'dragging' = 'idle';
     private polygon: BasePoint[] = [];
-    public selectedEventIds: Set<string> = new Set();
 
-    private selectionBbox: BoundingBox | null = null;
-
-    // Canvas temporal para el Preview de 60fps sin lag
     private selectionCanvas: HTMLCanvasElement;
-
     private dragStartX = 0;
     private dragStartY = 0;
+
+    // Acumuladores de la "Sesión" (Solo ilusión visual, no tocan el historial aún)
+    private accTx = 0;
+    private accTy = 0;
+    private tempTx = 0;
+    private tempTy = 0;
 
     constructor(ctx: ToolContext) {
         this.ctx = ctx;
@@ -32,42 +30,94 @@ export class LassoTool implements ITool {
         this.selectionCanvas.height = ctx.engine.height;
     }
 
-    public isBusy() { return this.mode === 'drawing' || this.mode === 'dragging'; }
+    // Mientras el Lazo no sea 'idle', el WorkspaceController ignora los Ctrl+Z globales
+    public isBusy() { return this.mode !== 'idle'; }
 
     public onActivate() {
-        this.resetSelection();
+        this.cancelSelection();
         this.ctx.engine.container.style.cursor = 'crosshair';
+        window.addEventListener('keydown', this.handleKeyDown);
     }
 
     public onDeactivate() {
-        this.resetSelection();
+        this.commitSelection(); // Si cambias al Lápiz, guardamos el movimiento final
+        window.removeEventListener('keydown', this.handleKeyDown);
     }
 
-    private resetSelection() {
+    private handleKeyDown = async (e: KeyboardEvent) => {
+        if (this.mode === 'idle') return;
+
+        // Enter = Confirmar movimiento
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            await this.commitSelection();
+        }
+        // Escape o Ctrl+Z = Abortar misión (Devuelve los trazos a su origen sin ensuciar historial)
+        else if (e.key === 'Escape' || ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey))) {
+            e.preventDefault();
+            e.stopPropagation();
+            this.cancelSelection();
+        }
+    };
+
+    // Aborta todo y destruye la selección sin guardar
+    private cancelSelection() {
         this.mode = 'idle';
-        this.selectedEventIds.clear();
-        this.selectionBbox = null;
+        this.polygon = [];
+        this.accTx = 0; this.accTy = 0;
+        this.tempTx = 0; this.tempTy = 0;
+
+        this.ctx.selection.clear();
         this.ctx.engine.clearPaintingCanvas();
         this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '1';
+        document.dispatchEvent(new CustomEvent('DRAWINATION_FORCE_REBUILD'));
     }
 
-    public onPointerDown(data: PointerData) {
-        // Si hay una selección activa, cualquier click inicia el DRAG (Mover)
-        if (this.mode === 'selected') {
-            this.mode = 'dragging';
-            this.dragStartX = data.x;
-            this.dragStartY = data.y;
+    // El ÚNICO momento donde tocamos el HistoryManager
+    private async commitSelection() {
+        if (this.mode === 'idle') return;
 
-            // Efecto Fantasma: Bajamos opacidad al lienzo original
-            this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '0.3';
-            this.ctx.engine.container.style.cursor = 'move';
-            return;
+        // Solo guardamos si realmente hubo un movimiento acumulado
+        if (this.ctx.selection.hasSelection() && (this.accTx !== 0 || this.accTy !== 0)) {
+            const targetIds = Array.from(this.ctx.selection.selectedIds);
+            const matrix = [1, 0, 0, 1, this.accTx, this.accTy];
+
+            const event = await this.ctx.history.commitTransform(targetIds, matrix);
+            await this.ctx.storage.saveEvent(event);
+            event.isSaved = true;
+            this.ctx.history.enforceRamLimit();
         }
 
-        // Si no hay nada seleccionado, empezamos a DIBUJAR un lazo nuevo
+        this.cancelSelection(); // Limpia la UI y le devuelve los trazos a la capa principal
+    }
+
+    public async onPointerDown(data: PointerData) {
+        if (this.mode === 'selected' && this.ctx.selection.bbox) {
+            const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
+            const bbox = this.ctx.selection.bbox;
+
+            // Verificamos si hizo click DENTRO de la grilla desplazada
+            const isInside = canvasPos.x >= bbox.minX + this.accTx && canvasPos.x <= bbox.maxX + this.accTx &&
+                canvasPos.y >= bbox.minY + this.accTy && canvasPos.y <= bbox.maxY + this.accTy;
+
+            if (isInside) {
+                this.mode = 'dragging';
+                this.dragStartX = canvasPos.x;
+                this.dragStartY = canvasPos.y;
+                this.tempTx = 0;
+                this.tempTy = 0;
+                this.ctx.engine.container.style.cursor = 'move';
+                return;
+            } else {
+                await this.commitSelection(); // Click afuera = Confirmar selección anterior
+            }
+        }
+
+        // Empezar a dibujar un nuevo lazo
         this.mode = 'drawing';
         this.polygon = [];
-        this.selectedEventIds.clear();
+        this.accTx = 0; this.accTy = 0;
+        this.ctx.selection.clear();
 
         const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
         this.polygon.push({ x: canvasPos.x, y: canvasPos.y, pressure: 1 });
@@ -81,79 +131,62 @@ export class LassoTool implements ITool {
             this.drawLassoOutline();
         }
         else if (this.mode === 'dragging') {
-            const startCanvas = this.ctx.viewport.screenToCanvas(this.dragStartX, this.dragStartY);
-            const currentCanvas = this.ctx.viewport.screenToCanvas(data.x, data.y);
-            const dx = currentCanvas.x - startCanvas.x;
-            const dy = currentCanvas.y - startCanvas.y;
+            const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
+            this.tempTx = canvasPos.x - this.dragStartX;
+            this.tempTy = canvasPos.y - this.dragStartY;
 
-            // Preview del movimiento (instantáneo)
-            this.ctx.engine.clearPaintingCanvas();
-            this.ctx.engine.paintingContext.drawImage(this.selectionCanvas, dx, dy);
-            this.drawConceptsGrid(dx, dy);
+            this.updateLiveVisuals();
         }
     }
 
     public async onPointerUp(data: PointerData) {
         if (this.mode === 'drawing') {
-            // Cerramos el lazo y ejecutamos el Hit Test Matemático
             await this.findSelectedStrokes();
 
-            if (this.selectedEventIds.size > 0) {
+            if (this.ctx.selection.hasSelection()) {
                 this.mode = 'selected';
-                await this.generateSelectionPreview();
-                this.ctx.engine.clearPaintingCanvas();
-                this.ctx.engine.paintingContext.drawImage(this.selectionCanvas, 0, 0);
-                this.drawConceptsGrid();
+
+                // 1. Ocultamos los originales y redibujamos
+                document.dispatchEvent(new CustomEvent('DRAWINATION_FORCE_REBUILD'));
+
+                // 2. Generamos el fantasma rojo (Solo 1 vez por selección)
+                await this.generateSelectionSandbox();
+
+                this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '0.3';
+                this.updateLiveVisuals();
                 this.ctx.engine.container.style.cursor = 'move';
             } else {
-                this.resetSelection();
+                this.cancelSelection();
             }
         }
         else if (this.mode === 'dragging') {
-            const startCanvas = this.ctx.viewport.screenToCanvas(this.dragStartX, this.dragStartY);
-            const currentCanvas = this.ctx.viewport.screenToCanvas(data.x, data.y);
-            const dx = currentCanvas.x - startCanvas.x;
-            const dy = currentCanvas.y - startCanvas.y;
-
-            // Restauramos la opacidad del mundo real
-            this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '1';
-
-            if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
-                await this.applyVectorMovement(dx, dy);
-
-                // Actualizamos la grilla a su nueva posición
-                if (this.selectionBbox) {
-                    this.selectionBbox.minX += dx; this.selectionBbox.minY += dy;
-                    this.selectionBbox.maxX += dx; this.selectionBbox.maxY += dy;
-                }
-                await this.generateSelectionPreview();
-            }
+            // === LA CORRECCIÓN ===
+            // NO TOCAMOS EL HISTORIAL AQUÍ. Solo consolidamos la ilusión visual.
+            this.accTx += this.tempTx;
+            this.accTy += this.tempTy;
+            this.tempTx = 0;
+            this.tempTy = 0;
 
             this.mode = 'selected';
-            this.ctx.engine.clearPaintingCanvas();
-            this.ctx.engine.paintingContext.drawImage(this.selectionCanvas, 0, 0);
-            this.drawConceptsGrid();
-            this.ctx.engine.container.style.cursor = 'move';
+            this.updateLiveVisuals();
         }
     }
 
-    // ==========================================
-    // MAGIA VECTORIAL (Opción A de Claude)
-    // ==========================================
-    private async applyVectorMovement(dx: number, dy: number) {
-        const targetIds = Array.from(this.selectedEventIds);
+    private updateLiveVisuals() {
+        const totalTx = this.accTx + this.tempTx;
+        const totalTy = this.accTy + this.tempTy;
 
-        // Simplemente guardamos en la historia que estos IDs se movieron
-        const event = await this.ctx.history.commitTransform(targetIds, dx, dy);
-        await this.ctx.storage.saveEvent(event);
+        this.ctx.engine.clearPaintingCanvas();
 
-        // Actualizamos la grilla y exigimos redibujado
-        this.ctx.history.rebuildSpatialGrid();
-        document.dispatchEvent(new CustomEvent('DRAWINATION_FORCE_REBUILD'));
+        const pCtx = this.ctx.engine.paintingContext;
+        pCtx.save();
+        pCtx.translate(totalTx, totalTy);
+        pCtx.drawImage(this.selectionCanvas, 0, 0); // Movemos el fantasma rojo entero
+        pCtx.restore();
+
+        this.drawConceptsGrid(totalTx, totalTy);
     }
-    // ==========================================
-    // UI Y RENDERIZADO VISUAL
-    // ==========================================
+
     private drawLassoOutline() {
         const pCtx = this.ctx.engine.paintingContext;
         this.ctx.engine.clearPaintingCanvas();
@@ -163,11 +196,9 @@ export class LassoTool implements ITool {
         pCtx.strokeStyle = '#00a8ff';
         pCtx.lineWidth = 2 / this.ctx.viewport.zoom;
         pCtx.setLineDash([5 / this.ctx.viewport.zoom, 5 / this.ctx.viewport.zoom]);
-
         pCtx.beginPath();
         pCtx.moveTo(this.polygon[0].x, this.polygon[0].y);
         for (let i = 1; i < this.polygon.length; i++) pCtx.lineTo(this.polygon[i].x, this.polygon[i].y);
-
         pCtx.stroke();
         pCtx.fillStyle = 'rgba(0, 168, 255, 0.1)';
         pCtx.fill();
@@ -175,23 +206,22 @@ export class LassoTool implements ITool {
     }
 
     private drawConceptsGrid(dx: number = 0, dy: number = 0) {
-        if (!this.selectionBbox) return;
+        if (!this.ctx.selection.bbox) return;
 
         const pCtx = this.ctx.engine.paintingContext;
         const zoom = this.ctx.viewport.zoom;
+        const bbox = this.ctx.selection.bbox;
 
-        const minX = this.selectionBbox.minX + dx;
-        const minY = this.selectionBbox.minY + dy;
-        const maxX = this.selectionBbox.maxX + dx;
-        const maxY = this.selectionBbox.maxY + dy;
-
+        const minX = bbox.minX + dx;
+        const minY = bbox.minY + dy;
+        const maxX = bbox.maxX + dx;
+        const maxY = bbox.maxY + dy;
         const width = this.ctx.engine.width;
         const height = this.ctx.engine.height;
 
         pCtx.save();
         pCtx.lineWidth = 1 / zoom;
 
-        // 1. Líneas extensoras grises
         pCtx.strokeStyle = 'rgba(0, 0, 0, 0.15)';
         pCtx.beginPath();
         pCtx.moveTo(0, minY); pCtx.lineTo(width, minY);
@@ -200,11 +230,9 @@ export class LassoTool implements ITool {
         pCtx.moveTo(maxX, 0); pCtx.lineTo(maxX, height);
         pCtx.stroke();
 
-        // 2. Rectángulo Principal
         pCtx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
         pCtx.strokeRect(minX, minY, maxX - minX, maxY - minY);
 
-        // 3. Círculos en las esquinas (Handles)
         const drawHandle = (x: number, y: number) => {
             pCtx.beginPath();
             pCtx.arc(x, y, 4 / zoom, 0, Math.PI * 2);
@@ -215,21 +243,9 @@ export class LassoTool implements ITool {
         drawHandle(minX, minY); drawHandle(maxX, minY);
         drawHandle(minX, maxY); drawHandle(maxX, maxY);
 
-        // 4. Cruz en el centro
-        const centerX = minX + (maxX - minX) / 2;
-        const centerY = minY + (maxY - minY) / 2;
-        const crossSize = 6 / zoom;
-        pCtx.beginPath();
-        pCtx.moveTo(centerX - crossSize, centerY); pCtx.lineTo(centerX + crossSize, centerY);
-        pCtx.moveTo(centerX, centerY - crossSize); pCtx.lineTo(centerX, centerY + crossSize);
-        pCtx.stroke();
-
         pCtx.restore();
     }
 
-    // ==========================================
-    // FUNCIONES AUXILIARES DE PROCESAMIENTO
-    // ==========================================
     private async findSelectedStrokes() {
         if (this.polygon.length < 3) return;
 
@@ -240,81 +256,77 @@ export class LassoTool implements ITool {
         }
 
         const candidates = this.ctx.history.spatialGrid.query({ minX, minY, maxX, maxY });
-        const activeEvents = this.ctx.history.getActiveEvents();
-        const activeIds = new Set(activeEvents.map(ev => ev.id));
+        const { active, transforms } = this.ctx.history.computeTimelineState();
+
+        const foundIds = new Set<string>();
 
         for (const eventId of candidates) {
-            if (!activeIds.has(eventId)) continue;
-
-            const event = activeEvents.find(ev => ev.id === eventId);
-
-            // === CAMBIO: ACEPTAMOS STROKES Y ERASES ===
+            const event = active.find(ev => ev.id === eventId);
             if (!event || (event.type !== 'STROKE' && event.type !== 'ERASE')) continue;
 
             if (!event.data) event.data = await this.ctx.storage.loadEventData(eventId);
             if (!event.data) continue;
 
+            const t = transforms.get(eventId) || new DOMMatrix();
             const pts = BinarySerializer.decode(event.data);
+
             for (const pt of pts) {
-                if (Geometry.isPointInPolygon(pt.x, pt.y, this.polygon)) {
-                    this.selectedEventIds.add(event.id);
+                const tx = pt.x * t.a + pt.y * t.c + t.e;
+                const ty = pt.x * t.b + pt.y * t.d + t.f;
+
+                if (Geometry.isPointInPolygon(tx, ty, this.polygon)) {
+                    foundIds.add(event.id);
                     break;
                 }
             }
         }
 
-        // Calcular el Bounding Box global de toda la selección unida
-        if (this.selectedEventIds.size > 0) {
+        if (foundIds.size > 0) {
             let gMinX = Infinity, gMinY = Infinity, gMaxX = -Infinity, gMaxY = -Infinity;
-            for (const id of this.selectedEventIds) {
-                const ev = activeEvents.find(e => e.id === id);
+            for (const id of foundIds) {
+                const ev = active.find(e => e.id === id);
+                const t = transforms.get(id) || new DOMMatrix();
                 if (ev && ev.bbox) {
-                    if (ev.bbox.minX < gMinX) gMinX = ev.bbox.minX;
-                    if (ev.bbox.minY < gMinY) gMinY = ev.bbox.minY;
-                    if (ev.bbox.maxX > gMaxX) gMaxX = ev.bbox.maxX;
-                    if (ev.bbox.maxY > gMaxY) gMaxY = ev.bbox.maxY;
+                    if (ev.bbox.minX + t.e < gMinX) gMinX = ev.bbox.minX + t.e;
+                    if (ev.bbox.minY + t.f < gMinY) gMinY = ev.bbox.minY + t.f;
+                    if (ev.bbox.maxX + t.e > gMaxX) gMaxX = ev.bbox.maxX + t.e;
+                    if (ev.bbox.maxY + t.f > gMaxY) gMaxY = ev.bbox.maxY + t.f;
                 }
             }
-            this.selectionBbox = { minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY };
+            this.ctx.selection.setSelection(foundIds, { minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY });
         }
     }
 
-    private async generateSelectionPreview() {
-        const pCtx = this.selectionCanvas.getContext('2d')!;
-        pCtx.clearRect(0, 0, this.selectionCanvas.width, this.selectionCanvas.height);
+    private async generateSelectionSandbox() {
+        const sCtx = this.selectionCanvas.getContext('2d')!;
+        sCtx.clearRect(0, 0, this.selectionCanvas.width, this.selectionCanvas.height);
 
-        const activeEvents = this.ctx.history.getActiveEvents();
+        const { active, transforms } = this.ctx.history.computeTimelineState();
 
-        pCtx.save();
-        pCtx.lineCap = 'round';
-        pCtx.lineJoin = 'round';
+        sCtx.save();
+        sCtx.lineCap = 'round';
+        sCtx.lineJoin = 'round';
 
-        for (const eventId of this.selectedEventIds) {
-            const event = activeEvents.find(ev => ev.id === eventId);
-            if (!event || !event.data) continue;
+        for (const eventId of this.ctx.selection.selectedIds) {
+            const ev = active.find(e => e.id === eventId);
+            if (!ev || !ev.data) continue;
 
-            const pts = BinarySerializer.decode(event.data);
+            const t = transforms.get(eventId) || new DOMMatrix();
+            const pts = BinarySerializer.decode(ev.data);
             if (pts.length < 2) continue;
 
-            // Dibujamos el esqueleto para visualizar la selección
-            pCtx.beginPath();
-            pCtx.moveTo(pts[0].x, pts[0].y);
-            for (let i = 1; i < pts.length; i++) {
-                pCtx.lineTo(pts[i].x, pts[i].y);
-            }
+            const cmd = CommandFactory.create(ev, this.ctx.activeBrush);
+            cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
 
-            // Grosor adaptativo según el zoom para que siempre se vea bien la selección
-            pCtx.lineWidth = 4 / this.ctx.viewport.zoom;
+            const originalColor = ev.color;
+            ev.color = ev.type === 'ERASE' ? '#0096ff' : '#ff3232'; // Azul borrador, Rojo trazo
 
-            // === MAGIA DE COLORES ===
-            if (event.type === 'ERASE') {
-                pCtx.strokeStyle = 'rgba(0, 150, 255, 0.9)'; // Azul brillante para Borradores
-            } else {
-                pCtx.strokeStyle = 'rgba(255, 50, 50, 0.9)'; // Rojo brillante para Trazos
-            }
+            cmd.execute(sCtx);
 
-            pCtx.stroke();
+            ev.color = originalColor;
         }
-        pCtx.restore();
+        sCtx.restore();
     }
 }
+
+ToolRegistry.register({ id: 'lasso', factory: (ctx) => new LassoTool(ctx), downShortcut: 'l', isSticky: true });

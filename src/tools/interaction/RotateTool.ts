@@ -1,6 +1,7 @@
 // src/tools/interaction/RotateTool.ts
 import type { ITool, ToolContext } from '../core/ITool';
 import type { PointerData } from '../../input/InputManager';
+import { ToolRegistry } from '../core/ToolRegistry';
 
 export class RotateTool implements ITool {
     public readonly id = 'rotate';
@@ -48,3 +49,5 @@ export class RotateTool implements ITool {
         this.ctx.engine.container.style.cursor = 'alias';
     }
 }
+
+ToolRegistry.register({ id: 'rotate', factory: (ctx) => new RotateTool(ctx), downShortcut: 'r', upShortcut: 'r', isSticky: false });
