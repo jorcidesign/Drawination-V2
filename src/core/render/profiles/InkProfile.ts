@@ -5,18 +5,25 @@ export const InkProfile: IBrushProfile = {
     id: 'ink-pen',
     name: 'Pluma de Tinta',
 
-    baseSize: 20,
-    baseOpacity: 1.0,      // La tinta siempre es sólida
+    minSize: 2.5,
+    maxSize: 100,
+    baseSize: 8,
+
+    baseOpacity: 1.0,
     blendMode: 'source-over',
-
+    renderer: 'ink',
     textureType: 'solid',
-    spacing: 0.02,         // 2% de espaciado: ultra fluido y continuo
-
-    // Geometría de la Tinta (Óvalo inclinado basado en tu imagen)
+    spacing: 0.02,
     angle: -45,
     aspectRatio: 0.25,
-    renderMode: 'stroke',
-    pressureSizeSensitivity: 0.8, // La presión controla el grosor dramáticamente
-    pressureOpacitySensitivity: 0.0, // La presión NO afecta la opacidad
-    smoothing: 0.6 // Más suavizado para estabilizar el pulso en lineart
+
+    // Presión controla el TAMAÑO — física de pluma mangaka.
+    // Con renderer procedural (ctx.ellipse) esto es 100% consistente
+    // entre vivo y rebuild porque no hay drawImage de canvas intermediario.
+    // 0.8 = rango amplio como Ancient Ink / Sumi: presión leve → trazo fino,
+    // presión máxima → trazo ancho. Exactamente como una pluma de tinta real.
+    pressureSizeSensitivity: 0.8,
+
+    pressureOpacitySensitivity: 0.0,
+    smoothing: 0.6
 };

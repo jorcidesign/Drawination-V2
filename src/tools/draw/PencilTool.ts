@@ -3,19 +3,10 @@ import type { ITool, ToolContext } from '../core/ITool';
 import type { PointerData } from '../../input/InputManager';
 import { ObjectPool } from '../../core/memory/ObjectPool';
 import { ToolRegistry } from '../core/ToolRegistry';
-import type { IBrushProfile } from '../../core/render/profiles/IBrushProfile';
 
-import { InkProfile } from '../../core/render/profiles/InkProfile';
-import { PencilProfile } from '../../core/render/profiles/PencilProfiles';
-import { FillProfile } from '../../core/render/profiles/FillProfile';
-
-// === DECLARATION MERGING: El Lápiz inyecta sus eventos al bus global ===
 declare module '../../input/EventBus' {
     interface AppEventMap {
         'SET_TOOL_PENCIL': void;
-        'SET_PROFILE_INK': void;
-        'SET_PROFILE_PENCIL': void;
-        'SET_PROFILE_FILL': void;
     }
 }
 
@@ -27,30 +18,9 @@ export class PencilTool implements ITool {
     constructor(ctx: ToolContext) {
         this.ctx = ctx;
 
-        // Escuchamos los eventos que nosotros mismos acabamos de inyectar
-        this.ctx.eventBus.on('SET_PROFILE_INK', () => this.applyProfile(InkProfile));
-        this.ctx.eventBus.on('SET_PROFILE_PENCIL', () => this.applyProfile(PencilProfile));
-        this.ctx.eventBus.on('SET_PROFILE_FILL', () => this.applyProfile(FillProfile));
-
-        this.ctx.eventBus.on('SET_COLOR', (hex: string) => {
-            this.ctx.activeBrush.setColor(hex);
-            this.applyProfile(this.ctx.activeBrush.lastDrawingProfile);
-        });
-
+        // Si desde la UI piden el Lápiz explícitamente, le decimos al ToolManager que nos active
         this.ctx.eventBus.on('SET_TOOL_PENCIL', () => {
-            this.applyProfile(this.ctx.activeBrush.lastDrawingProfile);
-        });
-    }
-
-    private applyProfile(profile: IBrushProfile) {
-        this.ctx.activeBrush.lastDrawingProfile = profile;
-        this.ctx.activeBrush.setProfile(profile);
-
-        this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
-
-        this.ctx.eventBus.emit('SYNC_UI_SLIDERS', {
-            size: profile.baseSize,
-            opacity: profile.baseOpacity
+            this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
         });
     }
 
@@ -58,10 +28,15 @@ export class PencilTool implements ITool {
 
     public onActivate() {
         this.ctx.engine.container.style.cursor = 'crosshair';
-        this.ctx.activeBrush.setProfile(this.ctx.activeBrush.lastDrawingProfile);
+
+        // === FIX: Cargamos el perfil cachead o usando la nueva arquitectura ===
+        this.ctx.activeBrush.useProfile(this.ctx.activeBrush.lastDrawingProfile);
+
         this.ctx.eventBus.emit('SYNC_UI_SLIDERS', {
             size: this.ctx.activeBrush.profile.baseSize,
-            opacity: this.ctx.activeBrush.profile.baseOpacity
+            opacity: this.ctx.activeBrush.profile.baseOpacity,
+            minSize: this.ctx.activeBrush.profile.minSize || 1,
+            maxSize: this.ctx.activeBrush.profile.maxSize || 100
         });
     }
 
@@ -86,16 +61,14 @@ export class PencilTool implements ITool {
     public async onPointerUp(data: PointerData) {
         if (!this.drawing) return;
         this.drawing = false;
-        if (this.ctx.activeBrush.profile.renderMode === 'fill') this.ctx.engine.clearPaintingCanvas();
+        if (this.ctx.activeBrush.profile.renderer === 'fill') this.ctx.engine.clearPaintingCanvas();
         this.ctx.activeBrush.endStroke(this.ctx.engine.paintingContext);
         this.ctx.engine.commitPaintingCanvas();
 
-        const processedEvent = await this.ctx.history.commitStroke();
-        if (processedEvent) {
-            // Esperamos que se guarde en IndexedDB
-            await this.ctx.storage.saveEvent(processedEvent);
-            // Avisamos que ya es seguro y limpiamos la RAM
-            processedEvent.isSaved = true;
+        const event = await this.ctx.history.commitStroke();
+        if (event) {
+            await this.ctx.storage.saveEvent(event);
+            event.isSaved = true;
             this.ctx.history.enforceRamLimit();
         }
         ObjectPool.reset();

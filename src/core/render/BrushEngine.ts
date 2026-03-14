@@ -2,116 +2,100 @@
 import type { BasePoint } from '../../input/InputManager';
 import type { StrokePoint } from '../io/BinarySerializer';
 import type { IBrushProfile } from './profiles/IBrushProfile';
+import type { IBrushRenderer } from './renderers/IBrushRenderer';
+
+import { BasicRenderer } from './renderers/BasicRenderer';
+import { FillRenderer } from './renderers/FillRenderer';
+import { PaintRenderer } from './renderers/PaintRenderer';
+import { HardRoundRenderer } from './renderers/HardRoundRenderer';
+import { InkRenderer } from './renderers/InkRenderer';
+import { AirbrushRenderer } from './renderers/AirbrushRenderer';
+import { CharcoalRenderer } from './renderers/CharcoalRenderer';
 
 export class BrushEngine {
     public color: string = '#2c3e50';
     public profile: IBrushProfile;
     public lastDrawingProfile: IBrushProfile;
 
-    private tipCanvas: HTMLCanvasElement;
-    private tipCtx: CanvasRenderingContext2D;
+    private toolStates: Map<string, IBrushProfile> = new Map();
+    private toolColors: Map<string, string> = new Map();
 
     private lastPoint: BasePoint | null = null;
     private leftoverDistance: number = 0;
     private points: BasePoint[] = [];
 
-    // === CONSTANTE MÁGICA PARA RENDIMIENTO ===
-    // Si el pincel es menor a este tamaño, dibujamos vectores crudos en vez de estampar
-    private readonly TEXTURE_THRESHOLD = 3.0;
+    private renderers: Map<string, IBrushRenderer> = new Map();
 
-    constructor(profile: IBrushProfile) {
-        this.profile = profile;
-        this.lastDrawingProfile = profile;
-        this.tipCanvas = document.createElement('canvas');
-        this.tipCtx = this.tipCanvas.getContext('2d', { willReadFrequently: true })!;
-        this.generateBrushTip();
+    constructor(initialProfile: IBrushProfile) {
+        this.profile = { ...initialProfile };
+        this.lastDrawingProfile = { ...initialProfile };
+
+        this.renderers.set('basic', new BasicRenderer());
+        this.renderers.set('fill', new FillRenderer());
+        this.renderers.set('paint', new PaintRenderer());
+        this.renderers.set('hard-round', new HardRoundRenderer());
+        this.renderers.set('ink', new InkRenderer());
+        this.renderers.set('airbrush', new AirbrushRenderer());
+        this.renderers.set('charcoal', new CharcoalRenderer());
+
+        this.getRenderer().updateTip?.(this.profile, this.color);
+    }
+
+    private getRenderer(): IBrushRenderer {
+        const renderer = this.renderers.get(this.profile.renderer);
+        if (!renderer) throw new Error(`Renderer ${this.profile.renderer} no encontrado`);
+        return renderer;
+    }
+
+    public useProfile(baseProfile: IBrushProfile) {
+        if (!this.toolStates.has(baseProfile.id)) {
+            this.toolStates.set(baseProfile.id, { ...baseProfile });
+            this.toolColors.set(baseProfile.id, this.color);
+        }
+        this.profile = this.toolStates.get(baseProfile.id)!;
+        this.color = this.toolColors.get(baseProfile.id)!;
+
+        // === LA SOLUCIÓN ESTÁ AQUÍ ===
+        // Guardamos en memoria el pincel activo para restaurarlo tras usar el Pan (Espacio)
+        // Solo ignoramos la Goma (para que al dejar de borrar regrese al lápiz correcto).
+        // Antes ignoraba 'solid-fill', causando el bug.
+        if (this.profile.id !== 'eraser-hard') {
+            this.lastDrawingProfile = this.profile;
+        }
+
+        this._refreshTip();
     }
 
     public setProfile(profile: IBrushProfile) {
-        this.profile = profile;
-        this.generateBrushTip();
+        this.useProfile(profile);
     }
 
-    private generateBrushTip() {
-        const size = Math.max(64, this.profile.baseSize * 2);
-        this.tipCanvas.width = size;
-        this.tipCanvas.height = size;
-        const cx = size / 2;
-        const cy = size / 2;
-
-        this.tipCtx.clearRect(0, 0, size, size);
-
-        this.tipCtx.save();
-        this.tipCtx.translate(cx, cy);
-        this.tipCtx.rotate((this.profile.angle * Math.PI) / 180);
-
-        if (this.profile.textureType === 'pencil-grain') {
-            const grad = this.tipCtx.createRadialGradient(0, 0, 0, 0, 0, cx);
-            const colorRGB = this.hexToRgb(this.color);
-
-            grad.addColorStop(0, `rgba(${colorRGB}, 1)`);
-            grad.addColorStop(0.5, `rgba(${colorRGB}, 0.5)`);
-            grad.addColorStop(1, `rgba(${colorRGB}, 0)`);
-
-            this.tipCtx.fillStyle = grad;
-            this.tipCtx.beginPath();
-            this.tipCtx.ellipse(0, 0, cx * this.profile.aspectRatio, cx, 0, 0, Math.PI * 2);
-            this.tipCtx.fill();
-
-            const imgData = this.tipCtx.getImageData(0, 0, size, size);
-            const data = imgData.data;
-            for (let i = 0; i < data.length; i += 4) {
-                if (Math.random() > 0.6) {
-                    data[i + 3] *= 0.2;
-                }
-            }
-            this.tipCtx.putImageData(imgData, 0, 0);
-
-        } else {
-            this.tipCtx.fillStyle = this.color;
-            this.tipCtx.beginPath();
-            this.tipCtx.ellipse(0, 0, cx * this.profile.aspectRatio, cx, 0, 0, Math.PI * 2);
-            this.tipCtx.fill();
+    public updateCurrentSize(size: number) {
+        this.profile.baseSize = size;
+        if (this.lastDrawingProfile.id === this.profile.id) {
+            this.lastDrawingProfile = this.profile;
         }
-
-        this.tipCtx.restore();
+        this._refreshTip();
     }
 
-    private hexToRgb(hex: string): string {
-        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-        return result ?
-            `${parseInt(result[1], 16)}, ${parseInt(result[2], 16)}, ${parseInt(result[3], 16)}` :
-            '0, 0, 0';
+    public updateCurrentOpacity(opacity: number) {
+        this.profile.baseOpacity = opacity;
+        if (this.lastDrawingProfile.id === this.profile.id) {
+            this.lastDrawingProfile = this.profile;
+        }
+        this._refreshTip();
     }
 
     public setColor(color: string) {
         this.color = color;
-        this.generateBrushTip();
+        this.toolColors.set(this.profile.id, color);
+        this._refreshTip();
     }
 
-    private stamp(ctx: CanvasRenderingContext2D, x: number, y: number, pressure: number) {
-        const sizeMultiplier = 1 + (pressure - 0.5) * this.profile.pressureSizeSensitivity * 2;
-        const finalSize = Math.max(0.5, this.profile.baseSize * sizeMultiplier); // Bajé a 0.5 el mínimo
-
-        const opacityMultiplier = 1 + (pressure - 0.5) * this.profile.pressureOpacitySensitivity * 2;
-        const finalOpacity = Math.max(0.01, Math.min(1, this.profile.baseOpacity * opacityMultiplier));
-
-        ctx.globalAlpha = finalOpacity;
-
-        // === ADAPTIVE SPACING: MODO TURBO ===
-        // Si el tamaño final del pincel es muy pequeño (ej. Lineart fino), 
-        // hacer un "fill" es 100x más rápido que dibujar una imagen miniatura.
-        if (finalSize < this.TEXTURE_THRESHOLD && this.profile.textureType === 'solid') {
-            ctx.fillStyle = this.color;
-            ctx.beginPath();
-            // Respetamos el aspecto ratio y el ángulo incluso en el modo turbo
-            ctx.ellipse(x, y, (finalSize / 2) * this.profile.aspectRatio, finalSize / 2, (this.profile.angle * Math.PI) / 180, 0, Math.PI * 2);
-            ctx.fill();
-            return;
-        }
-
-        const halfSize = finalSize / 2;
-        ctx.drawImage(this.tipCanvas, x - halfSize, y - halfSize, finalSize, finalSize);
+    private _refreshTip(): void {
+        const renderer = this.getRenderer();
+        renderer.forceInvalidateTip?.();
+        renderer.updateTip?.(this.profile, this.color);
     }
 
     public beginStroke(ctx: CanvasRenderingContext2D, data: BasePoint): void {
@@ -119,61 +103,51 @@ export class BrushEngine {
         this.points = [data];
         this.leftoverDistance = 0;
 
-        if (this.profile.renderMode === 'fill') return;
+        const renderer = this.getRenderer();
+        renderer.beginStroke(this.profile, this.color, data);
+
+        if (this.profile.renderer === 'fill') return;
 
         ctx.save();
         ctx.globalCompositeOperation = this.profile.blendMode;
-        this.stamp(ctx, data.x, data.y, data.pressure);
+        renderer.stamp(ctx, this.profile, this.color, data.x, data.y, data.pressure);
         ctx.restore();
     }
 
-    public drawMove(ctx: CanvasRenderingContext2D, data: BasePoint, isLivePreview: boolean = false): void {
+    public drawMove(ctx: CanvasRenderingContext2D, rawData: BasePoint, isLivePreview: boolean = false): void {
         if (!this.lastPoint) return;
 
+        const renderer = this.getRenderer();
+        const data = renderer.transformInput ? renderer.transformInput(this.profile, rawData) : rawData;
+
         this.points.push(data);
-
-        if (this.profile.renderMode === 'fill') {
-            if (isLivePreview) {
-                ctx.save();
-                ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-                ctx.fillStyle = this.color;
-                ctx.globalAlpha = this.profile.baseOpacity;
-
-                ctx.beginPath();
-                ctx.moveTo(this.points[0].x, this.points[0].y);
-                for (const pt of this.points) ctx.lineTo(pt.x, pt.y);
-                ctx.fill();
-                ctx.restore();
-            }
+        if (renderer.drawMoveLive && isLivePreview) {
+            renderer.drawMoveLive(ctx, this.profile, this.color, this.points);
             return;
         }
 
         const smoothFactor = 1 - this.profile.smoothing;
         const currentPressure = smoothFactor * data.pressure + (1 - smoothFactor) * this.lastPoint.pressure;
-
         const dx = data.x - this.lastPoint.x;
         const dy = data.y - this.lastPoint.y;
         const distance = Math.sqrt(dx * dx + dy * dy);
 
-        // === LA OTRA MITAD DEL ADAPTIVE SPACING ===
-        // Limitamos qué tan juntos pueden estar los puntos. Nunca menos de 1 píxel de distancia.
-        // Si el pincel es muy grueso, el spacing se respeta.
-        const step = Math.max(1.0, this.profile.baseSize * this.profile.spacing);
+        const baseStep = Math.max(1.0, this.profile.baseSize * this.profile.spacing);
+        const step = renderer.getStep
+            ? renderer.getStep(this.profile, baseStep, currentPressure, dx, dy)
+            : baseStep;
 
         let traveled = step - this.leftoverDistance;
 
         if (traveled <= distance) {
             ctx.save();
             ctx.globalCompositeOperation = this.profile.blendMode;
-
             while (traveled <= distance) {
                 const t = distance > 0 ? traveled / distance : 0;
-
                 const stampX = this.lastPoint.x + dx * t;
                 const stampY = this.lastPoint.y + dy * t;
                 const stampP = this.lastPoint.pressure + (currentPressure - this.lastPoint.pressure) * t;
-
-                this.stamp(ctx, stampX, stampY, stampP);
+                renderer.stamp(ctx, this.profile, this.color, stampX, stampY, stampP);
                 traveled += step;
             }
             ctx.restore();
@@ -184,19 +158,8 @@ export class BrushEngine {
     }
 
     public endStroke(ctx?: CanvasRenderingContext2D): void {
-        if (ctx && this.points.length > 2 && this.profile.renderMode === 'fill') {
-            ctx.save();
-            ctx.fillStyle = this.color;
-            ctx.globalAlpha = this.profile.baseOpacity;
-            ctx.globalCompositeOperation = this.profile.blendMode;
-
-            ctx.beginPath();
-            ctx.moveTo(this.points[0].x, this.points[0].y);
-            for (const pt of this.points) ctx.lineTo(pt.x, pt.y);
-            ctx.fill();
-            ctx.restore();
-        }
-
+        const renderer = this.getRenderer();
+        if (ctx) renderer.endStroke(ctx, this.profile, this.color, this.points);
         this.lastPoint = null;
         this.points = [];
         this.leftoverDistance = 0;
@@ -204,6 +167,7 @@ export class BrushEngine {
 
     public reproduceStroke(
         ctx: CanvasRenderingContext2D,
+        actionProfile: IBrushProfile,
         actionColor: string,
         actionSize: number,
         actionOpacity: number,
@@ -212,16 +176,19 @@ export class BrushEngine {
         if (decodedPoints.length === 0) return;
 
         const prevColor = this.color;
-        const prevSize = this.profile.baseSize;
-        const prevOpacity = this.profile.baseOpacity;
+        const prevProfile = this.profile;
 
-        this.setColor(actionColor);
-        this.profile.baseSize = actionSize;
-        this.profile.baseOpacity = actionOpacity;
+        this.profile = { ...actionProfile, baseSize: actionSize, baseOpacity: actionOpacity };
+        this.color = actionColor;
 
-        if (this.profile.renderMode === 'fill') {
+        const renderer = this.getRenderer();
+
+        renderer.forceInvalidateTip?.();
+        renderer.updateTip?.(this.profile, this.color);
+
+        if (this.profile.renderer === 'fill') {
             this.points = decodedPoints;
-            this.endStroke(ctx);
+            renderer.endStroke(ctx, this.profile, this.color, this.points);
         } else {
             this.beginStroke(ctx, decodedPoints[0]);
             for (let i = 1; i < decodedPoints.length; i++) {
@@ -230,8 +197,10 @@ export class BrushEngine {
             this.endStroke(ctx);
         }
 
-        this.setColor(prevColor);
-        this.profile.baseSize = prevSize;
-        this.profile.baseOpacity = prevOpacity;
+        this.profile = prevProfile;
+        this.color = prevColor;
+
+        renderer.forceInvalidateTip?.();
+        this.getRenderer().updateTip?.(this.profile, this.color);
     }
 }

@@ -1,5 +1,4 @@
 // src/history/CacheManager.ts
-
 export interface MemorySnapshot {
     eventId: string;
     bitmap: ImageBitmap;
@@ -17,9 +16,8 @@ export class CacheManager {
     private readonly canvasWidth: number;
     private readonly canvasHeight: number;
 
-    // === OPTIMIZACIÓN DESKTOP: Subimos la memoria RAM al máximo ===
-    // En Desktop, 20 snapshots de 1000x1000 pesan unos 80MB. ¡Eso es nada!
-    private readonly MAX_MEMORY_SNAPS = 20;
+    // Ring Buffer: RAM suficiente para Ctrl+Z ultrarrápido (aprox 40-50MB)
+    private readonly MAX_MEMORY_SNAPS = 15;
 
     constructor(canvasWidth: number, canvasHeight: number) {
         this.canvasWidth = canvasWidth;
@@ -38,17 +36,21 @@ export class CacheManager {
         req.onsuccess = (e) => { this.db = (e.target as IDBOpenDBRequest).result; };
     }
 
-    // "Hornea" el estado actual del Canvas y lo guarda usando el ID del último comando
-    public async bake(eventId: string, canvas: HTMLCanvasElement): Promise<void> {
+    // Bake ahora distingue si es un Keyframe (va a disco) o solo Ring Buffer (RAM)
+    public async bake(eventId: string, canvas: HTMLCanvasElement, isKeyframe: boolean = false): Promise<void> {
         const bitmap = await createImageBitmap(canvas);
         this.addToMemory(eventId, bitmap);
+
+        // Solo guardamos en disco si es un Keyframe ancla (cada 50 trazos)
+        if (isKeyframe) {
+            this.persistToDB(eventId, bitmap);
+        }
     }
 
-    // Busca la foto de un comando específico (Busca en RAM primero, luego en Disco)
     public async getSnapshot(eventId: string): Promise<ImageBitmap | null> {
         if (this.memoryCache.has(eventId)) {
             const entry = this.memoryCache.get(eventId)!;
-            entry.timestamp = Date.now(); // Actualizamos el uso
+            entry.timestamp = Date.now(); // Actualiza uso (LRU)
             return entry.bitmap;
         }
 
@@ -62,7 +64,8 @@ export class CacheManager {
                 const result = req.result as DBSnapshot;
                 if (result && result.blob) {
                     const bitmap = await createImageBitmap(result.blob);
-                    this.addToMemory(eventId, bitmap); // Lo devolvemos a la RAM
+                    // Al traerlo de disco, lo subimos a la RAM temporalmente
+                    this.addToMemory(eventId, bitmap);
                     resolve(bitmap);
                 } else {
                     resolve(null);
@@ -75,7 +78,6 @@ export class CacheManager {
     private addToMemory(eventId: string, bitmap: ImageBitmap) {
         this.memoryCache.set(eventId, { eventId, bitmap, timestamp: Date.now() });
 
-        // Si llenamos la RAM, echamos la foto más vieja al disco duro
         if (this.memoryCache.size > this.MAX_MEMORY_SNAPS) {
             let oldestId = '';
             let oldestTime = Infinity;
@@ -85,11 +87,10 @@ export class CacheManager {
                     oldestId = id;
                 }
             }
-
             if (oldestId) {
-                const evicted = this.memoryCache.get(oldestId)!;
+                // Ya NO lo mandamos a disco obligatoriamente. Lo descartamos de RAM.
+                // Si era un keyframe, ya está en disco. Si no, no importa.
                 this.memoryCache.delete(oldestId);
-                this.persistToDB(oldestId, evicted.bitmap);
             }
         }
     }
@@ -105,6 +106,29 @@ export class CacheManager {
             const tx = this.db.transaction('snapshots', 'readwrite');
             tx.objectStore('snapshots').put({ eventId, blob });
         });
+    }
+
+    // === ESTRATEGIA: Garbage Collection Diferido ===
+    // Solo borra fotos que pertenecen a IDs que ya NO EXISTEN en la línea de tiempo viva ni deshecha.
+    public garbageCollect(validEventIds: string[]) {
+        const validSet = new Set(validEventIds);
+
+        for (const [id, _] of this.memoryCache.entries()) {
+            if (!validSet.has(id)) this.memoryCache.delete(id);
+        }
+
+        if (this.db) {
+            const tx = this.db.transaction('snapshots', 'readwrite');
+            const store = tx.objectStore('snapshots');
+            const req = store.openCursor();
+            req.onsuccess = (e) => {
+                const cursor = (e.target as IDBRequest).result as IDBCursorWithValue;
+                if (cursor) {
+                    if (!validSet.has(cursor.key as string)) cursor.delete();
+                    cursor.continue();
+                }
+            };
+        }
     }
 
     public clearAll() {

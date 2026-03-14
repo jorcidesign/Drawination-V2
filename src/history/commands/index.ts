@@ -1,12 +1,18 @@
 // src/history/commands/index.ts
+//
+// Auto-registro de todos los comandos.
+// Al importar este archivo, cada comando se registra en CommandFactory.
+//
+// CAMBIO: añadido TransformCommand para que TRANSFORM no caiga en DummyCommand.
 
-// Al importar estos archivos, el código al final de cada uno 
-// (CommandFactory.register...) se ejecutará automáticamente.
 import './StrokeCommand';
 import './EraseCommand';
-import './MoveCommand';
+import './HideCommand';
+import './TransformCommand';
 
-// Si en el futuro creas un FillCommand, solo lo agregas aquí:
+// Futuros:
 // import './FillCommand';
+// import './DuplicateGroupCommand';
+// import './LayerCommand';
 
 export { CommandFactory } from './CommandFactory';

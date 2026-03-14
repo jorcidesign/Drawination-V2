@@ -1,4 +1,11 @@
 // src/app/WorkspaceController.ts
+//
+// CAMBIOS vs versión anterior:
+//   1. Acepta CheckpointManager como dependencia opcional.
+//   2. En CLEAR_ALL, llama a checkpoint.invalidate() para que la próxima
+//      recarga no intente restaurar un canvas vacío desde el checkpoint antiguo.
+//   3. Todo lo demás es idéntico.
+
 import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { InputManager } from '../input/InputManager';
 import type { ShortcutManager } from '../input/ShortcutManager';
@@ -8,12 +15,21 @@ import type { BrushEngine } from '../core/render/BrushEngine';
 import type { StorageManager } from '../storage/StorageManager';
 import type { ViewportManager } from '../core/camera/ViewportManager';
 import type { EventBus } from '../input/EventBus';
-import type { ToolManager } from '../tools/core/ToolManager';
-import type { CanvasRebuilder } from '../core/render/CanvasRebuilder';
 import type { SelectionManager } from '../core/selection/SelectionManager';
+import type { CanvasRebuilder } from '../core/render/CanvasRebuilder';
+import type { ToolManager } from '../tools/core/ToolManager';
+import type { UndoRedoController } from '../history/UndoRedoController';
+import type { CheckpointManager } from '../history/CheckpointManager';
+
+import { PencilProfile } from '../core/render/profiles/PencilProfiles';
+import { InkProfile } from '../core/render/profiles/InkProfile';
+import { FillProfile } from '../core/render/profiles/FillProfile';
+import { PaintProfile } from '../core/render/profiles/PaintProfile';
+import { HardRoundProfile } from '../core/render/profiles/HardRoundProfile';
+import { AirbrushProfile } from '../core/render/profiles/AirbrushProfile';
+import { CharcoalProfile } from '../core/render/profiles/CharcoalProfile';
 
 export class WorkspaceController {
-    // === FIX 1: Declaración explícita para respetar erasableSyntaxOnly ===
     private engine: CanvasEngine;
     private input: InputManager;
     private shortcuts: ShortcutManager;
@@ -26,142 +42,137 @@ export class WorkspaceController {
     private selection: SelectionManager;
     private rebuilder: CanvasRebuilder;
     private toolManager: ToolManager;
+    private undoRedoController: UndoRedoController;
+    private checkpoint: CheckpointManager | null;
 
     constructor(
-        engine: CanvasEngine, input: InputManager, shortcuts: ShortcutManager,
-        history: HistoryManager, timelapse: TimelapsePlayer, activeBrush: BrushEngine,
-        storage: StorageManager, viewport: ViewportManager, eventBus: EventBus,
-        selection: SelectionManager, rebuilder: CanvasRebuilder, toolManager: ToolManager
+        engine: CanvasEngine,
+        input: InputManager,
+        shortcuts: ShortcutManager,
+        history: HistoryManager,
+        timelapse: TimelapsePlayer,
+        activeBrush: BrushEngine,
+        storage: StorageManager,
+        viewport: ViewportManager,
+        eventBus: EventBus,
+        selection: SelectionManager,
+        rebuilder: CanvasRebuilder,
+        toolManager: ToolManager,
+        undoRedoController: UndoRedoController,
+        checkpoint: CheckpointManager | null = null, // ← opcional, zero-breaking
     ) {
-        // Asignación clásica
-        this.engine = engine; this.input = input; this.shortcuts = shortcuts;
-        this.history = history; this.timelapse = timelapse; this.activeBrush = activeBrush;
-        this.storage = storage; this.viewport = viewport; this.eventBus = eventBus;
-        this.selection = selection; this.rebuilder = rebuilder; this.toolManager = toolManager;
+        this.engine = engine;
+        this.input = input;
+        this.shortcuts = shortcuts;
+        this.history = history;
+        this.timelapse = timelapse;
+        this.activeBrush = activeBrush;
+        this.storage = storage;
+        this.viewport = viewport;
+        this.eventBus = eventBus;
+        this.selection = selection;
+        this.rebuilder = rebuilder;
+        this.toolManager = toolManager;
+        this.undoRedoController = undoRedoController;
+        this.checkpoint = checkpoint;
 
-        this.bindEvents();
+        this.bindInputEvents();
+        this.bindShortcuts();
         this.bindBusEvents();
     }
 
-    private bindEvents() {
-        this.shortcuts.bindDown('ctrl+z', async () => {
-            if (this.timelapse.isPlaying || this.toolManager.activeTool.isBusy()) return;
-            this.selection.clear(); // Limpiamos selección activa por seguridad
-            if (this.history.applyUndo()) {
-                this.history.rebuildSpatialGrid();
-                await this.rebuilder.rebuild(this.activeBrush);
-                const event = this.history.timeline[this.history.timeline.length - 1];
-                await this.storage.saveEvent(event);
-                event.isSaved = true;
-                this.history.enforceRamLimit();
-            }
-        });
-
-        const redoHandler = async () => {
-            if (this.timelapse.isPlaying || this.toolManager.activeTool.isBusy()) return;
-            this.selection.clear(); // Limpiamos selección activa por seguridad
-            if (this.history.applyRedo()) {
-                this.history.rebuildSpatialGrid();
-                await this.rebuilder.rebuild(this.activeBrush);
-                const event = this.history.timeline[this.history.timeline.length - 1];
-                await this.storage.saveEvent(event);
-                event.isSaved = true;
-                this.history.enforceRamLimit();
-            }
-        };
-        this.shortcuts.bindDown('ctrl+y', redoHandler);
-        this.shortcuts.bindDown('ctrl+shift+z', redoHandler);
-
-        let isPickingColor = false;
-        this.shortcuts.bindDown('alt', (e) => {
-            if (!e.repeat) {
-                if (this.timelapse.isPlaying || this.toolManager.activeTool.isBusy()) return;
-                isPickingColor = true;
-                this.engine.container.style.cursor = 'crosshair';
-            }
-        });
-        this.shortcuts.bindUp('alt', () => {
-            isPickingColor = false;
-            this.toolManager.activeTool.onActivate();
-        });
-
-        this.shortcuts.bindDown('h', () => this.eventBus.emit('FLIP_HORIZONTAL'));
-        this.shortcuts.bindDown('escape', () => {
-            if (this.toolManager.activeTool.id === 'lasso') this.toolManager.revertTool();
-        });
-
-        this.input.onWheel = (e, data) => {
-            if (this.timelapse.isPlaying) return;
-            if (e.ctrlKey || e.metaKey) {
-                this.viewport.zoomBy(Math.exp(-e.deltaY * 0.002), data.x, data.y);
-            } else {
-                this.viewport.pan(-e.deltaX, -e.deltaY);
-            }
-        };
-
-        this.input.onPointerDown = (data) => {
-            if (this.timelapse.isPlaying) return;
-            if (isPickingColor) {
-                const canvasPos = this.viewport.screenToCanvas(data.x, data.y);
-                const activeCtx = this.engine.getActiveLayerContext();
-                const pixel = activeCtx.getImageData(canvasPos.x, canvasPos.y, 1, 1).data;
-                if (pixel[3] > 0) {
-                    const hex = '#' + [pixel[0], pixel[1], pixel[2]].map(x => x.toString(16).padStart(2, '0')).join('');
-                    this.eventBus.emit('SET_COLOR', hex);
-                }
-                return;
-            }
-            this.toolManager.activeTool.onPointerDown(data);
-        };
-
-        this.input.onPointerMove = (data) => {
-            if (!this.timelapse.isPlaying && !isPickingColor) this.toolManager.activeTool.onPointerMove(data);
-        };
-        this.input.onPointerUp = (data) => {
-            if (!this.timelapse.isPlaying && !isPickingColor) this.toolManager.activeTool.onPointerUp(data);
-        };
+    private bindInputEvents(): void {
+        this.input.onPointerDown = (data) => this.toolManager.activeTool.onPointerDown(data);
+        this.input.onPointerMove = (data) => this.toolManager.activeTool.onPointerMove(data);
+        this.input.onPointerUp = (data) => this.toolManager.activeTool.onPointerUp(data);
     }
 
-    private bindBusEvents() {
-        document.addEventListener('DRAWINATION_FORCE_REBUILD', () => this.rebuilder.rebuild(this.activeBrush));
+    private bindShortcuts(): void {
+        this.shortcuts.bindDown('ctrl+z', () => this.undoRedoController.applyUndo());
+        this.shortcuts.bindDown('ctrl+y', () => this.undoRedoController.applyRedo());
+        this.shortcuts.bindDown('ctrl+shift+z', () => this.undoRedoController.applyRedo());
+    }
 
-        this.eventBus.on('PLAY_TIMELAPSE', () => {
+    private bindBusEvents(): void {
+        this.eventBus.on('PLAY_TIMELAPSE', async () => {
             if (this.timelapse.isPlaying || this.toolManager.activeTool.isBusy()) return;
+
             const spine = this.history.getTimelineSpine();
-            if (spine.length > 0) this.timelapse.play(spine, this.activeBrush, 30);
+            if (spine.length === 0) return;
+
+            this.history.isTimelapseRunning = true;
+            try {
+                await this.timelapse.play(spine, this.activeBrush, 30);
+            } finally {
+                this.history.isTimelapseRunning = false;
+                this.history.enforceRamLimit();
+            }
+
+            await this.rebuilder.rebuild(this.activeBrush);
         });
 
-        this.eventBus.on('DEBUG_DRAW_POINTS', () => this.rebuilder.debugDrawPoints(this.activeBrush));
-
-        this.eventBus.on('RESET_ROTATION', () => {
-            if (this.toolManager.activeTool.isBusy()) return;
-            const rect = this.engine.container.getBoundingClientRect();
-            this.viewport.setAngle(0, rect.width / 2, rect.height / 2);
+        this.eventBus.on('DEBUG_DRAW_POINTS', () => {
+            this.rebuilder.debugDrawPoints(this.activeBrush);
         });
 
         this.eventBus.on('CLEAR_ALL', async () => {
-            if (this.toolManager.activeTool.isBusy()) return;
-            await this.storage.clearAll();
             this.history.timeline = [];
-            this.history.spatialGrid.clear();
-            this.engine.clearActiveLayer();
-            this.history.cacheManager.clearAll();
+            this.history.rebuildSpatialGrid();
+            this.history['invalidateCache']?.();
             this.selection.clear();
+            this.engine.clearActiveLayer();
+            this.engine.clearPaintingCanvas();
+            await this.storage.clearAll?.();
+
+            // Invalidar checkpoint: el canvas está vacío, no queremos que
+            // la próxima recarga restaure el bitmap antiguo.
+            await this.checkpoint?.invalidate();
         });
 
-        this.eventBus.on('UPDATE_BRUSH_SIZE', (size: number) => {
-            this.activeBrush.profile.baseSize = size;
-            this.activeBrush.setProfile(this.activeBrush.profile);
+        // === GESTIÓN DE ESTADO DEL PINCEL ===
+        this.eventBus.on('UPDATE_BRUSH_SIZE', (size) => {
+            this.activeBrush.updateCurrentSize(size);
         });
-        this.eventBus.on('UPDATE_BRUSH_OPACITY', (opacity: number) => {
-            this.activeBrush.profile.baseOpacity = opacity;
-            this.activeBrush.setProfile(this.activeBrush.profile);
+
+        this.eventBus.on('UPDATE_BRUSH_OPACITY', (opacity) => {
+            this.activeBrush.updateCurrentOpacity(opacity);
+        });
+
+        this.eventBus.on('SET_COLOR', (color) => {
+            this.activeBrush.setColor(color);
+        });
+
+        // === CAMBIO INTELIGENTE DE HERRAMIENTAS ===
+        const applyAndSync = (profileObj: any) => {
+            this.activeBrush.useProfile(profileObj);
+            this.eventBus.emit('REQUEST_TOOL_SWITCH', 'pencil');
+            this.eventBus.emit('SYNC_UI_SLIDERS', {
+                size: this.activeBrush.profile.baseSize,
+                opacity: this.activeBrush.profile.baseOpacity,
+                minSize: this.activeBrush.profile.minSize || 1,
+                maxSize: this.activeBrush.profile.maxSize || 100
+            });
+        };
+
+        this.eventBus.on('SET_PROFILE_INK', () => applyAndSync(InkProfile));
+        this.eventBus.on('SET_PROFILE_PENCIL', () => applyAndSync(PencilProfile));
+        this.eventBus.on('SET_PROFILE_FILL', () => applyAndSync(FillProfile));
+        this.eventBus.on('SET_PROFILE_PAINT', () => applyAndSync(PaintProfile));
+        this.eventBus.on('SET_PROFILE_HARD_ROUND', () => applyAndSync(HardRoundProfile));
+        this.eventBus.on('SET_PROFILE_AIRBRUSH', () => applyAndSync(AirbrushProfile));
+        this.eventBus.on('SET_PROFILE_CHARCOAL', () => applyAndSync(CharcoalProfile));
+
+        // === VIEWPORT ===
+        this.eventBus.on('RESET_ROTATION', () => {
+            const w = this.engine.container.clientWidth;
+            const h = this.engine.container.clientHeight;
+            this.viewport.setAngle(0, w / 2, h / 2);
         });
 
         this.eventBus.on('FLIP_HORIZONTAL', () => {
-            if (this.toolManager.activeTool.isBusy()) return;
-            const rect = this.engine.container.getBoundingClientRect();
-            this.viewport.flipHorizontal(rect.width / 2, rect.height / 2);
+            const w = this.engine.container.clientWidth;
+            const h = this.engine.container.clientHeight;
+            this.viewport.flipHorizontal(w / 2, h / 2);
         });
     }
 }

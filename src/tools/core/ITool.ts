@@ -6,7 +6,9 @@ import type { HistoryManager } from '../../history/HistoryManager';
 import type { StorageManager } from '../../storage/StorageManager';
 import type { BrushEngine } from '../../core/render/BrushEngine';
 import type { EventBus } from '../../input/EventBus';
-import type { SelectionManager } from '../../core/selection/SelectionManager'; // <--- NUEVO
+import type { SelectionManager } from '../../core/selection/SelectionManager';
+import type { CanvasRebuilder } from '../../core/render/CanvasRebuilder';
+import type { UndoRedoController } from '../../history/UndoRedoController';
 
 export interface ToolContext {
     engine: CanvasEngine;
@@ -15,7 +17,10 @@ export interface ToolContext {
     storage: StorageManager;
     activeBrush: BrushEngine;
     eventBus: EventBus;
-    selection: SelectionManager; // <--- NUEVO
+    selection: SelectionManager;
+    rebuilder: CanvasRebuilder;
+    /** Nuevo: permite que las tools se registren como interceptores de undo/redo */
+    undoRedoController: UndoRedoController;
 }
 
 export interface ITool {

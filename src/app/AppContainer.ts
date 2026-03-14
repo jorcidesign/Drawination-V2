@@ -1,9 +1,15 @@
 // src/app/AppContainer.ts
+//
+// CAMBIOS vs versión anterior:
+//   1. Pasa this.storage al UndoRedoController (necesario para persistir UNDO/REDO).
+//   2. Integra CheckpointManager para arranque O(1) post-recarga.
+
 import { CanvasEngine } from '../core/engine/CanvasEngine';
 import { EventBus } from '../input/EventBus';
 import { StorageManager } from '../storage/StorageManager';
 import { CacheManager } from '../history/CacheManager';
 import { HistoryManager } from '../history/HistoryManager';
+import { CheckpointManager } from '../history/CheckpointManager';
 import { InputManager } from '../input/InputManager';
 import { ShortcutManager } from '../input/ShortcutManager';
 import { ViewportManager } from '../core/camera/ViewportManager';
@@ -13,12 +19,14 @@ import { TimelapsePlayer } from '../history/TimelapsePlayer';
 import { SelectionManager } from '../core/selection/SelectionManager';
 import { CanvasRebuilder } from '../core/render/CanvasRebuilder';
 import { ToolManager } from '../tools/core/ToolManager';
+import { UndoRedoController } from '../history/UndoRedoController';
 import { WorkspaceController } from './WorkspaceController';
 
 export class AppContainer {
     public eventBus: EventBus;
     public storage: StorageManager;
     public cache: CacheManager;
+    public checkpoint: CheckpointManager;
     public engine: CanvasEngine;
     public viewport: ViewportManager;
     public input: InputManager;
@@ -28,42 +36,59 @@ export class AppContainer {
     public timelapse: TimelapsePlayer;
     public selection: SelectionManager;
     public rebuilder: CanvasRebuilder;
+    public undoRedoController: UndoRedoController;
     public toolManager: ToolManager;
     public workspaceController: WorkspaceController;
 
     constructor(containerEl: HTMLElement) {
+        this.engine = new CanvasEngine(1180, 1180);
+        this.engine.container.style.backgroundColor = '#ecf0f1';
+        this.engine.transformContainer.style.backgroundColor = '#ffffff';
+        containerEl.appendChild(this.engine.container);
+
         this.eventBus = new EventBus();
         this.storage = new StorageManager();
-        this.cache = new CacheManager();
         this.shortcuts = new ShortcutManager();
         this.selection = new SelectionManager();
-
-        this.engine = new CanvasEngine(containerEl);
-
-        // === FIX 2: Pasamos this.engine.container en vez de this.engine ===
-        this.viewport = new ViewportManager(this.engine.container);
+        this.cache = new CacheManager(this.engine.width, this.engine.height);
+        this.checkpoint = new CheckpointManager();
+        this.viewport = new ViewportManager(this.engine.transformContainer);
         this.input = new InputManager(this.engine.container);
-
         this.activeBrush = new BrushEngine(PencilProfile);
+        this.activeBrush.color = '#2980b9';
 
-        const workerUrl = new URL('../history/CompressionWorker.ts', import.meta.url);
+        const workerUrl = new URL('../workers/CompressionWorker.ts', import.meta.url);
         const worker = new Worker(workerUrl, { type: 'module' });
 
         this.history = new HistoryManager(this.engine, worker, this.cache);
         this.timelapse = new TimelapsePlayer(this.engine, this.storage);
-        this.rebuilder = new CanvasRebuilder(this.engine, this.history, this.storage, this.selection);
+        this.rebuilder = new CanvasRebuilder(
+            this.engine,
+            this.history,
+            this.storage,
+            this.selection,
+            this.checkpoint,
+        );
+
+        const commandContext = {
+            rebuilder: this.rebuilder,
+            selection: this.selection,
+            eventBus: this.eventBus,
+            activeBrush: this.activeBrush,
+            engine: this.engine,
+        };
+
+        // FIX: storage se pasa para persistir UNDO/REDO en IDB
+        this.undoRedoController = new UndoRedoController(
+            this.history,
+            this.rebuilder,
+            this.activeBrush,
+            this.eventBus,
+            commandContext,
+            this.storage,
+        );
 
         this.toolManager = new ToolManager();
-
-        this.workspaceController = new WorkspaceController(
-            this.engine, this.input, this.shortcuts, this.history,
-            this.timelapse, this.activeBrush, this.storage,
-            this.viewport, this.eventBus, this.selection,
-            this.rebuilder, this.toolManager
-        );
-    }
-
-    public async start() {
         this.toolManager.bootstrap({
             engine: this.engine,
             viewport: this.viewport,
@@ -71,17 +96,68 @@ export class AppContainer {
             storage: this.storage,
             activeBrush: this.activeBrush,
             eventBus: this.eventBus,
-            selection: this.selection
+            selection: this.selection,
+            rebuilder: this.rebuilder,
+            undoRedoController: this.undoRedoController,
         }, this.shortcuts);
 
         this.toolManager.setDefaultTool('pencil');
 
-        await this.storage.init();
+        this.workspaceController = new WorkspaceController(
+            this.engine,
+            this.input,
+            this.shortcuts,
+            this.history,
+            this.timelapse,
+            this.activeBrush,
+            this.storage,
+            this.viewport,
+            this.eventBus,
+            this.selection,
+            this.rebuilder,
+            this.toolManager,
+            this.undoRedoController,
+            this.checkpoint,
+        );
+    }
+
+    public async start() {
+        await Promise.all([
+            this.storage.init(),
+            this.checkpoint.init(),
+        ]);
+
         const savedTimeline = await this.storage.loadTimeline();
-        if (savedTimeline.length > 0) {
-            this.history.timeline = savedTimeline;
-            this.history.rebuildSpatialGrid();
-            await this.rebuilder.rebuild(this.activeBrush);
+        if (savedTimeline.length === 0) return;
+
+        this.history.timeline = savedTimeline;
+        this.history.rebuildSpatialGrid();
+
+        const { spine } = this.history.getState();
+
+        if (spine.length > 0) {
+            const lastSpineEvent = spine[spine.length - 1];
+            const checkpointBitmap = await this.checkpoint.tryRestore(
+                lastSpineEvent.id,
+                spine.length
+            );
+
+            if (checkpointBitmap) {
+                const ctx = this.engine.getActiveLayerContext();
+                ctx.drawImage(checkpointBitmap, 0, 0);
+
+                const activeCommands = this.history.getActiveCommands(this.activeBrush);
+                if (activeCommands.length > 0) {
+                    const lastCmd = activeCommands[activeCommands.length - 1];
+                    await this.history.cacheManager.bake(lastCmd.id, ctx.canvas, false);
+                }
+
+                console.info(`[AppContainer] ⚡ Checkpoint restaurado. ${spine.length} eventos activos.`);
+                return;
+            }
         }
+
+        console.info(`[AppContainer] 🔄 Rebuild completo. Timeline: ${savedTimeline.length} eventos.`);
+        await this.rebuilder.rebuild(this.activeBrush);
     }
 }

@@ -29,7 +29,6 @@ export class ToolManager {
             }
         }
 
-        // === NUEVO: El Manager escucha solicitudes de cambio (Desde la UI o las Herramientas) ===
         ctx.eventBus.on('REQUEST_TOOL_SWITCH', (toolId: string) => {
             this.switchTool(toolId);
             this.setDefaultTool(toolId);
@@ -58,6 +57,22 @@ export class ToolManager {
 
         this._activeTool = newTool;
         this._activeTool.onActivate();
+    }
+
+    // === NUEVO: Para reactivar el Lazo después de Undo/Redo sin resetear su estado ===
+    public switchToolSilent(toolId: string) {
+        if (this._activeTool && this._activeTool.isBusy()) return;
+
+        const newTool = this.tools.get(toolId);
+        if (!newTool || newTool === this._activeTool) return;
+
+        if (this._activeTool) {
+            this.previousToolId = this._activeTool.id;
+            this._activeTool.onDeactivate();
+        }
+
+        this._activeTool = newTool;
+        // NO llamamos a onActivate() aquí. Quien lo llama asume la responsabilidad de configurarlo.
     }
 
     public revertTool() {

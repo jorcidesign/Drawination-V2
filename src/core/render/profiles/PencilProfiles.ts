@@ -1,23 +1,23 @@
-// src/core/render/profiles/PencilProfile.ts
+// src/core/render/profiles/PencilProfiles.ts
 import type { IBrushProfile } from './IBrushProfile';
 
 export const PencilProfile: IBrushProfile = {
     id: 'pencil-hb',
     name: 'Lápiz HB',
 
-    baseSize: 15,          // Un poco más grande para ver bien la textura
-    baseOpacity: 0.16666666666666666,      // Semitransparente para que la acumulación oscurezca
+    minSize: 4,     // El grano necesita espacio para verse
+    maxSize: 80,
+    baseSize: 8,
+
+    baseOpacity: 0.8,
     blendMode: 'source-over',
-
+    renderer: 'basic',
     textureType: 'pencil-grain',
-    spacing: 0.111222333333,          // ¡CLAVE! Estampa un sello cada 10% de avance
-
-    // Geometría del Lápiz (Punta redonda)
+    spacing: 0.111222333333,
     angle: 0,
     aspectRatio: 1.0,
-    renderMode: 'stroke',
-    // Antes estaba en 0.3
-    pressureSizeSensitivity: 0.02,   // Casi imperceptible, solo simula el micro-aplastamiento de la punta
-    pressureOpacitySensitivity: 0.8, // Todo el esfuerzo se va en oscurecer el trazo
+    pressureSizeSensitivity: 0.02,
+    pressureOpacitySensitivity: 0.8,
     smoothing: 0.2
 };
+// Nota: Aplica minSize y maxSize a Paint, Airbrush, HardRound, etc.

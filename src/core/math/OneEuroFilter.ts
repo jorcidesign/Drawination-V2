@@ -1,29 +1,45 @@
-// src/core/OneEuroFilter.ts
+// src/core/math/OneEuroFilter.ts
+//
+// One Euro Filter — versión corregida y estable.
+//
+// CAMBIOS vs versión con velocity prediction:
+// - Sin velocity prediction: causaba saltos fantasma al inicio de cada trazo
+//   porque velX/velY del objeto anterior se propagaba al nuevo objeto creado
+//   en _updateCutoff(). El primer punto recibía una predicción de velocidad
+//   residual que lo desplazaba cientos de píxeles.
+// - Sin recreación del filtro en caliente: también causaba saltos.
+//   Ahora el minCutoff se actualiza directamente en el objeto existente.
+//
+// FIX PRINCIPAL (vs versión original del proyecto):
+// La derivada se calcula sobre valores RAW, no sobre el valor filtrado.
+// dx = (x_raw_actual - x_raw_anterior) / dt   ← CORRECTO
+// dx = (x - xFilt.last()) / dt               ← INCORRECTO (bucle de retroalimentación)
 
 class LowPassFilter {
     private prev: number = 0;
-    private hasPrev: boolean = false;
+    private initialized = false;
 
-    public filter(val: number, alpha: number): number {
-        if (!this.hasPrev) {
-            this.prev = val;
-            this.hasPrev = true;
-            return val;
+    public filter(value: number, alpha: number): number {
+        if (!this.initialized) {
+            this.prev = value;
+            this.initialized = true;
+            return value;
         }
-        this.prev = alpha * val + (1 - alpha) * this.prev;
-        return this.prev;
+        const result = alpha * value + (1 - alpha) * this.prev;
+        this.prev = result;
+        return result;
     }
 
-    public last(): number {
-        return this.prev;
-    }
+    public last(): number { return this.prev; }
 
     public reset(): void {
-        this.hasPrev = false;
+        this.initialized = false;
+        this.prev = 0;
     }
 }
 
 export class OneEuroFilter {
+
     private minCutoff: number;
     private beta: number;
     private dCutoff: number;
@@ -33,17 +49,21 @@ export class OneEuroFilter {
     private dxFilt = new LowPassFilter();
     private dyFilt = new LowPassFilter();
 
-    private lastTime: number = -1;
+    private lastTime = -1;
 
-    /**
-     * @param minCutoff Frecuencia mínima de corte (Hz). Menor = más suave a baja velocidad, pero más lag. (Ej. 1.0)
-     * @param beta Factor de compensación de velocidad. Mayor = menos lag a alta velocidad, pero más ruido. (Ej. 0.02)
-     * @param dCutoff Frecuencia de corte para la derivada (velocidad). (Ej. 1.0)
-     */
-    constructor(minCutoff = 1.0, beta = 0.02, dCutoff = 1.0) {
+    // RAW anteriores — para calcular derivada correctamente
+    private lastRawX = 0;
+    private lastRawY = 0;
+
+    constructor(minCutoff = 0.5, beta = 0.007, dCutoff = 1.0) {
         this.minCutoff = minCutoff;
         this.beta = beta;
         this.dCutoff = dCutoff;
+    }
+
+    // Permite cambiar minCutoff sin recrear el objeto ni perder el estado
+    public setMinCutoff(value: number): void {
+        this.minCutoff = value;
     }
 
     public reset(): void {
@@ -52,6 +72,8 @@ export class OneEuroFilter {
         this.dxFilt.reset();
         this.dyFilt.reset();
         this.lastTime = -1;
+        this.lastRawX = 0;
+        this.lastRawY = 0;
     }
 
     private alpha(cutoff: number, dt: number): number {
@@ -59,33 +81,41 @@ export class OneEuroFilter {
         return 1.0 / (1.0 + tau / dt);
     }
 
-    public filter(x: number, y: number, timestamp: number): { x: number, y: number } {
+    public filter(x: number, y: number, timestamp: number): { x: number; y: number } {
+
+        // Primer punto: sin filtrado, solo inicializar
         if (this.lastTime === -1) {
             this.lastTime = timestamp;
+            this.lastRawX = x;
+            this.lastRawY = y;
             return {
                 x: this.xFilt.filter(x, 1),
                 y: this.yFilt.filter(y, 1)
             };
         }
 
-        const dt = (timestamp - this.lastTime) / 1000.0; // Segundos
-        if (dt <= 0) return { x: this.xFilt.last(), y: this.yFilt.last() };
+        let dt = (timestamp - this.lastTime) / 1000;
+        // Clamp: evitar dt=0 y dt muy grande (pausa > 100ms)
+        if (dt <= 0.0001) dt = 1 / 120;
+        if (dt > 0.1) dt = 1 / 60;
 
         this.lastTime = timestamp;
 
-        // Estimar la velocidad (Derivada)
-        const dx = (x - this.xFilt.last()) / dt;
-        const dy = (y - this.yFilt.last()) / dt;
+        // Derivada sobre RAW — no sobre filtrado
+        const dx = (x - this.lastRawX) / dt;
+        const dy = (y - this.lastRawY) / dt;
+        this.lastRawX = x;
+        this.lastRawY = y;
 
-        // Filtrar la velocidad
-        const edx = this.dxFilt.filter(dx, this.alpha(this.dCutoff, dt));
-        const edy = this.dyFilt.filter(dy, this.alpha(this.dCutoff, dt));
+        // Filtrar velocidad
+        const alphaD = this.alpha(this.dCutoff, dt);
+        const edx = this.dxFilt.filter(dx, alphaD);
+        const edy = this.dyFilt.filter(dy, alphaD);
 
-        // Calcular la frecuencia de corte basada en la velocidad
+        // Cutoff adaptativo: a más velocidad, menos suavizado (menos lag)
         const cutoffX = this.minCutoff + this.beta * Math.abs(edx);
         const cutoffY = this.minCutoff + this.beta * Math.abs(edy);
 
-        // Filtrar finalmente las coordenadas (x, y)
         const filteredX = this.xFilt.filter(x, this.alpha(cutoffX, dt));
         const filteredY = this.yFilt.filter(y, this.alpha(cutoffY, dt));
 

@@ -10,6 +10,11 @@ export class SelectionManager {
         this.bbox = bbox;
     }
 
+    // === NUEVO: Para actualizar la caja tras un movimiento instantáneo ===
+    public setBbox(bbox: BoundingBox) {
+        this.bbox = bbox;
+    }
+
     public clear() {
         this.selectedIds.clear();
         this.bbox = null;

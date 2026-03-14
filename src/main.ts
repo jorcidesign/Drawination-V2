@@ -1,14 +1,15 @@
 // src/main.ts
 import { DrawinationApp } from './app/DrawinationApp';
 
-// Esperamos a que el HTML cargue completamente antes de arrancar el motor
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   try {
-    // Boom. Una sola línea arranca todo el motor (EventBus, UI, Canvas, etc.)
     const app = new DrawinationApp('drawination-workspace');
-
-    // Lo exportamos a Window para poder debugear desde la consola
     (window as any).drawinationApp = app;
+
+    // === FIX: Sin este await, storage.init() nunca corre y la sesión
+    // no se restaura al refrescar. También es la causa raíz de los
+    // primeros trazos que no se guardaban en IDB.
+    await app.init();
 
     console.log("🚀 Drawination Engine iniciado correctamente");
   } catch (error) {

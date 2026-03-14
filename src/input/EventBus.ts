@@ -1,36 +1,67 @@
 // src/input/EventBus.ts
+import type { TimelineEvent } from '../history/TimelineTypes';
 
-// === MAGIA: Usamos 'interface' en lugar de 'type' ===
-// Aquí solo declaramos los eventos GLOBALES del Core.
-// Las herramientas inyectarán sus propios eventos desde sus propios archivos.
 export interface AppEventMap {
+    // ── Globales ──────────────────────────────────────────────────────────
     'PLAY_TIMELAPSE': void;
     'DEBUG_DRAW_POINTS': void;
     'CLEAR_ALL': void;
     'RESET_ROTATION': void;
     'FLIP_HORIZONTAL': void;
-    'SYNC_UI_SLIDERS': { size: number, opacity: number };
+
+    // === FIX: Añadimos minSize y maxSize como opcionales (?) ===
+    'SYNC_UI_SLIDERS': { size: number; opacity: number; minSize?: number; maxSize?: number };
+
     'SET_COLOR': string;
     'UPDATE_BRUSH_SIZE': number;
     'UPDATE_BRUSH_OPACITY': number;
     'REQUEST_TOOL_SWITCH': string;
+
+    // ── Historia ──────────────────────────────────────────────────────────
+    'HISTORY_RESTORED': { event: TimelineEvent; action: 'UNDO' | 'REDO' };
+    'REQUEST_TRANSFORM_HANDLE_REFRESH': { targetIds: string[] };
+
+    // ── HIDE ──────────────────────────────────────────────────────────────
+    // Emitidos por HideCommand.onAfterUndo/onAfterRedo
+    // Listos para que el LayerPanel o un indicador visual los escuche
+    'HIDE_UNDONE': { targetIds: string[] };
+    'HIDE_REDONE': { targetIds: string[] };
+
+    // ── Herramientas de dibujo ────────────────────────────────────────────
+    'SET_TOOL_ERASER': void;
+    'SET_TOOL_PENCIL': void;
+    'SET_PROFILE_INK': void;
+    'SET_PROFILE_PENCIL': void;
+    'SET_PROFILE_FILL': void;
+    'SET_PROFILE_PAINT': void;
+    'SET_PROFILE_HARD_ROUND': void;
+    'SET_PROFILE_AIRBRUSH': void;
+    'SET_PROFILE_CHARCOAL': void;
 }
 
 export class EventBus {
-    // El mapa ahora está fuertemente tipado según las llaves de AppEventMap
     private listeners: Map<keyof AppEventMap, Array<(payload?: any) => void>> = new Map();
 
-    public on<K extends keyof AppEventMap>(event: K, callback: (payload: AppEventMap[K]) => void) {
-        if (!this.listeners.has(event)) {
-            this.listeners.set(event, []);
-        }
+    public on<K extends keyof AppEventMap>(
+        event: K,
+        callback: (payload: AppEventMap[K]) => void
+    ): void {
+        if (!this.listeners.has(event)) this.listeners.set(event, []);
         this.listeners.get(event)!.push(callback);
     }
 
-    public emit<K extends keyof AppEventMap>(event: K, payload?: AppEventMap[K]) {
+    public off<K extends keyof AppEventMap>(
+        event: K,
+        callback: (payload: AppEventMap[K]) => void
+    ): void {
+        const listeners = this.listeners.get(event);
+        if (!listeners) return;
+        const idx = listeners.indexOf(callback);
+        if (idx !== -1) listeners.splice(idx, 1);
+    }
+
+    public emit<K extends keyof AppEventMap>(event: K, payload?: AppEventMap[K]): void {
         const callbacks = this.listeners.get(event);
-        if (callbacks) {
-            callbacks.forEach(cb => cb(payload));
-        }
+        if (callbacks) [...callbacks].forEach(cb => cb(payload));
     }
 }
