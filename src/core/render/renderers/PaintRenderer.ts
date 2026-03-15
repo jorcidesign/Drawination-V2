@@ -3,6 +3,7 @@ import type { IBrushRenderer } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
 import { ValueNoise2D } from '../../math/ValueNoise2D';
+import type { StrokePoint } from '../../io/BinarySerializer';
 
 // ─── Constantes internas del renderer ────────────────────────────────────────
 // No van en IBrushProfile porque no son parámetros de usuario.
@@ -334,5 +335,20 @@ export class PaintRenderer implements IBrushRenderer {
     // Liberar la noise texture para no acumular memoria entre strokes
     public endStroke(): void {
         this.noiseTexture = null;
+    }
+
+    // Reconstrucción Two-Pass: evita que la opacidad del trazo se contamine con los píxeles del lienzo
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+        const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
+
+        helpers.simulateDrawing(offCtx);
+
+        ctx.save();
+        ctx.globalAlpha = 1.0;
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.drawImage(offCtx.canvas, 0, 0);
+        ctx.restore();
+
+        offCtx.clearRect(0, 0, offCtx.canvas.width, offCtx.canvas.height);
     }
 }

@@ -1,17 +1,10 @@
 // src/history/TimelapsePlayer.ts
 //
 // Reproduce el timeline cronológicamente como una animación.
-//
-// Cambios vs versión anterior:
-//   - Importa TimelineEvent desde TimelineTypes (no desde HistoryManager)
-//   - Respeta HIDE: trazos ocultos no aparecen en el timelapse
-//   - buildPlaylist() colapsa TRANSFORMs consecutivos del mismo grupo
-//   - preloadAllData() carga todo en batch antes de reproducir (sigue igual)
-//   - dataMap local — nunca toca event.data del objeto vivo (sigue igual)
 
 import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { BrushEngine } from '../core/render/BrushEngine';
-import type { TimelineEvent } from './TimelineTypes';   // ← importa de TimelineTypes
+import type { TimelineEvent } from './TimelineTypes';
 import type { StorageManager } from '../storage/StorageManager';
 import type { ICommand } from './commands/ICommand';
 import { CommandFactory } from './commands/CommandFactory';
@@ -26,16 +19,10 @@ export class TimelapsePlayer {
         this.storage = storage;
     }
 
-    // ── Construcción de la playlist ───────────────────────────────────────
-    // Colapsa TRANSFORMs consecutivos del mismo grupo en uno solo.
-    // Esto evita que el timelapse muestre micro-movimientos intermedios.
-    // También filtra eventos HIDE: los trazos ocultos no aparecen.
     private buildPlaylist(spine: TimelineEvent[]): any[] {
         const playlist: any[] = [];
-
-        // Primero: acumular qué IDs están ocultos al llegar a cada evento HIDE
-        // (respeta el orden cronológico de la spine)
         const hiddenIds = new Set<string>();
+
         for (const ev of spine) {
             if (ev.type === 'HIDE' && ev.targetIds) {
                 for (const id of ev.targetIds) hiddenIds.add(id);
@@ -46,13 +33,11 @@ export class TimelapsePlayer {
         while (i < spine.length) {
             const ev = spine[i];
 
-            // HIDE: no emite nada al timelapse — el resultado ya está en hiddenIds
             if (ev.type === 'HIDE') {
                 i++;
                 continue;
             }
 
-            // TRANSFORM: colapsar consecutivos del mismo grupo
             if (ev.type === 'TRANSFORM' && ev.targetIds && ev.transformMatrix) {
                 let currentMatrix = new DOMMatrix(ev.transformMatrix);
                 const sortedIds = ev.targetIds.slice().sort().join(',');
@@ -81,12 +66,10 @@ export class TimelapsePlayer {
                 continue;
             }
 
-            // STROKE / ERASE: solo añadir si no está oculto
             if ((ev.type === 'STROKE' || ev.type === 'ERASE') && !hiddenIds.has(ev.id)) {
                 playlist.push(ev);
             }
 
-            // FILL y otros: añadir siempre que no estén ocultos
             if (ev.type === 'FILL' && !hiddenIds.has(ev.id)) {
                 playlist.push(ev);
             }
@@ -97,9 +80,6 @@ export class TimelapsePlayer {
         return playlist;
     }
 
-    // ── Pre-carga batch — 1 transacción IDB para toda la sesión ──────────
-    // Datos en Map LOCAL — nunca toca event.data del objeto vivo.
-    // enforceRamLimit() puede operar sin interferir.
     private async preloadAllData(spine: TimelineEvent[]): Promise<Map<string, ArrayBuffer>> {
         const drawingEvents = spine.filter(
             ev => ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL'
@@ -138,28 +118,29 @@ export class TimelapsePlayer {
         return dataMap;
     }
 
-    // ── Reproducción ──────────────────────────────────────────────────────
     public async play(spine: TimelineEvent[], brush: BrushEngine, delayMs = 30): Promise<void> {
         if (this.isPlaying) return;
         this.isPlaying = true;
 
-        this.engine.clearActiveLayer();
-        const ctx = this.engine.getActiveLayerContext();
+        // === FIX 1: Limpiar TODAS las capas antes de empezar ===
+        this.engine.clearAllLayers();
+
         const drawnCommands: ICommand[] = [];
         const currentTransforms = new Map<string, DOMMatrix>();
 
         console.log(`🎬 Timelapse: ${spine.length} eventos en la spine`);
 
-        // Pre-cargar TODO antes de animar — eliminamos la dependencia de event.data
         const dataMap = await this.preloadAllData(spine);
         const playlist = this.buildPlaylist(spine);
+
+        // Necesitamos state para el enrutamiento virtual de capas (Merge Down) en el timelapse
+        const state = (window as any).drawinationApp.container.history.getState();
 
         console.log(`🎬 Reproduciendo ${playlist.length} pasos...`);
 
         for (const event of playlist) {
             if (!this.isPlaying) break;
 
-            // ── TRANSFORM colapsado ──────────────────────────────────────
             if (event.type === 'TRANSFORM_COLLAPSED' && event.targetIds && event.transformMatrix) {
                 const newMatrix = new DOMMatrix(event.transformMatrix);
 
@@ -169,19 +150,24 @@ export class TimelapsePlayer {
                     currentTransforms.set(id, current);
                 }
 
-                // Redibujar todo con las matrices actualizadas
-                this.engine.clearActiveLayer();
+                // === FIX 2: Limpiar TODAS las capas al re-renderizar un transform ===
+                this.engine.clearAllLayers();
+
                 for (const cmd of drawnCommands) {
                     const t = currentTransforms.get(cmd.id);
                     if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                    cmd.execute(ctx);
+
+                    const originalLayer = (cmd as any).event?.layerIndex ?? 0;
+                    const targetLayer = state.layerRoute.get(originalLayer) ?? originalLayer;
+                    const targetCtx = this.engine.getLayerContext(targetLayer);
+
+                    cmd.execute(targetCtx);
                 }
 
                 await new Promise(resolve => setTimeout(resolve, delayMs * 3));
                 continue;
             }
 
-            // ── STROKE / ERASE / FILL ─────────────────────────────────────
             if (event.type === 'STROKE' || event.type === 'ERASE' || event.type === 'FILL') {
                 const localData = dataMap.get(event.id);
 
@@ -190,15 +176,17 @@ export class TimelapsePlayer {
                     continue;
                 }
 
-                // Snapshot local del evento con data garantizada
-                // NO mutamos el objeto vivo del timeline
                 const eventSnapshot: TimelineEvent = { ...event, data: localData };
                 const cmd = CommandFactory.create(eventSnapshot, brush);
 
                 const t = currentTransforms.get(cmd.id);
                 if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
 
-                cmd.execute(ctx);
+                const originalLayer = event.layerIndex ?? 0;
+                const targetLayer = state.layerRoute.get(originalLayer) ?? originalLayer;
+                const targetCtx = this.engine.getLayerContext(targetLayer);
+
+                cmd.execute(targetCtx);
                 drawnCommands.push(cmd);
 
                 await new Promise(resolve => setTimeout(resolve, delayMs));

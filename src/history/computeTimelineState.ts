@@ -54,11 +54,15 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
     const transforms = new Map<string, DOMMatrix>();
     const hiddenIds = new Set<string>();
     const layersState = new Map<number, LayerState>();
+    const layerRoute = new Map<number, number>();
 
-    // Inicializar capas con estado por defecto
+    let derivedActiveLayerIndex = 0; // <--- INICIALIZAMOS EL FOCO EN LA CAPA 0
+
+    // Inicializar capas con estado por defecto y enrutamiento 1:1
     // (las capas que no han sido creadas explícitamente también existen implícitamente)
     for (let i = 0; i < MAX_LAYERS; i++) {
         layersState.set(i, buildDefaultLayerState(i));
+        layerRoute.set(i, i);
     }
 
     for (const ev of spine) {
@@ -89,6 +93,25 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
                     for (const id of ev.targetIds) hiddenIds.add(id);
                 }
                 break;
+
+            case 'LAYER_CREATE': {
+                const existing = layersState.get(ev.layerIndex) ?? buildDefaultLayerState(ev.layerIndex);
+                layersState.set(ev.layerIndex, {
+                    ...existing,
+                    name: ev.layerName ?? existing.name,
+                    visible: true,
+                    locked: false,
+                });
+
+                derivedActiveLayerIndex = ev.layerIndex; // <--- Foco automático al crear
+                break;
+            }
+
+            // ── EL NUEVO EVENTO ───────────────────────────────────────────
+            case 'LAYER_SELECT': {
+                derivedActiveLayerIndex = ev.layerIndex; // <--- Actualizar el foco
+                break;
+            }
 
             // ── DUPLICATE_GROUP → los nuevos strokes YA están en el
             //    timeline como STROKE events. DUPLICATE_GROUP solo es
@@ -159,15 +182,31 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
                 break;
             }
 
-            // ── LAYER_MERGE_DOWN → re-asignar layerIndex en los strokes
-            // No podemos mutar los eventos (son inmutables), así que
-            // marcamos los strokes de la capa superior como si fueran
-            // de la capa inferior en el Map de transforms.
-            // El CanvasRebuilder usa layerIndex del evento original
-            // y consulta layersState para saber dónde dibujar.
-            // NOTA: Implementación completa en Fase 4 con CanvasRebuilder multi-capa.
-            case 'LAYER_MERGE_DOWN':
+            // ── LAYER_MERGE_DOWN → Enrutamiento Virtual No-Destructivo ────
+            case 'LAYER_MERGE_DOWN': {
+                const source = ev.layerIndex;
+                const target = source - 1;
+
+                if (target >= 0) {
+                    // Si el target a su vez ya había sido fusionado hacia otra capa, 
+                    // buscamos el destino final real.
+                    const finalDest = layerRoute.get(target) ?? target;
+
+                    // Todos los trazos que iban a "source", ahora van a "finalDest"
+                    // Y si había capas fusionadas previamente hacia "source", también se actualizan
+                    for (const [key, value] of layerRoute.entries()) {
+                        if (value === source) {
+                            layerRoute.set(key, finalDest);
+                        }
+                    }
+                    layerRoute.set(source, finalDest);
+
+                    // La capa origen queda oculta lógicamente
+                    const layer = layersState.get(source) ?? buildDefaultLayerState(source);
+                    layersState.set(source, { ...layer, visible: false });
+                }
                 break;
+            }
 
             // ── Eventos de control → no afectan el estado derivado ────────
             case 'UNDO':
@@ -187,7 +226,7 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
         }
     }
 
-    return { spine, active, transforms, hiddenIds, layersState, undone };
+    return { spine, active, transforms, hiddenIds, layersState, layerRoute, derivedActiveLayerIndex, undone };
 }
 
 // Helper interno para el spread limpio

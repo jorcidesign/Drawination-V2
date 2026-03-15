@@ -2,6 +2,7 @@
 import type { IBrushRenderer } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
+import type { StrokePoint } from '../../io/BinarySerializer';
 
 // [FIX] PRNG determinista para el grano del lápiz. 
 // Elimina la dependencia de Math.random() para que el Ctrl+Z sea fiel 1:1.
@@ -157,5 +158,28 @@ export class BasicRenderer implements IBrushRenderer {
     // === Limpiamos el buffer al levantar el lápiz ===
     public endStroke() {
         this.inputBuffer = [];
+    }
+
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+        if (profile.blendMode === 'destination-out') {
+            // El borrador debe ir directo al contexto real para "comerse" los píxeles
+            ctx.save();
+            ctx.globalAlpha = 1.0;
+            ctx.globalCompositeOperation = 'source-over';
+            helpers.simulateDrawing(ctx);
+            ctx.restore();
+        } else {
+            // El lápiz normal usa Two-Pass para acumular opacidad limpiamente
+            const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
+            helpers.simulateDrawing(offCtx);
+
+            ctx.save();
+            ctx.globalAlpha = 1.0;
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.drawImage(offCtx.canvas, 0, 0);
+            ctx.restore();
+
+            offCtx.clearRect(0, 0, offCtx.canvas.width, offCtx.canvas.height);
+        }
     }
 }

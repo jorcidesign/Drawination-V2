@@ -1,29 +1,4 @@
 // src/core/render/renderers/AirbrushRenderer.ts
-//
-// Aerógrafo vectorial de alta calidad — física de Procreate/Concepts.
-//
-// FÍSICA:
-// Un aerógrafo real dispersa pigmento en nube gaussiana:
-//   - Centro opaco, borde completamente transparente (falloff suave)
-//   - Acumulación natural: pasar varias veces oscurece la zona
-//   - Sensible a presión en OPACIDAD (no tamaño) — como el aerógrafo real
-//   - Flow bajo: cada stamp deposita poco, se acumula con el tiempo
-//
-// IMPLEMENTACIÓN VECTORIAL — sin loops de partículas:
-// El stamp es un gradiente radial aplicado una sola vez via CanvasGradient.
-// Costo por stamp: O(1) — igual que dibujar un círculo.
-// El falloff gaussiano se aproxima con una secuencia de ColorStops
-// que discretizan la curva e^(-r²) — visualmente indistinguible.
-//
-// DETERMINISMO:
-// No hay Math.random() en el stamp — mismo input → mismo output.
-// El tipCanvas contiene el gradiente pre-renderizado y se regenera
-// solo cuando cambia color/tamaño. Ctrl+Z reproduce idéntico.
-//
-// PARTÍCULAS DE BORDE (opcionales, para textura):
-// Unos pocos puntos estáticos en la zona exterior del gradiente
-// generados con PRNG seeded — aportan organicidad sin coste.
-
 import type { IBrushRenderer } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
@@ -47,20 +22,32 @@ export class AirbrushRenderer implements IBrushRenderer {
     private lastColor: string = '';
     private lastSize: number = 0;
 
+    // ── DEBUG ─────────────────────────────────────────────────────────────
+    // Contadores para saber exactamente qué valores entran a stamp()
+    // en cada contexto (live vs rebuild).
+    private _debugStrokeId: string = '';
+    private _debugIsFirst: boolean = true;
+    private _debugSamples: Array<{
+        pressure: number;
+        flow: number;
+        baseOpacity: number;
+        pressureCurve: number;
+        finalOpacity: number;
+        ctxAlphaBefore: number;   // globalAlpha del ctx ANTES de tocarla
+        ctxAlphaAfter: number;    // globalAlpha del ctx DESPUÉS de setearla
+        ctxComposite: string;     // globalCompositeOperation en el momento del stamp
+    }> = [];
+
     constructor() {
         this.tipCanvas = document.createElement('canvas');
         this.tipCtx = this.tipCanvas.getContext('2d')!;
     }
 
-    // ── updateTip ─────────────────────────────────────────────────────────
-    // Renderiza el gradiente gaussiano UNA vez. Stamp = drawImage.
-    // Sin updateTip → sin regeneración innecesaria.
     public updateTip(profile: IBrushProfile, color: string): void {
         if (color === this.lastColor && profile.baseSize === this.lastSize) return;
         this.lastColor = color;
         this.lastSize = profile.baseSize;
 
-        // El tipCanvas es 2x el radio para tener margen de falloff completo
         const size = Math.max(64, profile.baseSize * 2);
         this.tipCanvas.width = size;
         this.tipCanvas.height = size;
@@ -68,20 +55,9 @@ export class AirbrushRenderer implements IBrushRenderer {
 
         this.tipCtx.clearRect(0, 0, size, size);
 
-        // ── Gradiente gaussiano ───────────────────────────────────────────
-        // Aproximamos e^(-r²) con 6 color stops.
-        // La curva gaussiana real: opacidad = e^(-(r/σ)²) con σ ≈ 0.4
-        // Discretizada en stops para que el browser la interpole suave.
         const grad = this.tipCtx.createRadialGradient(cx, cx, 0, cx, cx, cx);
         const rgb = this.hexToRgb(color);
 
-        // Stops calibrados para simular e^(-r²/0.32) — gaussiana estándar aerógrafo
-        // r=0.00 → alpha 1.00  (centro opaco)
-        // r=0.30 → alpha 0.78  (gaussiana: e^(-0.09/0.32) ≈ 0.75)
-        // r=0.50 → alpha 0.46  (gaussiana: e^(-0.25/0.32) ≈ 0.46)
-        // r=0.70 → alpha 0.15  (gaussiana: e^(-0.49/0.32) ≈ 0.22)
-        // r=0.85 → alpha 0.04  (gaussiana: e^(-0.72/0.32) ≈ 0.10)
-        // r=1.00 → alpha 0.00  (borde completamente transparente)
         grad.addColorStop(0.00, `rgba(${rgb}, 1.00)`);
         grad.addColorStop(0.30, `rgba(${rgb}, 0.78)`);
         grad.addColorStop(0.50, `rgba(${rgb}, 0.46)`);
@@ -94,10 +70,6 @@ export class AirbrushRenderer implements IBrushRenderer {
         this.tipCtx.arc(cx, cx, cx, 0, Math.PI * 2);
         this.tipCtx.fill();
 
-        // ── Partículas de borde ───────────────────────────────────────────
-        // ~20 puntos en la zona exterior (r ∈ [0.5, 0.95]) generados con
-        // PRNG seeded para que sean siempre los mismos (determinismo).
-        // Aportan la textura "spray" sin loops costosos en stamp().
         const rng = new SeededRNG(parseInt(color.replace('#', ''), 16) ^ (size * 1337));
         const particleCount = Math.max(12, Math.floor(cx * 0.6));
 
@@ -105,15 +77,10 @@ export class AirbrushRenderer implements IBrushRenderer {
 
         for (let i = 0; i < particleCount; i++) {
             const angle = rng.next() * Math.PI * 2;
-            // Distribución radial sesgada hacia el borde exterior
             const r = cx * (0.5 + rng.next() * 0.45);
             const px = cx + Math.cos(angle) * r;
             const py = cx + Math.sin(angle) * r;
-
-            // Tamaño de partícula: micro (0.4–1.2px) — no puntos grandes
             const pSize = 0.4 + rng.next() * 0.8;
-            // Opacidad: muy baja, proporcional a la distancia del centro
-            // Las partículas más exteriores son casi invisibles
             const pAlpha = (1 - r / cx) * 0.35 * rng.next();
 
             this.tipCtx.globalAlpha = pAlpha;
@@ -127,19 +94,13 @@ export class AirbrushRenderer implements IBrushRenderer {
         this.tipCtx.globalAlpha = 1;
     }
 
-    private hexToRgb(hex: string): string {
-        const r = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-        return r
-            ? `${parseInt(r[1], 16)}, ${parseInt(r[2], 16)}, ${parseInt(r[3], 16)}`
-            : '0, 0, 0';
+    public beginStroke(_profile: IBrushProfile, _color: string, _startPt: BasePoint): void {
+        // Nuevo trazo: resetear debug
+        this._debugStrokeId = Math.random().toString(36).slice(2, 7);
+        this._debugIsFirst = true;
+        this._debugSamples = [];
     }
 
-    public beginStroke(_profile: IBrushProfile, _color: string, _startPt: BasePoint): void { }
-
-    // ── stamp ─────────────────────────────────────────────────────────────
-    // Una sola llamada a drawImage — costo O(1) independiente del tamaño.
-    // La opacidad responde a la presión (no el tamaño) — física de aerógrafo.
-    // El flow bajo (0.15) asegura acumulación gradual y natural.
     public stamp(
         ctx: CanvasRenderingContext2D,
         profile: IBrushProfile,
@@ -149,19 +110,113 @@ export class AirbrushRenderer implements IBrushRenderer {
         pressure: number
     ): void {
         const flow = profile.physics?.flow ?? 0.15;
-
-        // Presión modula la cantidad de pintura que sale
-        // Curva levemente cuadrática para más control en presiones bajas
         const pressureCurve = pressure * pressure * 0.4 + pressure * 0.6;
         const finalOpacity = Math.min(1, flow * pressureCurve * profile.baseOpacity * 3.5);
+
+        // ── CAPTURA DEBUG ─────────────────────────────────────────────────
+        const ctxAlphaBefore = ctx.globalAlpha;
+        const ctxComposite = ctx.globalCompositeOperation;
+
+        if (this._debugSamples.length < 5) {
+            // Capturamos los primeros 5 stamps de cada trazo
+            this._debugSamples.push({
+                pressure: +pressure.toFixed(4),
+                flow: +flow.toFixed(4),
+                baseOpacity: +profile.baseOpacity.toFixed(4),
+                pressureCurve: +pressureCurve.toFixed(4),
+                finalOpacity: +finalOpacity.toFixed(4),
+                ctxAlphaBefore: +ctxAlphaBefore.toFixed(4),
+                ctxAlphaAfter: 0, // se rellena después
+                ctxComposite,
+            });
+        }
 
         if (finalOpacity < 0.001) return;
 
         ctx.globalAlpha = finalOpacity;
 
-        const halfSize = profile.baseSize;  // tipCanvas es 2x el baseSize
+        // Rellenar ctxAlphaAfter en la última muestra
+        if (this._debugSamples.length > 0) {
+            this._debugSamples[this._debugSamples.length - 1].ctxAlphaAfter = +ctx.globalAlpha.toFixed(4);
+        }
+
+        const halfSize = profile.baseSize;
         ctx.drawImage(this.tipCanvas, x - halfSize, y - halfSize, halfSize * 2, halfSize * 2);
+
+        // ── LOG solo en el primer stamp de cada trazo ─────────────────────
+        // (para no inundar la consola con miles de líneas)
+        if (this._debugIsFirst) {
+            this._debugIsFirst = false;
+            // Guardamos en window para inspeccionarlo después si hace falta
+            (window as any).__airbrushDebug = (window as any).__airbrushDebug || [];
+            (window as any).__airbrushDebug.push({
+                strokeId: this._debugStrokeId,
+                firstStamp: {
+                    pressure: +pressure.toFixed(4),
+                    flow: +flow.toFixed(4),
+                    baseOpacity: +profile.baseOpacity.toFixed(4),
+                    pressureCurve: +pressureCurve.toFixed(4),
+                    finalOpacity: +finalOpacity.toFixed(4),
+                    ctxAlphaBefore: +ctxAlphaBefore.toFixed(4),
+                    ctxComposite,
+                }
+            });
+
+            console.groupCollapsed(
+                `%c🎨 Airbrush stamp [${this._debugStrokeId}]` +
+                ` | opacity final: ${finalOpacity.toFixed(4)}` +
+                ` | ctx.alpha antes: ${ctxAlphaBefore.toFixed(4)}`,
+                `color: ${Math.abs(ctxAlphaBefore - 1.0) > 0.01 ? '#e74c3c' : '#2ecc71'}; font-weight: bold`
+            );
+            console.log('  flow           :', flow.toFixed(4));
+            console.log('  profile.baseOpacity:', profile.baseOpacity.toFixed(4));
+            console.log('  pressure       :', pressure.toFixed(4));
+            console.log('  pressureCurve  :', pressureCurve.toFixed(4));
+            console.log('  finalOpacity   :', finalOpacity.toFixed(4));
+            console.log('  ctx.globalAlpha ANTES stamp:', ctxAlphaBefore.toFixed(4),
+                Math.abs(ctxAlphaBefore - 1.0) > 0.01 ? '⚠️  CONTAMINADO' : '✅ limpio');
+            console.log('  ctx.globalCompositeOp:', ctxComposite,
+                ctxComposite !== 'source-over' ? '⚠️  NO es source-over' : '✅');
+            console.groupEnd();
+        }
     }
 
-    public endStroke(): void { }
+    public endStroke(): void {
+        // Volcar resumen del trazo completo al final
+        if (this._debugSamples.length > 0) {
+            const alphasBefore = this._debugSamples.map(s => s.ctxAlphaBefore);
+            const contaminated = alphasBefore.filter(a => Math.abs(a - 1.0) > 0.01);
+
+            if (contaminated.length > 0) {
+                console.warn(
+                    `%c⚠️  Airbrush [${this._debugStrokeId}] — ctx.globalAlpha contaminado en ${contaminated.length}/${this._debugSamples.length} stamps`,
+                    'color:#e74c3c;font-weight:bold',
+                    '\nValores:', contaminated
+                );
+            }
+        }
+        this._debugSamples = [];
+    }
+
+    private hexToRgb(hex: string): string {
+        const r = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return r
+            ? `${parseInt(r[1], 16)}, ${parseInt(r[2], 16)}, ${parseInt(r[3], 16)}`
+            : '0, 0, 0';
+    }
+
+    // Reconstrucción Two-Pass: evita que la opacidad del trazo se contamine con los píxeles del lienzo
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+        const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
+
+        helpers.simulateDrawing(offCtx);
+
+        ctx.save();
+        ctx.globalAlpha = 1.0;
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.drawImage(offCtx.canvas, 0, 0);
+        ctx.restore();
+
+        offCtx.clearRect(0, 0, offCtx.canvas.width, offCtx.canvas.height);
+    }
 }

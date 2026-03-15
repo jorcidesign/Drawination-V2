@@ -78,4 +78,19 @@ export class HardRoundRenderer implements IBrushRenderer {
     public endStroke() {
         this.inputBuffer = [];
     }
+
+    // Reconstrucción Two-Pass: evita que la opacidad del trazo se contamine con los píxeles del lienzo
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+        const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
+
+        helpers.simulateDrawing(offCtx);
+
+        ctx.save();
+        ctx.globalAlpha = 1.0;
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.drawImage(offCtx.canvas, 0, 0);
+        ctx.restore();
+
+        offCtx.clearRect(0, 0, offCtx.canvas.width, offCtx.canvas.height);
+    }
 }

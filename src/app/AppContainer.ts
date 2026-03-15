@@ -1,9 +1,4 @@
 // src/app/AppContainer.ts
-//
-// CAMBIOS vs versión anterior:
-//   1. Pasa this.storage al UndoRedoController (necesario para persistir UNDO/REDO).
-//   2. Integra CheckpointManager para arranque O(1) post-recarga.
-
 import { CanvasEngine } from '../core/engine/CanvasEngine';
 import { EventBus } from '../input/EventBus';
 import { StorageManager } from '../storage/StorageManager';
@@ -21,6 +16,7 @@ import { CanvasRebuilder } from '../core/render/CanvasRebuilder';
 import { ToolManager } from '../tools/core/ToolManager';
 import { UndoRedoController } from '../history/UndoRedoController';
 import { WorkspaceController } from './WorkspaceController';
+import { LayerManager } from '../core/engine/LayerManager';
 
 export class AppContainer {
     public eventBus: EventBus;
@@ -39,6 +35,7 @@ export class AppContainer {
     public undoRedoController: UndoRedoController;
     public toolManager: ToolManager;
     public workspaceController: WorkspaceController;
+    public layerManager: LayerManager;
 
     constructor(containerEl: HTMLElement) {
         this.engine = new CanvasEngine(1180, 1180);
@@ -62,6 +59,9 @@ export class AppContainer {
 
         this.history = new HistoryManager(this.engine, worker, this.cache);
         this.timelapse = new TimelapsePlayer(this.engine, this.storage);
+
+        (this.history as any).eventBus = this.eventBus;
+
         this.rebuilder = new CanvasRebuilder(
             this.engine,
             this.history,
@@ -78,7 +78,6 @@ export class AppContainer {
             engine: this.engine,
         };
 
-        // FIX: storage se pasa para persistir UNDO/REDO en IDB
         this.undoRedoController = new UndoRedoController(
             this.history,
             this.rebuilder,
@@ -87,6 +86,8 @@ export class AppContainer {
             commandContext,
             this.storage,
         );
+
+        this.layerManager = new LayerManager(this.engine, this.history, this.eventBus);
 
         this.toolManager = new ToolManager();
         this.toolManager.bootstrap({
@@ -137,20 +138,27 @@ export class AppContainer {
 
         if (spine.length > 0) {
             const lastSpineEvent = spine[spine.length - 1];
-            const checkpointBitmap = await this.checkpoint.tryRestore(
+
+            // Ahora devuelve un Map<number, ImageBitmap>
+            const checkpointBitmaps = await this.checkpoint.tryRestore(
                 lastSpineEvent.id,
                 spine.length
             );
 
-            if (checkpointBitmap) {
-                const ctx = this.engine.getActiveLayerContext();
-                ctx.drawImage(checkpointBitmap, 0, 0);
+            if (checkpointBitmaps) {
+                // Restauramos todas las capas de golpe
+                for (const [index, bmp] of checkpointBitmaps.entries()) {
+                    this.engine.getLayerContext(index).drawImage(bmp, 0, 0);
+                }
 
                 const activeCommands = this.history.getActiveCommands(this.activeBrush);
                 if (activeCommands.length > 0) {
                     const lastCmd = activeCommands[activeCommands.length - 1];
-                    await this.history.cacheManager.bake(lastCmd.id, ctx.canvas, false);
+                    // Subimos la foto multicapa al RAM cache
+                    await this.history.cacheManager.bake(lastCmd.id, this.engine, false);
                 }
+
+                this.eventBus.emit('SYNC_LAYERS_CSS');
 
                 console.info(`[AppContainer] ⚡ Checkpoint restaurado. ${spine.length} eventos activos.`);
                 return;

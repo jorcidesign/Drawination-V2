@@ -2,13 +2,10 @@
 import type { EventBus } from '../../input/EventBus';
 import { DebugBot } from './DebugBot';
 
-// === MATEMÁTICA EXPONENCIAL PARA SLIDERS ===
-// Transforma un valor lineal (0 a 1) en una curva exponencial entre min y max
 function linearToExp(t: number, min: number, max: number, power: number = 3): number {
     return min + (max - min) * Math.pow(t, power);
 }
 
-// Inversa: Transforma el valor del tamaño en px de vuelta a la posición (0 a 1) del slider
 function expToLinear(val: number, min: number, max: number, power: number = 3): number {
     if (val <= min) return 0;
     if (val >= max) return 1;
@@ -19,7 +16,6 @@ export class DebugToolbar {
     private container: HTMLElement;
     private eventBus: EventBus;
 
-    // Guardamos los límites del perfil activo
     private currentMinSize = 1;
     private currentMaxSize = 100;
 
@@ -55,11 +51,89 @@ export class DebugToolbar {
     }
 
     private buildButtons() {
+        // ── FILA DE CAPAS ──────────────────────────────────────────
+        const layerRow = document.createElement('div');
+        Object.assign(layerRow.style, {
+            display: 'flex', gap: '5px', backgroundColor: 'rgba(255,255,255,0.9)',
+            padding: '5px', borderRadius: '4px', alignItems: 'center',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+        });
+
+        const lbl = document.createElement('span');
+        lbl.textContent = 'Capa: 0';
+        lbl.style.fontWeight = 'bold';
+        lbl.style.minWidth = '60px';
+
+        this.eventBus.on('SYNC_LAYERS_CSS', () => {
+            const state = (window as any).drawinationApp.container.history.getState();
+            lbl.textContent = `Capa: ${state.derivedActiveLayerIndex}`;
+        });
+
+        // Ahora usamos commitLayerAction para que se registre correctamente en consola
+        const dispatchLayerSelect = (newIndex: number) => {
+            const history = (window as any).drawinationApp.container.history;
+            const current = history.getState().derivedActiveLayerIndex;
+
+            if (current !== newIndex) {
+                history.commitLayerAction('LAYER_SELECT', newIndex);
+                this.eventBus.emit('SYNC_LAYERS_CSS');
+            }
+        };
+
+        const btnUp = document.createElement('button');
+        btnUp.textContent = '🔼';
+        btnUp.onclick = () => {
+            const state = (window as any).drawinationApp.container.history.getState();
+            dispatchLayerSelect(Math.min(9, state.derivedActiveLayerIndex + 1));
+        };
+
+        const btnDown = document.createElement('button');
+        btnDown.textContent = '🔽';
+        btnDown.onclick = () => {
+            const state = (window as any).drawinationApp.container.history.getState();
+            dispatchLayerSelect(Math.max(0, state.derivedActiveLayerIndex - 1));
+        };
+
+        const btnHide = document.createElement('button');
+        btnHide.textContent = '👁️ Toggle';
+        btnHide.onclick = () => {
+            const engine = (window as any).drawinationApp.container.engine;
+            const history = (window as any).drawinationApp.container.history;
+            const state = history.getState();
+            const currentVisible = state.layersState.get(engine.activeLayerIndex)?.visible ?? true;
+
+            history.commitLayerAction('LAYER_VISIBILITY', engine.activeLayerIndex, { visible: !currentVisible });
+            this.eventBus.emit('SYNC_LAYERS_CSS');
+        };
+
+        const btnMerge = document.createElement('button');
+        btnMerge.textContent = '⏬ Merge Down';
+        btnMerge.onclick = async () => {
+            const engine = (window as any).drawinationApp.container.engine;
+            if (engine.activeLayerIndex === 0) return;
+
+            const history = (window as any).drawinationApp.container.history;
+            history.commitLayerAction('LAYER_MERGE_DOWN', engine.activeLayerIndex);
+
+            const brush = (window as any).drawinationApp.container.activeBrush;
+            await (window as any).drawinationApp.container.rebuilder.rebuild(brush);
+
+            btnDown.click();
+        };
+
+        layerRow.appendChild(lbl);
+        layerRow.appendChild(btnDown);
+        layerRow.appendChild(btnUp);
+        layerRow.appendChild(btnHide);
+        layerRow.appendChild(btnMerge);
+        this.container.appendChild(layerRow);
+
+        // ── FILA DE HERRAMIENTAS Y COLORES ──────────────────────────────────
         this.createButton('🧽 Goma (E)', '#2c3e50', () => this.eventBus.emit('SET_TOOL_ERASER'));
+        this.createButton('💥 Borrador Vectorial (Shift+E)', '#c0392b', () => this.eventBus.emit('SET_TOOL_VECTOR_ERASER'));
         this.createButton('🪣 Relleno', '#8e44ad', () => this.eventBus.emit('SET_PROFILE_FILL'));
         this.createButton('🪞 Flip (H)', '#e67e22', () => this.eventBus.emit('FLIP_HORIZONTAL'));
 
-        // Paleta de colores rápida
         const colorRow = document.createElement('div');
         Object.assign(colorRow.style, {
             display: 'flex', gap: '5px', backgroundColor: 'rgba(255,255,255,0.8)',
@@ -94,9 +168,7 @@ export class DebugToolbar {
         this.createButton('🔵 Airbrush', '#8e44ad', () => this.eventBus.emit('SET_PROFILE_AIRBRUSH'));
         this.createButton('⚫ Carboncillo', '#8e44ad', () => this.eventBus.emit('SET_PROFILE_CHARCOAL'));
 
-        // Sliders: El de tamaño usa logica exponencial interna (0-1000)
         this.createSizeSlider('size', 'Tamaño');
-        // El de opacidad (flujo visual) se mantiene lineal (1-100)
         this.createOpacitySlider('opacity', 'Opacidad');
 
         this.createButton('▶ Timelapse', '#3498db', () => this.eventBus.emit('PLAY_TIMELAPSE'));
@@ -124,6 +196,7 @@ export class DebugToolbar {
                 totalStrokes: 20000,
                 delayBetweenMs: 15,
                 eraseRatio: 0.15,
+                // vectorEraseRatio: 0.05,
                 fillRatio: 0.05,
                 undoEvery: 500,
                 redoAfterUndo: true,
@@ -135,7 +208,6 @@ export class DebugToolbar {
         }
     }
 
-    // Slider Exponencial (Mucha precisión en tamaños pequeños)
     private createSizeSlider(id: string, label: string) {
         const wrap = document.createElement('div');
         Object.assign(wrap.style, {
@@ -147,18 +219,14 @@ export class DebugToolbar {
 
         const input = document.createElement('input');
         input.type = 'range';
-        // 1000 pasos de resolución para fluidez
         input.min = "0";
         input.max = "1000";
 
         input.oninput = (e) => {
             const t = parseFloat((e.target as HTMLInputElement).value) / 1000;
             const sizePx = linearToExp(t, this.currentMinSize, this.currentMaxSize, 3);
-
-            // Redondear a 1 decimal
             const finalSize = Math.round(sizePx * 10) / 10;
             span.textContent = `${label}: ${finalSize}px`;
-
             this.eventBus.emit('UPDATE_BRUSH_SIZE', finalSize);
         };
 
@@ -168,7 +236,6 @@ export class DebugToolbar {
         this.sliders[id] = { input, span };
     }
 
-    // Slider Lineal estándar
     private createOpacitySlider(id: string, label: string) {
         const wrap = document.createElement('div');
         Object.assign(wrap.style, {
@@ -198,12 +265,10 @@ export class DebugToolbar {
         this.eventBus.on('SYNC_UI_SLIDERS', (payload) => {
             const { size, opacity, minSize, maxSize } = payload;
 
-            // Refrescar límites matemáticos si existen
             if (minSize !== undefined) this.currentMinSize = minSize;
             if (maxSize !== undefined) this.currentMaxSize = maxSize;
 
             if (this.sliders['size']) {
-                // Cálculo inverso: En qué posición (0 a 1000) debe estar el input para mostrar este 'size'
                 const t = expToLinear(size, this.currentMinSize, this.currentMaxSize, 3);
                 this.sliders['size'].input.value = String(Math.round(t * 1000));
                 this.sliders['size'].span.textContent = `Tamaño: ${Math.round(size * 10) / 10}px`;

@@ -9,8 +9,10 @@ export interface AppEventMap {
     'RESET_ROTATION': void;
     'FLIP_HORIZONTAL': void;
 
-    // === FIX: Añadimos minSize y maxSize como opcionales (?) ===
     'SYNC_UI_SLIDERS': { size: number; opacity: number; minSize?: number; maxSize?: number };
+
+    // ── Capas (Fase 4) ────────────────────────────────────────────────────
+    'SYNC_LAYERS_CSS': void; // Dispara la sincronización entre TimelineState y DOM
 
     'SET_COLOR': string;
     'UPDATE_BRUSH_SIZE': number;
@@ -30,6 +32,7 @@ export interface AppEventMap {
     // ── Herramientas de dibujo ────────────────────────────────────────────
     'SET_TOOL_ERASER': void;
     'SET_TOOL_PENCIL': void;
+    'SET_TOOL_VECTOR_ERASER': void;
     'SET_PROFILE_INK': void;
     'SET_PROFILE_PENCIL': void;
     'SET_PROFILE_FILL': void;

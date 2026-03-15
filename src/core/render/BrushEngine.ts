@@ -26,6 +26,11 @@ export class BrushEngine {
 
     private renderers: Map<string, IBrushRenderer> = new Map();
 
+    // Canvas offscreen reutilizable para reproduceStroke two-pass.
+    // Se redimensiona solo si hace falta — evita allocaciones por trazo.
+    private _offscreen: HTMLCanvasElement | null = null;
+    private _offscreenCtx: CanvasRenderingContext2D | null = null;
+
     constructor(initialProfile: IBrushProfile) {
         this.profile = { ...initialProfile };
         this.lastDrawingProfile = { ...initialProfile };
@@ -47,6 +52,37 @@ export class BrushEngine {
         return renderer;
     }
 
+    // Pinceles que necesitan two-pass en el rebuild (igual que en live drawing).
+    // En live usan paintingCanvas → commit. En rebuild necesitan su propio
+    // offscreen temporal para que los stamps no interactúen con píxeles
+    // ya existentes de otros trazos en el activeLayerContext.
+    // private _needsTwoPass(): boolean {
+    //     const r = this.profile.renderer;
+
+    //     // El eraser usa blendMode='destination-out'. En two-pass, los stamps
+    //     // van al offscreen (fondo transparente) y el drawImage final no borra
+    //     // nada del layer real — destination-out sobre transparente es no-op.
+    //     // Debe ir directo al ctx, igual que 'ink'.
+    //     if (this.profile.blendMode === 'destination-out') return false;
+
+    //     return r === 'airbrush' || r === 'hard-round' || r === 'basic' || r === 'charcoal' || r === 'paint';
+    // }
+
+    private _getOffscreen(width: number, height: number): CanvasRenderingContext2D {
+        if (!this._offscreen) {
+            this._offscreen = document.createElement('canvas');
+            this._offscreen.width = width;
+            this._offscreen.height = height;
+            this._offscreenCtx = this._offscreen.getContext('2d')!;
+        } else if (this._offscreen.width !== width || this._offscreen.height !== height) {
+            this._offscreen.width = width;
+            this._offscreen.height = height;
+        } else {
+            this._offscreenCtx!.clearRect(0, 0, width, height);
+        }
+        return this._offscreenCtx!;
+    }
+
     public useProfile(baseProfile: IBrushProfile) {
         if (!this.toolStates.has(baseProfile.id)) {
             this.toolStates.set(baseProfile.id, { ...baseProfile });
@@ -55,10 +91,6 @@ export class BrushEngine {
         this.profile = this.toolStates.get(baseProfile.id)!;
         this.color = this.toolColors.get(baseProfile.id)!;
 
-        // === LA SOLUCIÓN ESTÁ AQUÍ ===
-        // Guardamos en memoria el pincel activo para restaurarlo tras usar el Pan (Espacio)
-        // Solo ignoramos la Goma (para que al dejar de borrar regrese al lápiz correcto).
-        // Antes ignoraba 'solid-fill', causando el bug.
         if (this.profile.id !== 'eraser-hard') {
             this.lastDrawingProfile = this.profile;
         }
@@ -182,20 +214,33 @@ export class BrushEngine {
         this.color = actionColor;
 
         const renderer = this.getRenderer();
-
         renderer.forceInvalidateTip?.();
         renderer.updateTip?.(this.profile, this.color);
 
-        if (this.profile.renderer === 'fill') {
-            this.points = decodedPoints;
-            renderer.endStroke(ctx, this.profile, this.color, this.points);
-        } else {
-            this.beginStroke(ctx, decodedPoints[0]);
-            for (let i = 1; i < decodedPoints.length; i++) {
-                this.drawMove(ctx, decodedPoints[i], false);
+        // ── INVERSIÓN DE CONTROL ─────────────────────────────────────────────
+        // Le pasamos las herramientas al renderer para que él decida cómo redibujar.
+        const helpers = {
+            getOffscreenCanvas: (w: number, h: number) => this._getOffscreen(w, h),
+            simulateDrawing: (targetCtx: CanvasRenderingContext2D) => {
+                this.beginStroke(targetCtx, decodedPoints[0]);
+                for (let i = 1; i < decodedPoints.length; i++) {
+                    this.drawMove(targetCtx, decodedPoints[i], false);
+                }
+                this.endStroke(targetCtx);
             }
-            this.endStroke(ctx);
+        };
+
+        if (renderer.rebuildStroke) {
+            renderer.rebuildStroke(ctx, this.profile, this.color, decodedPoints, helpers);
+        } else {
+            // Fallback por defecto (One-Pass puro) si un renderer no define estrategia
+            ctx.save();
+            ctx.globalAlpha = 1.0;
+            ctx.globalCompositeOperation = 'source-over';
+            helpers.simulateDrawing(ctx);
+            ctx.restore();
         }
+        // ─────────────────────────────────────────────────────────────────────
 
         this.profile = prevProfile;
         this.color = prevColor;

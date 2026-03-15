@@ -7,6 +7,7 @@ export class CanvasEngine {
 
     private layers: HTMLCanvasElement[] = [];
     public activeLayerIndex: number = 0;
+    private readonly MAX_LAYERS = 10;
 
     public paintingCanvas: HTMLCanvasElement;
     public paintingContext: CanvasRenderingContext2D;
@@ -31,6 +32,11 @@ export class CanvasEngine {
         this.transformContainer.style.transformOrigin = '0 0';
         this.container.appendChild(this.transformContainer);
 
+        // Crear las 10 capas físicas
+        for (let i = 0; i < this.MAX_LAYERS; i++) {
+            this.addLayer(i);
+        }
+
         this.paintingCanvas = document.createElement('canvas');
         this.setupCanvasDimensions(this.paintingCanvas);
         this.paintingCanvas.style.zIndex = '10000';
@@ -38,7 +44,6 @@ export class CanvasEngine {
         this.paintingContext = this.paintingCanvas.getContext('2d')!;
 
         this.transformContainer.appendChild(this.paintingCanvas);
-        this.addLayer();
     }
 
     private setupCanvasDimensions(canvas: HTMLCanvasElement) {
@@ -49,22 +54,35 @@ export class CanvasEngine {
         canvas.style.left = '0';
     }
 
-    public addLayer(): HTMLCanvasElement {
+    private addLayer(index: number) {
         const layer = document.createElement('canvas');
-        layer.className = 'drawination-layer';
+        layer.className = `drawination-layer layer-${index}`;
         this.setupCanvasDimensions(layer);
 
-        layer.style.zIndex = this.layers.length.toString();
+        layer.style.zIndex = index.toString();
 
         this.layers.push(layer);
-        this.transformContainer.insertBefore(layer, this.paintingCanvas);
+        this.transformContainer.appendChild(layer);
+    }
 
-        this.activeLayerIndex = this.layers.length - 1;
-        return layer;
+    public getLayerContext(index: number): CanvasRenderingContext2D {
+        const safeIndex = Math.max(0, Math.min(this.MAX_LAYERS - 1, index));
+        return this.layers[safeIndex].getContext('2d')!;
+    }
+
+    public getLayerCanvas(index: number): HTMLCanvasElement {
+        const safeIndex = Math.max(0, Math.min(this.MAX_LAYERS - 1, index));
+        return this.layers[safeIndex];
     }
 
     public getActiveLayerContext(): CanvasRenderingContext2D {
-        return this.layers[this.activeLayerIndex].getContext('2d')!;
+        return this.getLayerContext(this.activeLayerIndex);
+    }
+
+    public clearAllLayers() {
+        for (const layer of this.layers) {
+            layer.getContext('2d')!.clearRect(0, 0, this.width, this.height);
+        }
     }
 
     public commitPaintingCanvas() {

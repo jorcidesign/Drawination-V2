@@ -2,6 +2,7 @@
 import type { IBrushRenderer } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
+import type { StrokePoint } from '../../io/BinarySerializer';
 
 export class FillRenderer implements IBrushRenderer {
     public beginStroke() { }
@@ -31,5 +32,10 @@ export class FillRenderer implements IBrushRenderer {
         for (const pt of points) ctx.lineTo(pt.x, pt.y);
         ctx.fill();
         ctx.restore();
+    }
+
+    // El Fill no usa steps ni simulaciones, simplemente dibuja el polígono de golpe
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+        this.endStroke(ctx, profile, color, points);
     }
 }

@@ -14,11 +14,10 @@ import { CacheManager } from './CacheManager';
 import { CommandFactory } from './commands/CommandFactory';
 import { DiagnosticsService } from './DiagnosticsService';
 import { computeTimelineState } from './computeTimelineState';
-import type { TimelineEvent, TimelineState, ActionType } from './TimelineTypes';
+import type { TimelineEvent, TimelineState, ActionType, LayerAction } from './TimelineTypes';
 
 export type { ActionType, TimelineEvent };
 
-// Ventana de protección de redo.
 const REDO_PROTECT_WINDOW = 10;
 
 export class HistoryManager {
@@ -47,8 +46,6 @@ export class HistoryManager {
         this.cacheManager = cacheManager;
     }
 
-    // ── Estado derivado ───────────────────────────────────────────────────
-
     public getState(): TimelineState {
         if (!this._cachedState) {
             this._cachedState = computeTimelineState(this.timeline);
@@ -73,22 +70,18 @@ export class HistoryManager {
         return undone.length > 0 ? undone[undone.length - 1] : null;
     }
 
-    // ── Push — única forma de añadir eventos ─────────────────────────────
     public push(event: TimelineEvent): void {
         const hadUndoneEvents = this.getState().undone.length > 0;
 
         this.timeline.push(event);
         this.invalidateCache();
 
-        // LAZY CLEARING: Si había eventos deshechos y acabamos de dibujar algo nuevo,
-        // el futuro se rompió. AHORA limpiamos la basura del caché.
         if (hadUndoneEvents) {
             const allValidIds = this.timeline.map(e => e.id);
             this.cacheManager.garbageCollect(allValidIds);
         }
     }
 
-    // ── Undo / Redo ───────────────────────────────────────────────────────
     public applyUndo(): TimelineEvent | null {
         const { spine } = this.getState();
         if (spine.length === 0) return null;
@@ -184,7 +177,6 @@ export class HistoryManager {
         }
 
         if (oldestIndex < active.length) {
-            // FIX: Usamos garbageCollect para invalidar visualmente el caché a partir de este punto
             const validIds = active.slice(0, oldestIndex).map(e => e.id);
             this.cacheManager.garbageCollect(validIds);
         } else {
@@ -207,10 +199,11 @@ export class HistoryManager {
         return event;
     }
 
-    public commitHide(targetIds: string[]): TimelineEvent {
+    public commitHide(targetIds: string[], toolId: string = 'system'): TimelineEvent {
+        const startTime = performance.now();
         const event: TimelineEvent = {
             id: crypto.randomUUID(), type: 'HIDE',
-            toolId: 'transform-handle', profileId: 'system',
+            toolId: toolId, profileId: 'system',
             layerIndex: this.engine.activeLayerIndex,
             color: '', size: 0, opacity: 1,
             timestamp: Date.now(), data: null,
@@ -218,6 +211,23 @@ export class HistoryManager {
         };
         this.push(event);
         this.cacheManager.clearAll();
+
+        DiagnosticsService.logEvent(event);
+        DiagnosticsService.printMetrics(performance.now() - startTime, this, this.cacheManager);
+        return event;
+    }
+
+    // ── NUEVO: Centraliza todos los eventos de capa para que pasen por el log ──
+    public commitLayerAction(type: LayerAction, layerIndex: number, extraPayload: Partial<TimelineEvent> = {}): TimelineEvent {
+        const event: TimelineEvent = {
+            id: crypto.randomUUID(), type,
+            toolId: 'system', profileId: 'system', layerIndex,
+            timestamp: Date.now(), color: '', size: 0, opacity: 1, data: null,
+            isSaved: false,
+            ...extraPayload
+        };
+        this.push(event);
+        DiagnosticsService.logEvent(event); // <-- ¡AQUÍ ESTÁ EL LOG FALTANTE!
         return event;
     }
 

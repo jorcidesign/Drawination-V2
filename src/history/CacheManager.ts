@@ -1,13 +1,15 @@
 // src/history/CacheManager.ts
+import type { CanvasEngine } from '../core/engine/CanvasEngine';
+
 export interface MemorySnapshot {
     eventId: string;
-    bitmap: ImageBitmap;
+    bitmaps: Map<number, ImageBitmap>;
     timestamp: number;
 }
 
 export interface DBSnapshot {
     eventId: string;
-    blob: Blob;
+    layers: { layerIndex: number; blob: Blob }[];
 }
 
 export class CacheManager {
@@ -16,7 +18,6 @@ export class CacheManager {
     private readonly canvasWidth: number;
     private readonly canvasHeight: number;
 
-    // Ring Buffer: RAM suficiente para Ctrl+Z ultrarrápido (aprox 40-50MB)
     private readonly MAX_MEMORY_SNAPS = 15;
 
     constructor(canvasWidth: number, canvasHeight: number) {
@@ -26,32 +27,41 @@ export class CacheManager {
     }
 
     private initDB() {
-        const req = indexedDB.open('DrawinationCacheDB', 1);
+        const req = indexedDB.open('DrawinationCacheDB', 2); // Subimos versión
         req.onupgradeneeded = (e) => {
             const db = (e.target as IDBOpenDBRequest).result;
             if (!db.objectStoreNames.contains('snapshots')) {
+                db.createObjectStore('snapshots', { keyPath: 'eventId' });
+            } else {
+                db.deleteObjectStore('snapshots');
                 db.createObjectStore('snapshots', { keyPath: 'eventId' });
             }
         };
         req.onsuccess = (e) => { this.db = (e.target as IDBOpenDBRequest).result; };
     }
 
-    // Bake ahora distingue si es un Keyframe (va a disco) o solo Ring Buffer (RAM)
-    public async bake(eventId: string, canvas: HTMLCanvasElement, isKeyframe: boolean = false): Promise<void> {
-        const bitmap = await createImageBitmap(canvas);
-        this.addToMemory(eventId, bitmap);
+    // ── SOLUCIÓN MULTICAPA ──────────────────────────────────────────────
+    // Toma una foto de los 10 canvas simultáneamente
+    public async bake(eventId: string, engine: CanvasEngine, isKeyframe: boolean = false): Promise<void> {
+        const bitmaps = new Map<number, ImageBitmap>();
 
-        // Solo guardamos en disco si es un Keyframe ancla (cada 50 trazos)
+        for (let i = 0; i < 10; i++) {
+            const canvas = engine.getLayerCanvas(i);
+            bitmaps.set(i, await createImageBitmap(canvas));
+        }
+
+        this.addToMemory(eventId, bitmaps);
+
         if (isKeyframe) {
-            this.persistToDB(eventId, bitmap);
+            this.persistToDB(eventId, bitmaps);
         }
     }
 
-    public async getSnapshot(eventId: string): Promise<ImageBitmap | null> {
+    public async getSnapshot(eventId: string): Promise<Map<number, ImageBitmap> | null> {
         if (this.memoryCache.has(eventId)) {
             const entry = this.memoryCache.get(eventId)!;
-            entry.timestamp = Date.now(); // Actualiza uso (LRU)
-            return entry.bitmap;
+            entry.timestamp = Date.now();
+            return entry.bitmaps;
         }
 
         if (!this.db) return null;
@@ -62,11 +72,14 @@ export class CacheManager {
 
             req.onsuccess = async () => {
                 const result = req.result as DBSnapshot;
-                if (result && result.blob) {
-                    const bitmap = await createImageBitmap(result.blob);
-                    // Al traerlo de disco, lo subimos a la RAM temporalmente
-                    this.addToMemory(eventId, bitmap);
-                    resolve(bitmap);
+                if (result && result.layers) {
+                    const bitmaps = new Map<number, ImageBitmap>();
+                    await Promise.all(result.layers.map(async (layer) => {
+                        bitmaps.set(layer.layerIndex, await createImageBitmap(layer.blob));
+                    }));
+
+                    this.addToMemory(eventId, bitmaps);
+                    resolve(bitmaps);
                 } else {
                     resolve(null);
                 }
@@ -75,8 +88,8 @@ export class CacheManager {
         });
     }
 
-    private addToMemory(eventId: string, bitmap: ImageBitmap) {
-        this.memoryCache.set(eventId, { eventId, bitmap, timestamp: Date.now() });
+    private addToMemory(eventId: string, bitmaps: Map<number, ImageBitmap>) {
+        this.memoryCache.set(eventId, { eventId, bitmaps, timestamp: Date.now() });
 
         if (this.memoryCache.size > this.MAX_MEMORY_SNAPS) {
             let oldestId = '';
@@ -88,35 +101,33 @@ export class CacheManager {
                 }
             }
             if (oldestId) {
-                // Ya NO lo mandamos a disco obligatoriamente. Lo descartamos de RAM.
-                // Si era un keyframe, ya está en disco. Si no, no importa.
                 this.memoryCache.delete(oldestId);
             }
         }
     }
 
-    private persistToDB(eventId: string, bitmap: ImageBitmap) {
+    private persistToDB(eventId: string, bitmaps: Map<number, ImageBitmap>) {
         if (!this.db) return;
-        const offscreen = new OffscreenCanvas(this.canvasWidth, this.canvasHeight);
-        const ctx = offscreen.getContext('2d')!;
-        ctx.drawImage(bitmap, 0, 0);
 
-        offscreen.convertToBlob({ type: 'image/png' }).then(blob => {
+        // Convertimos todos los bitmaps a blobs en paralelo
+        Promise.all(Array.from(bitmaps.entries()).map(async ([index, bmp]) => {
+            const offscreen = new OffscreenCanvas(this.canvasWidth, this.canvasHeight);
+            const ctx = offscreen.getContext('2d')!;
+            ctx.drawImage(bmp, 0, 0);
+            const blob = await offscreen.convertToBlob({ type: 'image/png' });
+            return { layerIndex: index, blob };
+        })).then(layers => {
             if (!this.db) return;
             const tx = this.db.transaction('snapshots', 'readwrite');
-            tx.objectStore('snapshots').put({ eventId, blob });
+            tx.objectStore('snapshots').put({ eventId, layers });
         });
     }
 
-    // === ESTRATEGIA: Garbage Collection Diferido ===
-    // Solo borra fotos que pertenecen a IDs que ya NO EXISTEN en la línea de tiempo viva ni deshecha.
     public garbageCollect(validEventIds: string[]) {
         const validSet = new Set(validEventIds);
-
         for (const [id, _] of this.memoryCache.entries()) {
             if (!validSet.has(id)) this.memoryCache.delete(id);
         }
-
         if (this.db) {
             const tx = this.db.transaction('snapshots', 'readwrite');
             const store = tx.objectStore('snapshots');

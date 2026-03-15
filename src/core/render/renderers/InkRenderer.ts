@@ -15,6 +15,7 @@
 import type { IBrushRenderer } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
+import type { StrokePoint } from '../../io/BinarySerializer';
 
 class SeededRNG {
     private s: number;
@@ -236,5 +237,14 @@ export class InkRenderer implements IBrushRenderer {
     // === Limpiamos el buffer al levantar el lápiz ===
     public endStroke(): void {
         this.inputBuffer = [];
+    }
+
+    // InkRenderer ya usa un offscreen interno por stamp, por lo que su rebuild es One-Pass directo
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+        ctx.save();
+        ctx.globalAlpha = 1.0;
+        ctx.globalCompositeOperation = 'source-over';
+        helpers.simulateDrawing(ctx);
+        ctx.restore();
     }
 }

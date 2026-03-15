@@ -1,15 +1,10 @@
 // src/tools/draw/EraserTool.ts
-//
-// CAMBIO vs versión anterior:
-// Integra StrokeStabilizer — mismo tratamiento que PencilTool.
-// El borrador también se beneficia del suavizado de coordenadas.
 
 import type { ITool, ToolContext } from '../core/ITool';
 import type { PointerData } from '../../input/InputManager';
 import { ObjectPool } from '../../core/memory/ObjectPool';
 import { ToolRegistry } from '../core/ToolRegistry';
 import { HardEraserProfile } from '../../core/render/profiles/HardEraserProfile';
-import { StrokeStabilizer } from '../../core/input/StrokeStabilizer';
 
 declare module '../../input/EventBus' {
     interface AppEventMap {
@@ -21,8 +16,6 @@ export class EraserTool implements ITool {
     public readonly id = 'eraser';
     private ctx: ToolContext;
     private drawing: boolean = false;
-
-    private stabilizer: StrokeStabilizer = new StrokeStabilizer();
 
     constructor(ctx: ToolContext) {
         this.ctx = ctx;
@@ -48,16 +41,10 @@ export class EraserTool implements ITool {
 
     public onPointerDown(data: PointerData) {
         this.drawing = true;
-        this.stabilizer.reset();
 
         const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
-        const filtered = this.stabilizer.filter2D(
-            canvasPos.x, canvasPos.y,
-            this.ctx.viewport.zoom,
-            performance.now()
-        );
+        const cleanData = ObjectPool.getPointerData(canvasPos.x, canvasPos.y, data.pressure, data.pointerType);
 
-        const cleanData = ObjectPool.getPointerData(filtered.x, filtered.y, data.pressure, data.pointerType);
         this.ctx.history.beginStroke('ERASE', this.id, cleanData.x, cleanData.y, cleanData.pressure, this.ctx.activeBrush);
         const activeCtx = this.ctx.engine.getActiveLayerContext();
         this.ctx.activeBrush.beginStroke(activeCtx, cleanData);
@@ -67,13 +54,8 @@ export class EraserTool implements ITool {
         if (!this.drawing) return;
 
         const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
-        const filtered = this.stabilizer.filter2D(
-            canvasPos.x, canvasPos.y,
-            this.ctx.viewport.zoom,
-            performance.now()
-        );
+        const cleanData = ObjectPool.getPointerData(canvasPos.x, canvasPos.y, data.pressure, data.pointerType);
 
-        const cleanData = ObjectPool.getPointerData(filtered.x, filtered.y, data.pressure, data.pointerType);
         this.ctx.history.addPoint(cleanData.x, cleanData.y, cleanData.pressure);
         const activeCtx = this.ctx.engine.getActiveLayerContext();
         this.ctx.activeBrush.drawMove(activeCtx, cleanData);
@@ -83,9 +65,7 @@ export class EraserTool implements ITool {
         if (!this.drawing) return;
         this.drawing = false;
 
-        if (this.ctx.activeBrush.profile.renderer === 'fill') this.ctx.engine.clearPaintingCanvas();
-        this.ctx.activeBrush.endStroke(this.ctx.engine.paintingContext);
-        this.ctx.engine.commitPaintingCanvas();
+        this.ctx.activeBrush.endStroke(this.ctx.engine.getActiveLayerContext());
 
         const event = await this.ctx.history.commitStroke();
         if (event) {

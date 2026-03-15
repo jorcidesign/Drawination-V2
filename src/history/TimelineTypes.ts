@@ -27,7 +27,8 @@ export type LayerAction =
     | 'LAYER_OPACITY'
     | 'LAYER_VISIBILITY'
     | 'LAYER_LOCK'
-    | 'LAYER_MERGE_DOWN';
+    | 'LAYER_MERGE_DOWN'
+    | 'LAYER_SELECT'; // <--- 1. NUEVO EVENTO
 
 // Eventos de control del timeline (NO aparecen en timelapse, son marcadores)
 export type ControlAction =
@@ -108,6 +109,11 @@ export interface TimelineState {
     // Estado de cada capa derivado de todos los LAYER_* eventos
     readonly layersState: Map<number, LayerState>;
 
+    // NUEVO: Mapa de enrutamiento virtual para Merge Down
+    // Si un trazo dice "soy de la capa 2", pero la 2 se fusionó en la 1, layerRoute.get(2) devolverá 1.
+    readonly layerRoute: Map<number, number>;
+    // <--- 2. NUEVA PROPIEDAD: El motor mirará aquí para saber dónde dibujar
+    readonly derivedActiveLayerIndex: number;
     // Spine: todos los eventos activos en orden (incluye TRANSFORM, LAYER_*, HIDE)
     // Usado por el Timelapse para reproducción cronológica
     readonly spine: TimelineEvent[];

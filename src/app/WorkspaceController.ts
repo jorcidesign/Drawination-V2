@@ -1,10 +1,4 @@
 // src/app/WorkspaceController.ts
-//
-// CAMBIOS vs versión anterior:
-//   1. Acepta CheckpointManager como dependencia opcional.
-//   2. En CLEAR_ALL, llama a checkpoint.invalidate() para que la próxima
-//      recarga no intente restaurar un canvas vacío desde el checkpoint antiguo.
-//   3. Todo lo demás es idéntico.
 
 import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { InputManager } from '../input/InputManager';
@@ -59,7 +53,7 @@ export class WorkspaceController {
         rebuilder: CanvasRebuilder,
         toolManager: ToolManager,
         undoRedoController: UndoRedoController,
-        checkpoint: CheckpointManager | null = null, // ← opcional, zero-breaking
+        checkpoint: CheckpointManager | null = null,
     ) {
         this.engine = engine;
         this.input = input;
@@ -120,16 +114,15 @@ export class WorkspaceController {
             this.history.rebuildSpatialGrid();
             this.history['invalidateCache']?.();
             this.selection.clear();
-            this.engine.clearActiveLayer();
-            this.engine.clearPaintingCanvas();
-            await this.storage.clearAll?.();
 
-            // Invalidar checkpoint: el canvas está vacío, no queremos que
-            // la próxima recarga restaure el bitmap antiguo.
+            // === FIX 3: Limpiar TODAS las capas, no solo la activa ===
+            this.engine.clearAllLayers();
+            this.engine.clearPaintingCanvas();
+
+            await this.storage.clearAll?.();
             await this.checkpoint?.invalidate();
         });
 
-        // === GESTIÓN DE ESTADO DEL PINCEL ===
         this.eventBus.on('UPDATE_BRUSH_SIZE', (size) => {
             this.activeBrush.updateCurrentSize(size);
         });
@@ -142,7 +135,6 @@ export class WorkspaceController {
             this.activeBrush.setColor(color);
         });
 
-        // === CAMBIO INTELIGENTE DE HERRAMIENTAS ===
         const applyAndSync = (profileObj: any) => {
             this.activeBrush.useProfile(profileObj);
             this.eventBus.emit('REQUEST_TOOL_SWITCH', 'pencil');
@@ -162,7 +154,6 @@ export class WorkspaceController {
         this.eventBus.on('SET_PROFILE_AIRBRUSH', () => applyAndSync(AirbrushProfile));
         this.eventBus.on('SET_PROFILE_CHARCOAL', () => applyAndSync(CharcoalProfile));
 
-        // === VIEWPORT ===
         this.eventBus.on('RESET_ROTATION', () => {
             const w = this.engine.container.clientWidth;
             const h = this.engine.container.clientHeight;
