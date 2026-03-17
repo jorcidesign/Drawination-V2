@@ -42,11 +42,17 @@ export class CanvasRebuilder {
             let snapshotBitmaps: Map<number, ImageBitmap> | null = null;
             let startIndex = 0;
 
-            for (let i = activeCommands.length - 1; i >= 0; i--) {
-                snapshotBitmaps = await this.history.cacheManager.getSnapshot(activeCommands[i].id);
-                if (snapshotBitmaps) {
-                    startIndex = i + 1;
-                    break;
+            // === FIX: ELIMINACIÓN DE FANTASMAS ===
+            // Si hay una selección activa (TransformHandle, etc.), NO leemos
+            // ningún snapshot porque los trazos seleccionados ya estarían "horneados"
+            // en esa imagen. Forzamos un rebuild desde 0.
+            if (!this.selection.hasSelection()) {
+                for (let i = activeCommands.length - 1; i >= 0; i--) {
+                    snapshotBitmaps = await this.history.cacheManager.getSnapshot(activeCommands[i].id);
+                    if (snapshotBitmaps) {
+                        startIndex = i + 1;
+                        break;
+                    }
                 }
             }
 
@@ -90,6 +96,7 @@ export class CanvasRebuilder {
             const timeTaken = performance.now() - startTime;
 
             // ── Guardado en Caché ─────────────────────────────────────────
+            // Ya estaba protegido: solo guardamos si NO hay selección activa
             if (activeCommands.length > 0 && !this.selection.hasSelection()) {
                 const lastCmd = activeCommands[activeCommands.length - 1];
                 const isKeyframe = (activeCommands.length % 50 === 0);

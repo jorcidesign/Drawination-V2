@@ -3,6 +3,7 @@ import type { IBrushRenderer } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
 import { BezierEasing } from '../../math/BezierEasing';
+import type { StrokePoint } from '../../io/BinarySerializer';
 
 export class HardRoundRenderer implements IBrushRenderer {
     // Buffer para la estabilización del trazo

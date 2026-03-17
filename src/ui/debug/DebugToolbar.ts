@@ -15,21 +15,29 @@ function expToLinear(val: number, min: number, max: number, power: number = 3): 
 export class DebugToolbar {
     private container: HTMLElement;
     private eventBus: EventBus;
-
     private currentMinSize = 1;
     private currentMaxSize = 100;
-
     private sliders: Record<string, { input: HTMLInputElement; span: HTMLSpanElement }> = {};
+
     private bot: DebugBot | null = null;
     private botBtn: HTMLButtonElement | null = null;
+
+    // === NUEVA BARRA CONTEXTUAL ===
+    private contextBar: HTMLElement;
+    private lassoMode: 'partial' | 'total' = 'partial';
 
     constructor(eventBus: EventBus) {
         this.eventBus = eventBus;
         this.container = document.createElement('div');
+        this.contextBar = document.createElement('div');
+
         this.setupStyles();
         this.buildButtons();
+        this.buildContextBar();
         this.bindEvents();
+
         document.body.appendChild(this.container);
+        document.body.appendChild(this.contextBar);
     }
 
     public connectBot(canvasEl: HTMLElement): void {
@@ -38,16 +46,90 @@ export class DebugToolbar {
 
     private setupStyles() {
         Object.assign(this.container.style, {
-            position: 'absolute',
-            top: '20px',
-            right: '20px',
-            zIndex: '99999',
-            display: 'flex',
-            gap: '10px',
-            flexWrap: 'wrap',
-            maxWidth: '800px',
-            justifyContent: 'flex-end',
+            position: 'absolute', top: '20px', right: '20px',
+            zIndex: '99999', display: 'flex', gap: '10px',
+            flexWrap: 'wrap', maxWidth: '800px', justifyContent: 'flex-end',
         });
+
+        Object.assign(this.contextBar.style, {
+            position: 'absolute', bottom: '30px', left: '50%',
+            transform: 'translateX(-50%)', zIndex: '99999',
+            display: 'none', gap: '10px', backgroundColor: '#2c3e50',
+            padding: '10px 20px', borderRadius: '30px',
+            boxShadow: '0 4px 15px rgba(0,0,0,0.3)', transition: 'all 0.2s ease',
+        });
+    }
+
+    private buildContextBar() {
+        this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId) => {
+            this.contextBar.innerHTML = ''; // Limpiamos barra
+
+            if (toolId === 'lasso') {
+                this.contextBar.style.display = 'flex';
+
+                const btnToggle = document.createElement('button');
+                this.styleContextButton(btnToggle, '#34495e');
+                this.updateLassoBtnUI(btnToggle);
+
+                btnToggle.onclick = () => {
+                    this.lassoMode = this.lassoMode === 'partial' ? 'total' : 'partial';
+                    this.updateLassoBtnUI(btnToggle);
+                    this.eventBus.emit('TOGGLE_LASSO_MODE', this.lassoMode);
+                };
+
+                this.contextBar.appendChild(btnToggle);
+            }
+            else if (toolId === 'transform-handle') {
+                this.contextBar.style.display = 'flex';
+
+                const btnFlipH = document.createElement('button');
+                btnFlipH.textContent = '🪞 Flip H';
+                this.styleContextButton(btnFlipH, '#34495e');
+                btnFlipH.onclick = () => this.eventBus.emit('SELECTION_FLIP_H');
+
+                const btnFlipV = document.createElement('button');
+                btnFlipV.textContent = '🔃 Flip V';
+                this.styleContextButton(btnFlipV, '#34495e');
+                btnFlipV.onclick = () => this.eventBus.emit('SELECTION_FLIP_V');
+
+                const btnDuplicate = document.createElement('button');
+                btnDuplicate.textContent = '📋 Duplicar';
+                this.styleContextButton(btnDuplicate, '#27ae60');
+                btnDuplicate.onclick = () => this.eventBus.emit('SELECTION_DUPLICATE');
+
+                const btnDelete = document.createElement('button');
+                btnDelete.textContent = '🗑️ Eliminar';
+                this.styleContextButton(btnDelete, '#e74c3c');
+                btnDelete.onclick = () => this.eventBus.emit('SELECTION_DELETE');
+
+                this.contextBar.appendChild(btnFlipH);
+                this.contextBar.appendChild(btnFlipV);
+                this.contextBar.appendChild(btnDuplicate);
+                this.contextBar.appendChild(btnDelete);
+            }
+            else {
+                this.contextBar.style.display = 'none';
+            }
+        });
+    }
+
+    private styleContextButton(btn: HTMLButtonElement, bgColor: string) {
+        Object.assign(btn.style, {
+            padding: '8px 16px', backgroundColor: bgColor,
+            color: 'white', border: 'none', cursor: 'pointer',
+            borderRadius: '20px', fontWeight: 'bold', fontSize: '14px',
+            outline: 'none'
+        });
+    }
+
+    private updateLassoBtnUI(btn: HTMLButtonElement) {
+        if (this.lassoMode === 'partial') {
+            btn.textContent = '⭕ Selección: Parcial';
+            btn.style.color = '#fff';
+        } else {
+            btn.textContent = '⏺ Selección: Total';
+            btn.style.color = '#f1c40f'; // Amarillo para resaltar que es restrictivo
+        }
     }
 
     private buildButtons() {
@@ -69,12 +151,12 @@ export class DebugToolbar {
             lbl.textContent = `Capa: ${state.derivedActiveLayerIndex}`;
         });
 
-        // Ahora usamos commitLayerAction para que se registre correctamente en consola
         const dispatchLayerSelect = (newIndex: number) => {
             const history = (window as any).drawinationApp.container.history;
             const current = history.getState().derivedActiveLayerIndex;
 
             if (current !== newIndex) {
+                this.eventBus.emit('GLOBAL_INTERRUPTION');
                 history.commitLayerAction('LAYER_SELECT', newIndex);
                 this.eventBus.emit('SYNC_LAYERS_CSS');
             }
@@ -112,6 +194,7 @@ export class DebugToolbar {
             const engine = (window as any).drawinationApp.container.engine;
             if (engine.activeLayerIndex === 0) return;
 
+            this.eventBus.emit('GLOBAL_INTERRUPTION');
             const history = (window as any).drawinationApp.container.history;
             history.commitLayerAction('LAYER_MERGE_DOWN', engine.activeLayerIndex);
 
@@ -132,7 +215,7 @@ export class DebugToolbar {
         this.createButton('🧽 Goma (E)', '#2c3e50', () => this.eventBus.emit('SET_TOOL_ERASER'));
         this.createButton('💥 Borrador Vectorial (Shift+E)', '#c0392b', () => this.eventBus.emit('SET_TOOL_VECTOR_ERASER'));
         this.createButton('🪣 Relleno', '#8e44ad', () => this.eventBus.emit('SET_PROFILE_FILL'));
-        this.createButton('🪞 Flip (H)', '#e67e22', () => this.eventBus.emit('FLIP_HORIZONTAL'));
+        this.createButton('🔲 Lazo', '#e67e22', () => this.eventBus.emit('REQUEST_TOOL_SWITCH', 'lasso'));
 
         const colorRow = document.createElement('div');
         Object.assign(colorRow.style, {
@@ -196,7 +279,6 @@ export class DebugToolbar {
                 totalStrokes: 20000,
                 delayBetweenMs: 15,
                 eraseRatio: 0.15,
-                // vectorEraseRatio: 0.05,
                 fillRatio: 0.05,
                 undoEvery: 500,
                 redoAfterUndo: true,

@@ -1,7 +1,4 @@
 // src/tools/interaction/LassoTool.ts
-// CAMBIO vs versión anterior: añadida llamada a DiagnosticsService.logSelection()
-// Todo lo demás idéntico.
-
 import type { ITool, ToolContext } from '../core/ITool';
 import type { BasePoint, PointerData } from '../../input/InputManager';
 import { Geometry } from '../../core/math/Geometry';
@@ -9,13 +6,30 @@ import { BinarySerializer } from '../../core/io/BinarySerializer';
 import { ToolRegistry } from '../core/ToolRegistry';
 import { DiagnosticsService } from '../../history/DiagnosticsService';
 
+declare module '../../input/EventBus' {
+    interface AppEventMap {
+        'TOGGLE_LASSO_MODE': 'partial' | 'total';
+    }
+}
+
 export class LassoTool implements ITool {
     public readonly id = 'lasso';
     private ctx: ToolContext;
     private mode: 'idle' | 'drawing' = 'idle';
     private polygon: BasePoint[] = [];
 
-    constructor(ctx: ToolContext) { this.ctx = ctx; }
+    // === NUEVO: Control de modo de selección ===
+    private selectionMode: 'partial' | 'total' = 'partial';
+
+    constructor(ctx: ToolContext) {
+        this.ctx = ctx;
+
+        // La UI podrá alternar esto con un solo botón
+        this.ctx.eventBus.on('TOGGLE_LASSO_MODE', (mode) => {
+            this.selectionMode = mode;
+            if (import.meta.env.DEV) console.log(`🔲 Lazo Modo: ${mode}`);
+        });
+    }
 
     public isBusy() { return this.mode === 'drawing'; }
 
@@ -27,6 +41,8 @@ export class LassoTool implements ITool {
     }
 
     public onDeactivate() {
+        // === FIX: Solo limpiamos la UI del lazo. NO tocamos this.ctx.selection.clear()
+        // porque esa selección se la estamos pasando como testigo al TransformHandleTool.
         this.mode = 'idle';
         this.polygon = [];
         this.ctx.engine.clearPaintingCanvas();
@@ -53,9 +69,10 @@ export class LassoTool implements ITool {
         if (this.mode !== 'drawing') return;
         this.mode = 'idle';
         this.ctx.engine.clearPaintingCanvas();
+
         await this.findSelectedStrokes();
 
-        DiagnosticsService.logSelection(this.ctx.selection.selectedIds.size); // ← NUEVO
+        DiagnosticsService.logSelection(this.ctx.selection.selectedIds.size);
 
         if (this.ctx.selection.hasSelection()) {
             this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', 'transform-handle');
@@ -90,7 +107,7 @@ export class LassoTool implements ITool {
         }
 
         const candidates = this.ctx.history.spatialGrid.query({ minX, minY, maxX, maxY });
-        const { active, transforms, hiddenIds } = this.ctx.history.getState();
+        const { active, transforms, hiddenIds, derivedActiveLayerIndex } = this.ctx.history.getState();
         const foundIds = new Set<string>();
 
         for (const eventId of candidates) {
@@ -99,20 +116,39 @@ export class LassoTool implements ITool {
             const event = active.find(ev => ev.id === eventId);
             if (!event || (event.type !== 'STROKE' && event.type !== 'ERASE')) continue;
 
+            if (event.layerIndex !== derivedActiveLayerIndex) continue;
+
             if (!event.data) event.data = await this.ctx.storage.loadEventData(eventId);
             if (!event.data) continue;
 
             const t = transforms.get(eventId) ?? new DOMMatrix();
             const pts = BinarySerializer.decode(event.data);
 
-            for (const pt of pts) {
-                const tx = pt.x * t.a + pt.y * t.c + t.e;
-                const ty = pt.x * t.b + pt.y * t.d + t.f;
-                if (Geometry.isPointInPolygon(tx, ty, this.polygon)) {
-                    foundIds.add(event.id);
-                    break;
+            // === LÓGICA MATEMÁTICA: PARCIAL VS TOTAL ===
+            let hit = false;
+
+            if (this.selectionMode === 'partial') {
+                for (const pt of pts) {
+                    const tx = pt.x * t.a + pt.y * t.c + t.e;
+                    const ty = pt.x * t.b + pt.y * t.d + t.f;
+                    if (Geometry.isPointInPolygon(tx, ty, this.polygon)) {
+                        hit = true;
+                        break;
+                    }
+                }
+            } else {
+                hit = pts.length > 0; // Asumimos true hasta que un punto falle
+                for (const pt of pts) {
+                    const tx = pt.x * t.a + pt.y * t.c + t.e;
+                    const ty = pt.x * t.b + pt.y * t.d + t.f;
+                    if (!Geometry.isPointInPolygon(tx, ty, this.polygon)) {
+                        hit = false;
+                        break;
+                    }
                 }
             }
+
+            if (hit) foundIds.add(event.id);
         }
 
         if (foundIds.size > 0) {

@@ -89,7 +89,10 @@ export class WorkspaceController {
 
     private bindBusEvents(): void {
         this.eventBus.on('PLAY_TIMELAPSE', async () => {
-            if (this.timelapse.isPlaying || this.toolManager.activeTool.isBusy()) return;
+            // === FIX: Interrumpir estado (ej: TransformHandle) antes de iniciar ===
+            this.eventBus.emit('GLOBAL_INTERRUPTION');
+
+            if (this.timelapse.isPlaying) return;
 
             const spine = this.history.getTimelineSpine();
             if (spine.length === 0) return;
@@ -110,12 +113,14 @@ export class WorkspaceController {
         });
 
         this.eventBus.on('CLEAR_ALL', async () => {
+            // === FIX: Interrumpir estado antes de limpiar el mundo ===
+            this.eventBus.emit('GLOBAL_INTERRUPTION');
+
             this.history.timeline = [];
             this.history.rebuildSpatialGrid();
             this.history['invalidateCache']?.();
             this.selection.clear();
 
-            // === FIX 3: Limpiar TODAS las capas, no solo la activa ===
             this.engine.clearAllLayers();
             this.engine.clearPaintingCanvas();
 

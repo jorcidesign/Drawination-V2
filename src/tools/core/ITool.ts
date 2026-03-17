@@ -10,6 +10,23 @@ import type { SelectionManager } from '../../core/selection/SelectionManager';
 import type { CanvasRebuilder } from '../../core/render/CanvasRebuilder';
 import type { UndoRedoController } from '../../history/UndoRedoController';
 
+export interface IEngineForCommands {
+    readonly width: number;
+    readonly height: number;
+    readonly container: HTMLElement;
+    clearActiveLayer(): void;
+    clearPaintingCanvas(): void;
+    getActiveLayerContext(): CanvasRenderingContext2D;
+}
+
+export interface CommandContext {
+    rebuilder: { rebuild(brush: any): Promise<void> };
+    selection: { setSelection(ids: Set<string>, bbox: any): void; clear(): void };
+    eventBus: { emit(event: string, payload?: any): void };
+    activeBrush: any;
+    engine: IEngineForCommands;
+}
+
 export interface ToolContext {
     engine: CanvasEngine;
     viewport: ViewportManager;
@@ -19,7 +36,6 @@ export interface ToolContext {
     eventBus: EventBus;
     selection: SelectionManager;
     rebuilder: CanvasRebuilder;
-    /** Nuevo: permite que las tools se registren como interceptores de undo/redo */
     undoRedoController: UndoRedoController;
 }
 
@@ -27,7 +43,8 @@ export interface ITool {
     readonly id: string;
     isBusy(): boolean;
     onActivate(): void;
-    onDeactivate(): void;
+    // === FIX: Ahora la herramienta sabe por qué la están desactivando ===
+    onDeactivate(reason?: string): void;
     onPointerDown(data: PointerData): void;
     onPointerMove(data: PointerData): void;
     onPointerUp(data: PointerData): void;

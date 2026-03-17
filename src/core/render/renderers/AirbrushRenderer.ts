@@ -2,6 +2,7 @@
 import type { IBrushRenderer } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
+import type { StrokePoint } from '../../io/BinarySerializer';
 
 class SeededRNG {
     private s: number;

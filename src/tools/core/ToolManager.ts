@@ -33,6 +33,11 @@ export class ToolManager {
             this.switchTool(toolId);
             this.setDefaultTool(toolId);
         });
+
+        // === ESTRATEGIA DE INTERRUPCIÓN GLOBAL ===
+        ctx.eventBus.on('GLOBAL_INTERRUPTION', () => {
+            this.switchTool(this.defaultToolId, 'system_interruption');
+        });
     }
 
     public registerTool(tool: ITool) {
@@ -44,22 +49,23 @@ export class ToolManager {
         this.switchTool(toolId);
     }
 
-    public switchTool(toolId: string) {
-        if (this._activeTool && this._activeTool.isBusy()) return;
+    // === FIX: Recibe un reason opcional para pasarlo al onDeactivate ===
+    public switchTool(toolId: string, reason?: string) {
+        if (this._activeTool && this._activeTool.isBusy() && toolId === this._activeTool.id) return;
 
         const newTool = this.tools.get(toolId);
         if (!newTool || newTool === this._activeTool) return;
 
         if (this._activeTool) {
             this.previousToolId = this._activeTool.id;
-            this._activeTool.onDeactivate();
+            // Le decimos a la herramienta por qué se va (ej: "pencil", "eraser", o "system_interruption")
+            this._activeTool.onDeactivate(reason || toolId);
         }
 
         this._activeTool = newTool;
         this._activeTool.onActivate();
     }
 
-    // === NUEVO: Para reactivar el Lazo después de Undo/Redo sin resetear su estado ===
     public switchToolSilent(toolId: string) {
         if (this._activeTool && this._activeTool.isBusy()) return;
 
@@ -68,15 +74,13 @@ export class ToolManager {
 
         if (this._activeTool) {
             this.previousToolId = this._activeTool.id;
-            this._activeTool.onDeactivate();
+            this._activeTool.onDeactivate(toolId);
         }
 
         this._activeTool = newTool;
-        // NO llamamos a onActivate() aquí. Quien lo llama asume la responsabilidad de configurarlo.
     }
 
     public revertTool() {
-        if (this._activeTool && this._activeTool.isBusy()) return;
         this.switchTool(this.defaultToolId);
     }
 

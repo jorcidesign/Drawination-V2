@@ -1,8 +1,4 @@
 // src/history/HistoryManager.ts
-//
-// Responsabilidad ÚNICA: gestionar el array timeline (append-only)
-// y exponer operaciones de undo/redo/commit.
-
 import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { BrushEngine } from '../core/render/BrushEngine';
 import type { StrokePoint } from '../core/io/BinarySerializer';
@@ -97,6 +93,11 @@ export class HistoryManager {
             bbox: eventToUndo.bbox, isSaved: false,
         });
 
+        // === FIX VITAL ===
+        // Borramos el caché en cada viaje en el tiempo.
+        // Previene el "Bug del Snapshot Rancio" que hacía desaparecer trazos al soltar la selección.
+        this.cacheManager.clearAll();
+
         return eventToUndo;
     }
 
@@ -115,10 +116,11 @@ export class HistoryManager {
             bbox: eventToRedo.bbox, isSaved: false,
         });
 
+        // === FIX VITAL ===
+        this.cacheManager.clearAll();
+
         return eventToRedo;
     }
-
-    // ── Commits ───────────────────────────────────────────────────────────
 
     public beginStroke(type: ActionType, toolId: string, x: number, y: number, pressure: number, brush: BrushEngine): void {
         this.currentStrokeStart = performance.now();
@@ -217,7 +219,6 @@ export class HistoryManager {
         return event;
     }
 
-    // ── NUEVO: Centraliza todos los eventos de capa para que pasen por el log ──
     public commitLayerAction(type: LayerAction, layerIndex: number, extraPayload: Partial<TimelineEvent> = {}): TimelineEvent {
         const event: TimelineEvent = {
             id: crypto.randomUUID(), type,
@@ -227,11 +228,9 @@ export class HistoryManager {
             ...extraPayload
         };
         this.push(event);
-        DiagnosticsService.logEvent(event); // <-- ¡AQUÍ ESTÁ EL LOG FALTANTE!
+        DiagnosticsService.logEvent(event);
         return event;
     }
-
-    // ── Spatial Grid ──────────────────────────────────────────────────────
 
     public rebuildSpatialGrid(): void {
         this.spatialGrid.clear();
@@ -260,8 +259,6 @@ export class HistoryManager {
             }
         }
     }
-
-    // ── Commands ──────────────────────────────────────────────────────────
 
     public getActiveCommands(brush: BrushEngine): ICommand[] {
         const { active, transforms, hiddenIds } = this.getState();
@@ -303,8 +300,6 @@ export class HistoryManager {
         return gMinX === Infinity ? null : { minX: gMinX, minY: gMinY, maxX: gMaxX, maxY: gMaxY };
     }
 
-    // ── Memoria ───────────────────────────────────────────────────────────
-
     public enforceRamLimit(): void {
         if (this.isTimelapseRunning) return;
 
@@ -328,8 +323,6 @@ export class HistoryManager {
             }
         }
     }
-
-    // ── Worker ────────────────────────────────────────────────────────────
 
     private _compressPoints(rawPoints: StrokePoint[], brushSize: number): Promise<any> {
         return new Promise((resolve) => {

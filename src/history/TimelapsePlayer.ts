@@ -1,7 +1,4 @@
 // src/history/TimelapsePlayer.ts
-//
-// Reproduce el timeline cronológicamente como una animación.
-
 import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { BrushEngine } from '../core/render/BrushEngine';
 import type { TimelineEvent } from './TimelineTypes';
@@ -48,7 +45,9 @@ export class TimelapsePlayer {
                     spine[j].type === 'TRANSFORM' &&
                     spine[j].targetIds!.slice().sort().join(',') === sortedIds
                 ) {
-                    currentMatrix.multiplySelf(new DOMMatrix(spine[j].transformMatrix));
+                    // === FIX MATEMÁTICO === 
+                    const nextM = new DOMMatrix(spine[j].transformMatrix);
+                    currentMatrix = nextM.multiply(currentMatrix);
                     j++;
                 }
 
@@ -103,18 +102,7 @@ export class TimelapsePlayer {
             for (const [id, buffer] of batchResult.entries()) {
                 dataMap.set(id, buffer);
             }
-
-            const missing = idsNeeded.filter(id => !batchResult.has(id));
-            if (missing.length > 0) {
-                console.error(
-                    `[Timelapse] ⚠️ ${missing.length} trazos no encontrados en IDB ni en RAM.\n` +
-                    `Causa probable: dibujados antes de que storage.init() completara.\n` +
-                    `IDs:`, missing
-                );
-            }
         }
-
-        console.log(`[Timelapse] Pre-carga completa: ${dataMap.size}/${drawingEvents.length} trazos`);
         return dataMap;
     }
 
@@ -122,21 +110,13 @@ export class TimelapsePlayer {
         if (this.isPlaying) return;
         this.isPlaying = true;
 
-        // === FIX 1: Limpiar TODAS las capas antes de empezar ===
         this.engine.clearAllLayers();
 
         const drawnCommands: ICommand[] = [];
         const currentTransforms = new Map<string, DOMMatrix>();
-
-        console.log(`🎬 Timelapse: ${spine.length} eventos en la spine`);
-
         const dataMap = await this.preloadAllData(spine);
         const playlist = this.buildPlaylist(spine);
-
-        // Necesitamos state para el enrutamiento virtual de capas (Merge Down) en el timelapse
         const state = (window as any).drawinationApp.container.history.getState();
-
-        console.log(`🎬 Reproduciendo ${playlist.length} pasos...`);
 
         for (const event of playlist) {
             if (!this.isPlaying) break;
@@ -146,11 +126,11 @@ export class TimelapsePlayer {
 
                 for (const id of event.targetIds) {
                     const current = currentTransforms.get(id) ?? new DOMMatrix();
-                    current.multiplySelf(newMatrix);
-                    currentTransforms.set(id, current);
+                    // === FIX MATEMÁTICO ===
+                    const combined = newMatrix.multiply(current);
+                    currentTransforms.set(id, combined);
                 }
 
-                // === FIX 2: Limpiar TODAS las capas al re-renderizar un transform ===
                 this.engine.clearAllLayers();
 
                 for (const cmd of drawnCommands) {
@@ -170,11 +150,7 @@ export class TimelapsePlayer {
 
             if (event.type === 'STROKE' || event.type === 'ERASE' || event.type === 'FILL') {
                 const localData = dataMap.get(event.id);
-
-                if (!localData) {
-                    console.warn(`[Timelapse] Sin data para ${event.id} — omitido`);
-                    continue;
-                }
+                if (!localData) continue;
 
                 const eventSnapshot: TimelineEvent = { ...event, data: localData };
                 const cmd = CommandFactory.create(eventSnapshot, brush);
