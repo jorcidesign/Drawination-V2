@@ -3,7 +3,7 @@ import type { IBrushRenderer } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
 import type { StrokePoint } from '../../io/BinarySerializer';
-
+import { BezierEasing } from '../../math/BezierEasing';
 // [FIX] PRNG determinista para el grano del lápiz. 
 // Elimina la dependencia de Math.random() para que el Ctrl+Z sea fiel 1:1.
 class SeededRNG {
@@ -134,15 +134,44 @@ export class BasicRenderer implements IBrushRenderer {
         };
     }
 
-    public stamp(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, x: number, y: number, pressure: number): void {
-        const sizeMultiplier = 1 + (pressure - 0.5) * profile.pressureSizeSensitivity * 2;
-        const finalSize = Math.max(0.5, profile.baseSize * sizeMultiplier);
+    public stamp(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, x: number, y: number, rawPressure: number): void {
+        const p1y = profile.physics?.pressureCurve?.p1y ?? 0.333;
+        const p2y = profile.physics?.pressureCurve?.p2y ?? 0.667;
 
-        let opacityMultiplier = 1 + (pressure - 0.5) * profile.pressureOpacitySensitivity * 2;
-        let rawOpacity = profile.baseOpacity * opacityMultiplier;
-        const finalOpacity = Math.max(0.03, Math.min(1, rawOpacity));
+        // 1. Mapear presión
+        const mappedPressure = BezierEasing.evaluate(rawPressure, p1y, p2y);
 
-        ctx.globalAlpha = finalOpacity;
+        // 2. INTERPOLACIÓN DE TAMAÑO (Ej: 11% a 100%)
+        const sizeMin = profile.pressureSizeMin ?? 0.0;
+        const sizeMax = profile.pressureSizeMax ?? 1.0;
+        const currentSizeMultiplier = sizeMin + (sizeMax - sizeMin) * mappedPressure;
+        const finalSize = Math.max(0.5, profile.baseSize * currentSizeMultiplier);
+
+        // 3. INTERPOLACIÓN DE OPACIDAD
+        const opMin = profile.pressureOpacityMin ?? 0.0;
+        const opMax = profile.pressureOpacityMax ?? 1.0;
+        const currentOpacityMultiplier = opMin + (opMax - opMin) * mappedPressure;
+
+        // 4. INTERPOLACIÓN DE FLUJO
+        const flowMin = profile.pressureFlowMin ?? 1.0;
+        const flowMax = profile.pressureFlowMax ?? 1.0;
+        const baseFlow = profile.baseFlow ?? profile.physics?.flow ?? 1.0;
+        const currentFlowMultiplier = flowMin + (flowMax - flowMin) * mappedPressure;
+        const dynamicFlow = baseFlow * currentFlowMultiplier;
+
+        // 5. OPACIDAD FINAL Y ESCUDO ANTI-SOLARIZACIÓN
+        // Límite maestro de opacidad de Procreate para el lápiz (92%)
+        const maxOpacityLimit = 0.92;
+
+        let rawOpacity = profile.baseOpacity * maxOpacityLimit * currentOpacityMultiplier * dynamicFlow;
+
+        // Escudo 8-bits: Descartar basura matemática ultra-baja (< 0.5%)
+        if (rawOpacity < 0.005) return;
+
+        // Piso seguro del 2.5% para mantener el color puro (gris es gris, azul es azul)
+        const stampOpacity = Math.max(0.025, Math.min(1, rawOpacity));
+
+        ctx.globalAlpha = stampOpacity;
 
         if (finalSize < this.TEXTURE_THRESHOLD && profile.textureType === 'solid') {
             ctx.fillStyle = color;
@@ -151,6 +180,7 @@ export class BasicRenderer implements IBrushRenderer {
             ctx.fill();
             return;
         }
+
         const halfSize = finalSize / 2;
         ctx.drawImage(this.tipCanvas, x - halfSize, y - halfSize, finalSize, finalSize);
     }

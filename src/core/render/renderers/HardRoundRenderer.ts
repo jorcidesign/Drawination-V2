@@ -15,7 +15,7 @@ export class HardRoundRenderer implements IBrushRenderer {
 
     // === EL ESTABILIZADOR PONDERADO ===
     public transformInput(profile: IBrushProfile, data: BasePoint): BasePoint {
-        const windowSize = profile.physics?.stabilizerWindow ?? 1;
+        const windowSize = profile.physics?.stabilizerWindow ?? 2;
 
         if (windowSize <= 1) return data; // Fast path sin lag
 
@@ -45,30 +45,41 @@ export class HardRoundRenderer implements IBrushRenderer {
         };
     }
 
-    // === EL STAMP PROCEDURAL Y LA PRESIÓN BEZIER ===
+    // === EL STAMP PROCEDURAL ===
+    // === EL STAMP PROCEDURAL ===
+    // === EL STAMP PROCEDURAL ===
     public stamp(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, x: number, y: number, rawPressure: number): void {
-        const flow = profile.physics?.flow ?? 1.0;
-        const p1y = profile.physics?.pressureCurve?.p1y ?? 0.2;
-        const p2y = profile.physics?.pressureCurve?.p2y ?? 0.8;
+        const p1y = profile.physics?.pressureCurve?.p1y ?? 0.333;
+        const p2y = profile.physics?.pressureCurve?.p2y ?? 0.667;
 
-        // 1. Mapeamos la presión a través de la curva Bezier profesional
+        // 1. Curva Bezier (Diagonal lineal = respuesta 1 a 1)
         const mappedPressure = BezierEasing.evaluate(rawPressure, p1y, p2y);
 
-        // === FIX: ACUMULACIÓN Y SOL VIOLETA ===
-        // El slider de la UI dicta profile.baseOpacity.
-        // El flow es un parámetro interno del pincel (cuánta pintura suelta).
-        // Evitamos que caiga por debajo de 0.03 para evitar errores de redondeo de 8-bits.
-        let rawOpacity = flow * mappedPressure * profile.baseOpacity;
-        const stampOpacity = Math.max(0.03, Math.min(1, rawOpacity));
+        // 2. LÍMITES DE FLUJO 
+        const flowMin = profile.pressureFlowMin ?? 0.0;
+        const flowMax = profile.pressureFlowMax ?? 1.0;
+        const baseFlow = profile.baseFlow ?? profile.physics?.flow ?? 1.0;
 
-        // Si la presión mapeada es literalmente cero (por la curva Bezier), no dibujamos.
-        // Esto preserva la sensación de "inicio suave" sin manchar.
-        if (mappedPressure <= 0.01) return;
+        // 3. INTERPOLACIÓN DE FLUJO
+        const currentFlowMultiplier = flowMin + (flowMax - flowMin) * mappedPressure;
+        const dynamicFlow = baseFlow * currentFlowMultiplier;
+
+        // 4. OPACIDAD FINAL
+        let rawOpacity = dynamicFlow * profile.baseOpacity;
+
+        // === FIX: EL ESCUDO ANTI-SOLARIZACIÓN (Bug de 8-Bits del Canvas) ===
+        // Si el cálculo da una opacidad absurdamente baja (ej. < 0.5%), la descartamos
+        // para no procesar basura matemática.
+        if (rawOpacity < 0.005) return;
+
+        // Forzamos un "piso seguro" del 2.5%. 
+        // 0.025 * 255 = 6.375. Esto le da al navegador un número lo suficientemente 
+        // grande para redondear correctamente y mantener tu Azul 100% Azul.
+        const stampOpacity = Math.max(0.025, Math.min(1, rawOpacity));
 
         ctx.globalAlpha = stampOpacity;
         ctx.fillStyle = color;
 
-        // 3. Dibujo Vectorial Puro (El navegador aplica AA sub-pixel gratis)
         const radius = profile.baseSize / 2;
 
         ctx.beginPath();
@@ -80,7 +91,7 @@ export class HardRoundRenderer implements IBrushRenderer {
         this.inputBuffer = [];
     }
 
-    // Reconstrucción Two-Pass: evita que la opacidad del trazo se contamine con los píxeles del lienzo
+    // Reconstrucción Two-Pass (Aísla la superposición de opacidades)
     public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
         const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
 

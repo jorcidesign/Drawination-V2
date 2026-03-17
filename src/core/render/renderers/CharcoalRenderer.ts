@@ -15,7 +15,7 @@ import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
 import { ValueNoise2D } from '../../math/ValueNoise2D';
 import type { StrokePoint } from '../../io/BinarySerializer';
-
+import { BezierEasing } from '../../math/BezierEasing';
 class SeededRNG {
     private s: number;
     constructor(seed: number) { this.s = (seed | 0) || 1; }
@@ -41,6 +41,11 @@ export class CharcoalRenderer implements IBrushRenderer {
     private lastSize: number = 0;
     private lastAspect: number = 0;
 
+    // === Estado para la orientación del "Rodillo" ===
+    private lastX: number | null = null;
+    private lastY: number | null = null;
+    private currentAngle: number = 0;
+
     // === Buffer para la estabilización del trazo ===
     private inputBuffer: BasePoint[] = [];
 
@@ -54,8 +59,7 @@ export class CharcoalRenderer implements IBrushRenderer {
         const tex = new Float32Array(PAPER_SIZE * PAPER_SIZE);
         for (let py = 0; py < PAPER_SIZE; py++) {
             for (let px = 0; px < PAPER_SIZE; px++) {
-                // fBm: 3 Octavas para un papel orgánico y profundo (mejor que la propuesta de IA)
-                // Se precalcula para rendimiento ultra rápido.
+                // fBm: 3 Octavas para un papel orgánico y profundo
                 const n1 = ValueNoise2D.get(px, py, 0.04, seed);       // Forma topológica principal
                 const n2 = ValueNoise2D.get(px, py, 0.12, seed + 1);   // Detalle medio
                 const n3 = ValueNoise2D.get(px, py, 0.35, seed + 2);   // Micro-diente
@@ -139,35 +143,24 @@ export class CharcoalRenderer implements IBrushRenderer {
 
                 if (baseAlpha === 0) continue;
 
-                // 1. Diente del papel (fBm precalculado)
+                // 1. Diente del papel
                 const paper = this.samplePaper(px - cx, py - cy);
 
-                // 2. Grano de madera del carbón (Ruido estirado direccionalmente)
-                // Frecuencia X muy baja, Y muy alta = vetas horizontales naturales y rotas
+                // 2. Grano de madera del carbón
                 const fiber = ValueNoise2D.get((px - cx) * 0.015, (py - cy) * 0.8, 1.0, fiberSeed);
 
-                // 3. Polvo de carbón (Ruido blanco de altísima frecuencia)
+                // 3. Polvo de carbón
                 const dust = rng.next();
 
-                // Normalizamos la opacidad base (0 a 1) para usarla como "probabilidad" o máscara
                 const mask = baseAlpha / 255;
-
-                // === EL UMBRAL ESTOCÁSTICO ===
-                // En el centro (mask=1), el umbral es bajo -> mucho polvo se pega.
-                // En los bordes (mask cerca de 0), el umbral es alto -> solo las montañas más 
-                // altas del papel logran arrancar polvo (borde quebradizo real).
                 const threshold = 1.0 - (mask * 0.85);
 
-                // Estructura combinada: 50% Papel, 35% Polvo, 15% Fibra
                 const structure = (paper * 0.50) + (dust * 0.35) + (fiber * 0.15);
 
                 if (structure > threshold) {
-                    // Erosión profunda: Cuánto superamos el umbral dicta la densidad del pigmento
-                    // Esto da un antialiasing sub-pixel orgánico para el polvo.
                     const intensity = Math.min(1.0, (structure - threshold) * 2.5);
                     data[idx + 3] = Math.floor(baseAlpha * intensity);
                 } else {
-                    // El pigmento cae en el valle del papel y NO pinta
                     data[idx + 3] = 0;
                 }
             }
@@ -178,9 +171,12 @@ export class CharcoalRenderer implements IBrushRenderer {
         this.tipCtx.putImageData(imgData, 0, 0);
     }
 
-    // === Inicializamos el buffer al empezar a dibujar ===
+    // === Inicializamos el buffer y el rodillo al empezar a dibujar ===
     public beginStroke(_profile: IBrushProfile, _color: string, startPt: BasePoint): void {
         this.inputBuffer = [startPt];
+        this.lastX = startPt.x;
+        this.lastY = startPt.y;
+        this.currentAngle = 0;
     }
 
     // === EL ESTABILIZADOR PONDERADO ===
@@ -220,27 +216,67 @@ export class CharcoalRenderer implements IBrushRenderer {
         color: string,
         x: number,
         y: number,
-        pressure: number
+        rawPressure: number // Cambiado a rawPressure por claridad
     ): void {
-        const sizeMult = 1 + (pressure - 0.5) * profile.pressureSizeSensitivity * 2;
-        const finalSize = Math.max(1, profile.baseSize * sizeMult);
+        const p1y = profile.physics?.pressureCurve?.p1y ?? 0.333;
+        const p2y = profile.physics?.pressureCurve?.p2y ?? 0.667;
 
-        const pressureCurve = pressure * pressure * 0.4 + pressure * 0.6;
-        const opaMult = 1 + (pressure - 0.5) * profile.pressureOpacitySensitivity * 2;
-        const finalOpacity = Math.min(1, profile.baseOpacity * opaMult * pressureCurve * 1.2);
+        // 1. Mapear presión
+        const mappedPressure = BezierEasing.evaluate(rawPressure, p1y, p2y);
 
-        if (finalOpacity < 0.004) return;
+        // 2. INTERPOLACIÓN DE TAMAÑO (28% a 49%)
+        const sizeMin = profile.pressureSizeMin ?? 0.28;
+        const sizeMax = profile.pressureSizeMax ?? 0.49;
+        const currentSizeMultiplier = sizeMin + (sizeMax - sizeMin) * mappedPressure;
+        const finalSize = Math.max(1, profile.baseSize * currentSizeMultiplier);
+
+        // 3. INTERPOLACIÓN DE OPACIDAD (19% a 100%)
+        const opMin = profile.pressureOpacityMin ?? 0.19;
+        const opMax = profile.pressureOpacityMax ?? 1.0;
+        const currentOpacityMultiplier = opMin + (opMax - opMin) * mappedPressure;
+
+        // 4. INTERPOLACIÓN DE FLUJO (4% a 100%)
+        const flowMin = profile.pressureFlowMin ?? 0.04;
+        const flowMax = profile.pressureFlowMax ?? 1.0;
+        const baseFlow = profile.baseFlow ?? profile.physics?.flow ?? 1.0;
+        const currentFlowMultiplier = flowMin + (flowMax - flowMin) * mappedPressure;
+        const dynamicFlow = baseFlow * currentFlowMultiplier;
+
+        // 5. OPACIDAD FINAL Y ESCUDO ANTI-SOLARIZACIÓN
+        let rawOpacity = profile.baseOpacity * currentOpacityMultiplier * dynamicFlow;
+
+        // Escudo 8-bits: Descartamos basura matemática (< 0.5%)
+        if (rawOpacity < 0.005) return;
+
+        // Piso seguro del 2.5% para mantener el color puro
+        const stampOpacity = Math.max(0.025, Math.min(1, rawOpacity));
+
+        // === Cálculo de orientación del "Rodillo" ===
+        if (this.lastX !== null && this.lastY !== null) {
+            const dx = x - this.lastX;
+            const dy = y - this.lastY;
+
+            // Solo actualizamos el ángulo si hay un movimiento perceptible
+            if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1) {
+                this.currentAngle = Math.atan2(dy, dx);
+            }
+        }
+
+        this.lastX = x;
+        this.lastY = y;
 
         const tipSize = this.tipCanvas.width;
         const half = tipSize / 2;
-
         const sizeRatio = finalSize / profile.baseSize;
 
         ctx.save();
-        ctx.globalAlpha = finalOpacity;
+        ctx.globalAlpha = stampOpacity;
 
-        const widthScale = 1 + (pressure - 0.5) * 0.3;
+        // Simulamos la presión sobre la cara plana del carbón ensanchándolo ligeramente
+        const widthScale = 1 + (rawPressure - 0.5) * 0.3;
+
         ctx.translate(x, y);
+        ctx.rotate(this.currentAngle); // Giramos la punta hacia la dirección del trazo
         ctx.scale(widthScale, 1);
 
         ctx.drawImage(
@@ -253,10 +289,11 @@ export class CharcoalRenderer implements IBrushRenderer {
 
         ctx.restore();
     }
-
-    // === Limpiamos el buffer al levantar el lápiz ===
+    // === Limpiamos el buffer y el rodillo al levantar el lápiz ===
     public endStroke(): void {
         this.inputBuffer = [];
+        this.lastX = null;
+        this.lastY = null;
     }
 
     private hexToRgb(hex: string): string {
@@ -280,7 +317,6 @@ export class CharcoalRenderer implements IBrushRenderer {
         ctx.closePath();
     }
 
-    // Reconstrucción Two-Pass: evita que la opacidad del trazo se contamine con los píxeles del lienzo
     public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
         const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
 

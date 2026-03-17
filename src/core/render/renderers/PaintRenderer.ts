@@ -4,7 +4,7 @@ import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
 import { ValueNoise2D } from '../../math/ValueNoise2D';
 import type { StrokePoint } from '../../io/BinarySerializer';
-
+import { BezierEasing } from '../../math/BezierEasing';
 // ─── Constantes internas del renderer ────────────────────────────────────────
 // No van en IBrushProfile porque no son parámetros de usuario.
 // Son decisiones de implementación del PaintRenderer.
@@ -187,9 +187,33 @@ export class PaintRenderer implements IBrushRenderer {
         color: string,
         x: number,
         y: number,
-        pressure: number
+        rawPressure: number
     ): void {
         const speed = this.updateVelocity(x, y);
+
+        // 1. EVALUAR CURVA DE PRESIÓN Y MULTIPLICADORES
+        const p1y = profile.physics?.pressureCurve?.p1y ?? 0.25;
+        const p2y = profile.physics?.pressureCurve?.p2y ?? 0.65;
+        const mappedPressure = BezierEasing.evaluate(rawPressure, p1y, p2y);
+
+        // Tamaño
+        const sizeMin = profile.pressureSizeMin ?? 0.60;
+        const sizeMax = profile.pressureSizeMax ?? 0.63;
+        const currentSizeMultiplier = sizeMin + (sizeMax - sizeMin) * mappedPressure;
+        const finalSize = Math.max(0.5, profile.baseSize * currentSizeMultiplier);
+        const sizeRatio = finalSize / profile.baseSize;
+
+        // Opacidad
+        const opMin = profile.pressureOpacityMin ?? 0.0;
+        const opMax = profile.pressureOpacityMax ?? 1.0;
+        const currentOpacityMultiplier = opMin + (opMax - opMin) * mappedPressure;
+
+        // Flujo Dinámico
+        const flowMin = profile.pressureFlowMin ?? 0.08;
+        const flowMax = profile.pressureFlowMax ?? 0.24;
+        const baseFlow = profile.baseFlow ?? 0.95;
+        const currentFlowMultiplier = flowMin + (flowMax - flowMin) * mappedPressure;
+        const dynamicFlow = baseFlow * currentFlowMultiplier;
 
         // Dirección del trazo
         let dir = { x: 1, y: 0 };
@@ -200,55 +224,40 @@ export class PaintRenderer implements IBrushRenderer {
             dir = this.lastStrokeDir;
         }
 
-        // Reservorio — idéntico a Gemini
+        // Físicas del depósito y la separación de cerdas
         const depletionRate = profile.physics?.depletionRate ?? 0.003;
-        const stepDist = Math.max(1, Math.sqrt(
-            (x - this.lastPos.x) ** 2 + (y - this.lastPos.y) ** 2
-        ));
-        const consumed = pressure * depletionRate * stepDist;
+        const stepDist = Math.max(1, Math.sqrt((x - this.lastPos.x) ** 2 + (y - this.lastPos.y) ** 2));
+        const consumed = rawPressure * depletionRate * stepDist;
+
         this.strokeConsumed += consumed;
         this.globalReservoir = Math.max(0, this.globalReservoir - consumed);
-        const localInk = Math.max(0, Math.min(1,
-            this.globalReservoir * (1 - this.strokeConsumed * 0.3)
-        ));
+        const localInk = Math.max(0, Math.min(1, this.globalReservoir * (1 - this.strokeConsumed * 0.3)));
 
-        // Depósito con saturación exponencial — idéntico a Gemini
         const satK = profile.physics?.saturationK ?? 0.15;
-        const baseDeposit = pressure * localInk;
+        const baseDeposit = rawPressure * localInk;
         const layerCount = speed < 1 ? 5 : 1;
         let finalDeposit = baseDeposit * Math.exp(-satK * layerCount);
         finalDeposit = Math.max(finalDeposit, localInk * 0.02);
 
-        // Separación de cerdas
+        // Dinámica escalar para las cerdas
         const sepFactor = profile.physics?.separationFactor ?? 0.2;
-        const bristleRadius = profile.baseSize / 2;
+        const bristleRadius = finalSize / 2; // El radio ahora depende del finalSize (escalado)
         const maxSeparation = bristleRadius * 0.4;
         const separationMag = Math.min(speed * sepFactor, maxSeparation);
 
-        // OPTIMIZACIÓN 3 — vectores de separación FUERA del loop de cerdas
         const sepX = -dir.x * separationMag;
         const sepY = -dir.y * separationMag;
 
-        // OPTIMIZACIÓN 1 — grain como lookup O(1)
         const freq = profile.physics?.grainFrequency ?? 0.12;
         const grain = this.sampleNoise(x, y, freq);
         const grainFactor = 0.75 + grain * 0.25;
 
-        // Vectores auxiliares constantes en este stamp
         const perp = { x: -dir.y, y: dir.x };
         const bristleLength = bristleRadius * 0.5;
 
-        // OPTIMIZACIÓN 5 — LOD: stride según velocidad
-        // stride=1 → todas las cerdas (slow/detail)
-        // stride=2 → cada 2 cerdas  (medium speed)
-        // stride=4 → cada 4 cerdas  (fast stroke — el usuario no ve diferencia)
         const stride = speed > LOD_THRESHOLD_LOW ? 4 : speed > LOD_THRESHOLD_MEDIUM ? 2 : 1;
-
-        // OPTIMIZACIÓN 6 — Calcular opacidad + posición por cerda en arrays planos
-        // Luego agrupar por opacidad similar → 1 ctx.stroke() por grupo
         const count = this.bristles.length;
 
-        // Arrays planos — más rápido que objetos para acceso secuencial
         const wxArr = new Float32Array(count);
         const wyArr = new Float32Array(count);
         const opArr = new Float32Array(count);
@@ -256,11 +265,13 @@ export class PaintRenderer implements IBrushRenderer {
         for (let i = 0; i < count; i += stride) {
             const bristle = this.bristles[i];
 
-            // OPTIMIZACIÓN 2 — separationWeight ya precalculado
-            wxArr[i] = x + bristle.localX + sepX * bristle.separationWeight;
-            wyArr[i] = y + bristle.localY + sepY * bristle.separationWeight;
+            // Escalamos las posiciones relativas de cada cerda
+            const scaledLocalX = bristle.localX * sizeRatio;
+            const scaledLocalY = bristle.localY * sizeRatio;
 
-            // Wet edge usando localDist precalculado — sin sqrt aquí
+            wxArr[i] = x + scaledLocalX + sepX * bristle.separationWeight;
+            wyArr[i] = y + scaledLocalY + sepY * bristle.separationWeight;
+
             const t = bristle.localDist;
             let edgeBoost = 0;
             if (localInk > 0.3) {
@@ -272,19 +283,28 @@ export class PaintRenderer implements IBrushRenderer {
                 }
             }
 
-            let opacity = grainFactor * bristle.inkCapacity * (finalDeposit + edgeBoost * 0.15);
-            opacity *= profile.baseOpacity;
-            opArr[i] = Math.min(1, opacity);
+            // Opacidad de esta cerda en particular
+            let rawOpacity = grainFactor * bristle.inkCapacity * (finalDeposit + edgeBoost * 0.15);
+
+            // La magia final: Techo (baseOpacity) * Opacidad por Presión * Flujo Dinámico
+            rawOpacity *= profile.baseOpacity * currentOpacityMultiplier * dynamicFlow;
+
+            // === EL ESCUDO DE 8-BITS ===
+            if (rawOpacity < 0.005) {
+                opArr[i] = 0;
+                continue;
+            }
+
+            // Piso de 2.5% de opacidad para proteger el color original
+            opArr[i] = Math.max(0.025, Math.min(1, rawOpacity));
         }
 
-        // ── BATCHING ─────────────────────────────────────────────────────
-        // Agrupar cerdas con opacidad similar → 1 beginPath + N moveTo/quadBez + 1 stroke
-        // Resultado: ~5 flushes GPU por stamp en lugar de N (30, 25, etc.)
+        // BATCHING por cerdas de opacidad similar
         const groups: BristleGroup[] = [];
 
         for (let i = 0; i < count; i += stride) {
             const op = opArr[i];
-            if (op <= 0.01) continue;
+            if (op <= 0) continue;
 
             let found = false;
             for (const g of groups) {
@@ -297,37 +317,37 @@ export class PaintRenderer implements IBrushRenderer {
             if (!found) {
                 groups.push({
                     opacity: op,
-                    lineWidth: this.bristles[i].thickness,
+                    lineWidth: this.bristles[i].thickness * sizeRatio, // Escalamos el grosor de la cerda
                     indices: [i],
                 });
             }
         }
 
-        // Preparar ctx UNA vez fuera del loop de grupos
         ctx.strokeStyle = color;
         ctx.lineCap = 'round';
 
         for (const group of groups) {
             ctx.globalAlpha = group.opacity;
             ctx.lineWidth = group.lineWidth;
-            ctx.beginPath();                              // ← 1 state change por grupo
+            ctx.beginPath();
 
             for (const i of group.indices) {
                 const bristle = this.bristles[i];
                 const wx = wxArr[i];
                 const wy = wyArr[i];
 
-                const jitter = bristle.jitterMod * bristle.thickness * 0.4;
+                const scaledThickness = bristle.thickness * sizeRatio;
+                const jitter = bristle.jitterMod * scaledThickness * 0.4;
+
                 const tipX = wx + dir.x * bristleLength + perp.x * jitter;
                 const tipY = wy + dir.y * bristleLength + perp.y * jitter;
                 const cpX = wx + dir.x * bristleLength * 0.5 + perp.x * jitter * 0.5;
                 const cpY = wy + dir.y * bristleLength * 0.5 + perp.y * jitter * 0.5;
 
                 ctx.moveTo(wx, wy);
-                ctx.quadraticCurveTo(cpX, cpY, tipX, tipY);  // solo geometría — sin flush
+                ctx.quadraticCurveTo(cpX, cpY, tipX, tipY);
             }
-
-            ctx.stroke();                                 // ← 1 ÚNICO flush GPU por grupo
+            ctx.stroke();
         }
     }
 

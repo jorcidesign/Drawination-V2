@@ -9,29 +9,40 @@ export const CharcoalProfile: IBrushProfile = {
     maxSize: 120,
     baseSize: 28,
 
-    // Opacidad base más baja para que funcione como un polvo texturizado
-    baseOpacity: 0.25,
+    baseOpacity: 1.0,         // Slider general de opacidad al 100%
+    baseFlow: 1.0,            // Flujo de fusión (Rendering) al 100%
     blendMode: 'source-over',
     renderer: 'charcoal',
 
-    spacing: 0.05,
+    spacing: 0.03,            // Espaciado al 7%
     angle: 0,
+    aspectRatio: 0.33,        // Proporción 1:3 (palo de carbón)
 
-    // === EL CAMBIO FÍSICO ===
-    // 0.33 equivale a la proporción 1:3 (1 de ancho por 3 de alto).
-    // Esto hace que el "palo" de carbón sea más grueso y cubra más área.
-    aspectRatio: 0.33,
+    // === LÍMITES ESTILO PROCREATE ===
+    // Tamaño por presión (28% a 49%)
+    pressureSizeMin: 0.28,
+    pressureSizeMax: 0.49,
 
-    // El palo de carbón tiene un tamaño físico fijo, no cambia con la presión
+    // Opacidad por presión (19% a 100%)
+    pressureOpacityMin: 0.19,
+    pressureOpacityMax: 1.0,
+
+    // Flujo por presión (4% a 100%)
+    pressureFlowMin: 0.04,
+    pressureFlowMax: 1.0,
+
+    // Retrocompatibilidad
     pressureSizeSensitivity: 0.0,
-
-    // La presión dicta puramente cuánto pigmento se transfiere al papel
-    pressureOpacitySensitivity: 0.8,
+    pressureOpacitySensitivity: 0.0,
 
     smoothing: 0.3,
 
     physics: {
-        // Le confirmamos al motor de físicas la misma proporción (3 de alto, 1 de ancho)
         charcoalAspect: 0.33,
+        stabilizerWindow: 8,
+        pressureCurve: {
+            p1y: 0.333,       // Curva lineal natural
+            p2y: 0.667
+        }
     }
 };

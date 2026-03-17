@@ -1751,14 +1751,16 @@ import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
 import type { StrokePoint } from '../../io/BinarySerializer';
 
-class SeededRNG {
+// ─── PRNG ─────────────────────────────────────────────────────────────────────
+// Usamos el mismo generador determinista del PaintRenderer.
+class SimplePRNG {
     private s: number;
-    constructor(seed: number) { this.s = (seed | 0) || 1; }
+    constructor(seed: number) {
+        this.s = seed === 0 ? 1 : seed;
+    }
     next(): number {
-        let x = this.s;
-        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-        this.s = x;
-        return (x >>> 0) / 0xFFFFFFFF;
+        const x = Math.sin(this.s++) * 10000;
+        return x - Math.floor(x);
     }
 }
 
@@ -1770,9 +1772,10 @@ export class AirbrushRenderer implements IBrushRenderer {
     private lastColor: string = '';
     private lastSize: number = 0;
 
+    // === PRNG dedicado para la rotación del trazo ===
+    private strokeRng: SimplePRNG;
+
     // ── DEBUG ─────────────────────────────────────────────────────────────
-    // Contadores para saber exactamente qué valores entran a stamp()
-    // en cada contexto (live vs rebuild).
     private _debugStrokeId: string = '';
     private _debugIsFirst: boolean = true;
     private _debugSamples: Array<{
@@ -1781,14 +1784,15 @@ export class AirbrushRenderer implements IBrushRenderer {
         baseOpacity: number;
         pressureCurve: number;
         finalOpacity: number;
-        ctxAlphaBefore: number;   // globalAlpha del ctx ANTES de tocarla
-        ctxAlphaAfter: number;    // globalAlpha del ctx DESPUÉS de setearla
-        ctxComposite: string;     // globalCompositeOperation en el momento del stamp
+        ctxAlphaBefore: number;
+        ctxAlphaAfter: number;
+        ctxComposite: string;
     }> = [];
 
     constructor() {
         this.tipCanvas = document.createElement('canvas');
         this.tipCtx = this.tipCanvas.getContext('2d')!;
+        this.strokeRng = new SimplePRNG(1); // Inicialización segura
     }
 
     public updateTip(profile: IBrushProfile, color: string): void {
@@ -1803,47 +1807,61 @@ export class AirbrushRenderer implements IBrushRenderer {
 
         this.tipCtx.clearRect(0, 0, size, size);
 
-        const grad = this.tipCtx.createRadialGradient(cx, cx, 0, cx, cx, cx);
         const rgb = this.hexToRgb(color);
+        const rng = new SimplePRNG(parseInt(color.replace('#', ''), 16) ^ (size * 1337));
 
-        grad.addColorStop(0.00, `rgba(${rgb}, 1.00)`);
-        grad.addColorStop(0.30, `rgba(${rgb}, 0.78)`);
-        grad.addColorStop(0.50, `rgba(${rgb}, 0.46)`);
-        grad.addColorStop(0.70, `rgba(${rgb}, 0.15)`);
-        grad.addColorStop(0.85, `rgba(${rgb}, 0.04)`);
-        grad.addColorStop(1.00, `rgba(${rgb}, 0.00)`);
+        // ── 1. BASE VOLUMÉTRICA SUAVE ──────────────────────────────────────
+        // Esto le da el cuerpo central al aerógrafo para que no quede hueco
+        const baseGrad = this.tipCtx.createRadialGradient(cx, cx, 0, cx, cx, cx);
+        baseGrad.addColorStop(0.0, `rgba(${rgb}, 0.55)`);
+        baseGrad.addColorStop(0.4, `rgba(${rgb}, 0.20)`);
+        baseGrad.addColorStop(0.7, `rgba(${rgb}, 0.05)`);
+        baseGrad.addColorStop(1.0, `rgba(${rgb}, 0.00)`);
 
-        this.tipCtx.fillStyle = grad;
-        this.tipCtx.beginPath();
-        this.tipCtx.arc(cx, cx, cx, 0, Math.PI * 2);
-        this.tipCtx.fill();
+        this.tipCtx.fillStyle = baseGrad;
+        this.tipCtx.fillRect(0, 0, size, size);
 
-        const rng = new SeededRNG(parseInt(color.replace('#', ''), 16) ^ (size * 1337));
-        const particleCount = Math.max(12, Math.floor(cx * 0.6));
+        // ── 2. TEXTURA NUBOSA (SMOKE PUFFS) ───────────────────────────────
+        // En lugar de pixeles duros, creamos esferas suaves superpuestas.
+        // Al rotar esto de forma estocástica en el stamp, se ve como humo.
+        const puffCount = Math.floor(size * 1.5);
+        this.tipCtx.fillStyle = `rgb(${rgb})`;
 
-        this.tipCtx.globalCompositeOperation = 'source-atop';
-
-        for (let i = 0; i < particleCount; i++) {
+        for (let i = 0; i < puffCount; i++) {
             const angle = rng.next() * Math.PI * 2;
-            const r = cx * (0.5 + rng.next() * 0.45);
+
+            // Distribución un poco más junta hacia el centro
+            const radiusFactor = rng.next();
+            const r = cx * Math.pow(radiusFactor, 1.2);
+
             const px = cx + Math.cos(angle) * r;
             const py = cx + Math.sin(angle) * r;
-            const pSize = 0.4 + rng.next() * 0.8;
-            const pAlpha = (1 - r / cx) * 0.35 * rng.next();
 
-            this.tipCtx.globalAlpha = pAlpha;
-            this.tipCtx.fillStyle = `rgb(${rgb})`;
+            // Los "puffs" son más grandes, simulando pequeñas nubes, no arena
+            const puffSize = (1 - radiusFactor) * (size * 0.15) + (size * 0.05);
+
+            // Opacidad microscópica. La acumulación crea la textura.
+            const puffAlpha = (1 - radiusFactor) * 0.1 * rng.next() + 0.02;
+
+            this.tipCtx.globalAlpha = puffAlpha;
+
             this.tipCtx.beginPath();
-            this.tipCtx.arc(px, py, pSize, 0, Math.PI * 2);
+            this.tipCtx.arc(px, py, puffSize, 0, Math.PI * 2);
             this.tipCtx.fill();
         }
 
-        this.tipCtx.globalCompositeOperation = 'source-over';
-        this.tipCtx.globalAlpha = 1;
+        this.tipCtx.globalAlpha = 1; // Restauramos para no afectar a futuros renderizados
     }
 
-    public beginStroke(_profile: IBrushProfile, _color: string, _startPt: BasePoint): void {
-        // Nuevo trazo: resetear debug
+    public beginStroke(_profile: IBrushProfile, _color: string, startPt: BasePoint): void {
+        // === LA MAGIA DEL DETERMINISMO ===
+        const qx = Math.round(startPt.x * 100);
+        const qy = Math.round(startPt.y * 100);
+        const qp = Math.round(startPt.pressure * 1023);
+        const seed = qx * 73 + qy * 19 + qp * 11;
+
+        this.strokeRng = new SimplePRNG(seed);
+
         this._debugStrokeId = Math.random().toString(36).slice(2, 7);
         this._debugIsFirst = true;
         this._debugSamples = [];
@@ -1866,7 +1884,6 @@ export class AirbrushRenderer implements IBrushRenderer {
         const ctxComposite = ctx.globalCompositeOperation;
 
         if (this._debugSamples.length < 5) {
-            // Capturamos los primeros 5 stamps de cada trazo
             this._debugSamples.push({
                 pressure: +pressure.toFixed(4),
                 flow: +flow.toFixed(4),
@@ -1874,7 +1891,7 @@ export class AirbrushRenderer implements IBrushRenderer {
                 pressureCurve: +pressureCurve.toFixed(4),
                 finalOpacity: +finalOpacity.toFixed(4),
                 ctxAlphaBefore: +ctxAlphaBefore.toFixed(4),
-                ctxAlphaAfter: 0, // se rellena después
+                ctxAlphaAfter: 0,
                 ctxComposite,
             });
         }
@@ -1883,19 +1900,32 @@ export class AirbrushRenderer implements IBrushRenderer {
 
         ctx.globalAlpha = finalOpacity;
 
-        // Rellenar ctxAlphaAfter en la última muestra
         if (this._debugSamples.length > 0) {
             this._debugSamples[this._debugSamples.length - 1].ctxAlphaAfter = +ctx.globalAlpha.toFixed(4);
         }
 
         const halfSize = profile.baseSize;
-        ctx.drawImage(this.tipCanvas, x - halfSize, y - halfSize, halfSize * 2, halfSize * 2);
 
-        // ── LOG solo en el primer stamp de cada trazo ─────────────────────
-        // (para no inundar la consola con miles de líneas)
+        // === ROTACIÓN NATURAL Y DETERMINISTA ===
+        const angle = this.strokeRng.next() * Math.PI * 2;
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+
+        ctx.drawImage(
+            this.tipCanvas,
+            -halfSize,
+            -halfSize,
+            halfSize * 2,
+            halfSize * 2
+        );
+
+        ctx.restore();
+
+        // ── LOG DEBUG ─────────────────────────────────────────────────────
         if (this._debugIsFirst) {
             this._debugIsFirst = false;
-            // Guardamos en window para inspeccionarlo después si hace falta
             (window as any).__airbrushDebug = (window as any).__airbrushDebug || [];
             (window as any).__airbrushDebug.push({
                 strokeId: this._debugStrokeId,
@@ -1930,7 +1960,6 @@ export class AirbrushRenderer implements IBrushRenderer {
     }
 
     public endStroke(): void {
-        // Volcar resumen del trazo completo al final
         if (this._debugSamples.length > 0) {
             const alphasBefore = this._debugSamples.map(s => s.ctxAlphaBefore);
             const contaminated = alphasBefore.filter(a => Math.abs(a - 1.0) > 0.01);
@@ -1953,7 +1982,6 @@ export class AirbrushRenderer implements IBrushRenderer {
             : '0, 0, 0';
     }
 
-    // Reconstrucción Two-Pass: evita que la opacidad del trazo se contamine con los píxeles del lienzo
     public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
         const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
 
@@ -3112,13 +3140,11 @@ export const AirbrushProfile: IBrushProfile = {
 
     renderer: 'airbrush',
 
-    // Spacing muy cerrado — el aerógrafo produce una nube continua
-    // 0.1 produce stamps solapados que se funden suavemente
-    spacing: 0.1,
+    // Aumentamos ligeramente el spacing para que las partículas tengan
+    // textura y no se fundan instantáneamente en una línea sólida.
+    spacing: 0.15,
     angle: 0,
     aspectRatio: 1.0, // circular perfecto
-
-
 
     // El tamaño NO varía con la presión — el aerógrafo mantiene su cono
     // Solo la cantidad de pintura (opacidad) responde a la presión
@@ -3127,10 +3153,8 @@ export const AirbrushProfile: IBrushProfile = {
     smoothing: 0.3,
 
     physics: {
-        // Flow bajo = acumulación gradual y natural
-        // 0.15 significa que necesitas pasar ~7 veces para llegar al color sólido
-        // Sube a 0.25 para aerógrafo más "cargado"
-        flow: 0.15,
+        // Aumentamos un poco el flow porque ahora el sello tiene espacios vacíos (partículas)
+        flow: 0.35,
     },
     minSize: 0,
     maxSize: 0
@@ -4574,7 +4598,7 @@ import './interaction/ZoomTool';
 import './interaction/RotateTool';
 import './interaction/MoveTool';
 import './interaction/LassoTool';
-import './interaction/TransformHandleTool'; // <--- NUEVA HERRAMIENTA AÑADIDA
+import './interaction/transform/TransformHandleTool'; // <--- NUEVA HERRAMIENTA AÑADIDA
 import './draw/VectorEraserTool'; // <--- NUEVA HERRAMIENTA AÑADIDA
 
 ===== src/tools/interaction/MoveTool.ts =====
@@ -4666,6 +4690,1070 @@ export class MoveTool implements ITool {
 }
 
 ToolRegistry.register({ id: 'move', factory: (ctx) => new MoveTool(ctx), downShortcut: 'v', isSticky: true });
+
+===== src/tools/interaction/transform/TransformHandleRenderer.ts =====
+
+// src/tools/interaction/transform/TransformHandleRenderer.ts
+//
+// Responsabilidad ÚNICA: dibujar el handle visual y el live preview sobre el paintingCanvas.
+// No tiene estado propio. No conoce ITool, no conoce ToolContext.
+// Recibe exactamente lo que necesita por parámetro.
+//
+// CONTRATOS:
+//   renderLivePreview() → limpia el paintingCanvas, aplica matriz, vuelca el sandbox, dibuja el handle
+//   drawHandle()        → dibuja los controles visuales (rectángulo, esquinas, arcos de rotación)
+
+import type { BoundingBox } from '../../../core/math/BoundingBox';
+
+export class TransformHandleRenderer {
+
+    /**
+     * Vuelca el sandboxCanvas con la transformación actual y dibuja los controles encima.
+     */
+    public renderLivePreview(
+        paintingCtx: CanvasRenderingContext2D,
+        sandboxCanvas: HTMLCanvasElement,
+        currentMatrix: number[],
+        bbox: BoundingBox | null,
+        zoom: number
+    ): void {
+        paintingCtx.clearRect(0, 0, paintingCtx.canvas.width, paintingCtx.canvas.height);
+
+        const pCtx = paintingCtx;
+        pCtx.save();
+
+        const m = currentMatrix;
+        pCtx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+        pCtx.drawImage(sandboxCanvas, 0, 0);
+        pCtx.restore();
+
+        this.drawHandle(paintingCtx, currentMatrix, bbox, zoom);
+    }
+
+    /**
+     * Dibuja el rectángulo punteado, las manijas de escala en cada vértice,
+     * y los puntos de rotación desplazados hacia el exterior diagonal.
+     *
+     * GEOMETRÍA:
+     *
+     *   [R]·····[R]
+     *    · [bbox] ·       R = círculo rojo de rotación (fuera del bbox)
+     *   [R]·····[R]       □ = círculo blanco de escala (sobre el vértice)
+     *
+     * Cada punto R está a ROTATE_OFFSET px del vértice en la dirección
+     * opuesta al centro, es decir en la diagonal exterior de la esquina.
+     * Esto garantiza que nunca se solapen con el interior del bbox.
+     */
+    public drawHandle(
+        paintingCtx: CanvasRenderingContext2D,
+        m: number[],
+        bbox: BoundingBox | null,
+        zoom: number
+    ): void {
+        if (!bbox) return;
+
+        const { minX, minY, maxX, maxY } = bbox;
+
+        const pts = [
+            { x: minX, y: minY },
+            { x: maxX, y: minY },
+            { x: maxX, y: maxY },
+            { x: minX, y: maxY },
+        ].map(p => ({
+            x: p.x * m[0] + p.y * m[2] + m[4],
+            y: p.x * m[1] + p.y * m[3] + m[5],
+        }));
+
+        const pCtx = paintingCtx;
+        pCtx.save();
+
+        // ── 1. Overlay tint ───────────────────────────────────────────────
+        pCtx.beginPath();
+        pCtx.moveTo(pts[0].x, pts[0].y);
+        pCtx.lineTo(pts[1].x, pts[1].y);
+        pCtx.lineTo(pts[2].x, pts[2].y);
+        pCtx.lineTo(pts[3].x, pts[3].y);
+        pCtx.closePath();
+        pCtx.fillStyle = 'rgba(0, 168, 255, 0.05)';
+        pCtx.fill();
+
+        // ── 2. Guías proyectadas hasta los bordes del canvas ──────────────
+        // Cada lado del bbox (como línea infinita) se extiende hasta los
+        // bordes del canvas. Dibujamos solo los tramos exteriores al bbox,
+        // dando el efecto "crosshair de estudio" de Concepts App.
+        const W = pCtx.canvas.width;
+        const H = pCtx.canvas.height;
+
+        pCtx.save();
+        pCtx.strokeStyle = 'rgba(0, 168, 255, 0.22)';
+        pCtx.lineWidth = 0.75 / zoom;
+        pCtx.setLineDash([4 / zoom, 6 / zoom]);
+
+        // 4 lados: par de vértices consecutivos
+        const sides: [number, number, number, number][] = [
+            [pts[0].x, pts[0].y, pts[1].x, pts[1].y],
+            [pts[1].x, pts[1].y, pts[2].x, pts[2].y],
+            [pts[2].x, pts[2].y, pts[3].x, pts[3].y],
+            [pts[3].x, pts[3].y, pts[0].x, pts[0].y],
+        ];
+
+        for (const [ax, ay, bx, by] of sides) {
+            const sdx = bx - ax;
+            const sdy = by - ay;
+
+            // t parametrico: punto = A + t*(B-A)
+            // Intersectamos con los 4 bordes del canvas y recogemos todos los t
+            const ts: number[] = [];
+            if (Math.abs(sdx) > 0.001) {
+                ts.push((0 - ax) / sdx);
+                ts.push((W - ax) / sdx);
+            }
+            if (Math.abs(sdy) > 0.001) {
+                ts.push((0 - ay) / sdy);
+                ts.push((H - ay) / sdy);
+            }
+
+            const tMin = Math.min(...ts);
+            const tMax = Math.max(...ts);
+
+            // Extremos de la línea infinita recortada al canvas
+            const x0 = ax + sdx * tMin;
+            const y0 = ay + sdy * tMin;
+            const x1 = ax + sdx * tMax;
+            const y1 = ay + sdy * tMax;
+
+            // Tramo exterior izquierdo: borde canvas → vértice A
+            pCtx.beginPath();
+            pCtx.moveTo(x0, y0);
+            pCtx.lineTo(ax, ay);
+            pCtx.stroke();
+
+            // Tramo exterior derecho: vértice B → borde canvas
+            pCtx.beginPath();
+            pCtx.moveTo(bx, by);
+            pCtx.lineTo(x1, y1);
+            pCtx.stroke();
+        }
+
+        pCtx.setLineDash([]);
+        pCtx.restore();
+
+        // ── 3. Rectángulo punteado ────────────────────────────────────────
+        pCtx.beginPath();
+        pCtx.moveTo(pts[0].x, pts[0].y);
+        pCtx.lineTo(pts[1].x, pts[1].y);
+        pCtx.lineTo(pts[2].x, pts[2].y);
+        pCtx.lineTo(pts[3].x, pts[3].y);
+        pCtx.closePath();
+        pCtx.lineWidth = 1.5 / zoom;
+        pCtx.strokeStyle = '#00a8ff';
+        pCtx.setLineDash([6 / zoom, 6 / zoom]);
+        pCtx.stroke();
+        pCtx.setLineDash([]);
+
+        // ── 3. Centro (pivote) ────────────────────────────────────────────
+        const cx = (pts[0].x + pts[2].x) / 2;
+        const cy = (pts[0].y + pts[2].y) / 2;
+
+        pCtx.beginPath();
+        pCtx.arc(cx, cy, 3 / zoom, 0, Math.PI * 2);
+        pCtx.fillStyle = '#00a8ff';
+        pCtx.fill();
+
+        // ── 4. Handles por esquina ────────────────────────────────────────
+        const SCALE_R = 6 / zoom;
+        const ROTATE_R = 5 / zoom;
+        const ROTATE_OFFSET = 20 / zoom;
+
+        for (const p of pts) {
+            // Vector unitario desde centro hacia el vértice (dirección exterior)
+            const dx = p.x - cx;
+            const dy = p.y - cy;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            const nx = len > 0 ? dx / len : 0;
+            const ny = len > 0 ? dy / len : 0;
+
+            // Posición del punto de rotación: exterior de la esquina
+            const rx = p.x + nx * ROTATE_OFFSET;
+            const ry = p.y + ny * ROTATE_OFFSET;
+
+            // Línea conector vértice → punto de rotación
+            pCtx.beginPath();
+            pCtx.moveTo(p.x, p.y);
+            pCtx.lineTo(rx, ry);
+            pCtx.strokeStyle = 'rgba(231, 76, 60, 0.4)';
+            pCtx.lineWidth = 1 / zoom;
+            pCtx.stroke();
+
+            // Círculo rojo de rotación (exterior)
+            pCtx.beginPath();
+            pCtx.arc(rx, ry, ROTATE_R, 0, Math.PI * 2);
+            pCtx.fillStyle = 'rgba(231, 76, 60, 0.9)';
+            pCtx.strokeStyle = '#ffffff';
+            pCtx.lineWidth = 1.5 / zoom;
+            pCtx.fill();
+            pCtx.stroke();
+
+            // Círculo blanco de escala (sobre el vértice, dibujado encima)
+            pCtx.beginPath();
+            pCtx.arc(p.x, p.y, SCALE_R, 0, Math.PI * 2);
+            pCtx.fillStyle = '#ffffff';
+            pCtx.strokeStyle = '#00a8ff';
+            pCtx.lineWidth = 2 / zoom;
+            pCtx.fill();
+            pCtx.stroke();
+        }
+
+        pCtx.restore();
+    }
+}
+
+===== src/tools/interaction/transform/TransformContextActions.ts =====
+
+// src/tools/interaction/transform/TransformContextActions.ts
+//
+// Responsabilidad ÚNICA: ejecutar las acciones de la barra contextual
+// (DELETE, FLIP_H, FLIP_V, DUPLICATE) sobre la selección activa.
+//
+// Cada método es autocontenido: hace el commit en history, persiste en storage,
+// actualiza la bbox en selection, y llama al rebuilder.
+// El TransformHandleTool llama a estos métodos y reacciona al resultado.
+//
+// CONTRATOS:
+//   delete()     → oculta los trazos seleccionados, devuelve true
+//   flipH/flipV()→ aplica matriz de espejo, actualiza bbox, regenera sandbox
+//   duplicate()  → clona trazos con offset, selecciona los nuevos
+//
+// CALLBACK onSandboxNeedsRegen: el Tool lo conecta para que las acciones
+// puedan pedir regeneración del sandbox sin importar TransformSandbox directamente.
+
+import type { ToolContext } from '../../core/ITool';
+import type { BoundingBox } from '../../../core/math/BoundingBox';
+import type { TimelineEvent } from '../../../history/TimelineTypes';
+import { DiagnosticsService } from '../../../history/DiagnosticsService';
+import { TransformGestureHandler } from './TransformGestureHandler';
+
+export class TransformContextActions {
+
+    private ctx: ToolContext;
+
+    /** Callback que el Tool registra para que las acciones pidan rebuild del sandbox. */
+    public onSandboxNeedsRegen: (() => Promise<void>) | null = null;
+
+    constructor(ctx: ToolContext) {
+        this.ctx = ctx;
+    }
+
+    // ── DELETE ────────────────────────────────────────────────────────────
+
+    public async delete(): Promise<boolean> {
+        if (!this.ctx.selection.hasSelection()) return false;
+
+        const targetIds = Array.from(this.ctx.selection.selectedIds);
+        const event = this.ctx.history.commitHide(targetIds, 'transform-handle');
+        await this.ctx.storage.saveEvent(event);
+        event.isSaved = true;
+
+        DiagnosticsService.logTransformState('delete', 'none');
+        return true;
+    }
+
+    // ── FLIP H / FLIP V ───────────────────────────────────────────────────
+
+    public async flipH(): Promise<void> {
+        await this._flip('H');
+    }
+
+    public async flipV(): Promise<void> {
+        await this._flip('V');
+    }
+
+    private async _flip(axis: 'H' | 'V'): Promise<void> {
+        if (!this.ctx.selection.hasSelection() || !this.ctx.selection.bbox) return;
+
+        const bbox = this.ctx.selection.bbox;
+        const cx = (bbox.minX + bbox.maxX) / 2;
+        const cy = (bbox.minY + bbox.maxY) / 2;
+        const targetIds = Array.from(this.ctx.selection.selectedIds);
+
+        const m = axis === 'H'
+            ? [-1, 0, 0, 1, cx * 2, 0]
+            : [1, 0, 0, -1, 0, cy * 2];
+
+        const event = await this.ctx.history.commitTransform(targetIds, m);
+        await this.ctx.storage.saveEvent(event);
+        event.isSaved = true;
+        this.ctx.history.enforceRamLimit();
+
+        // Actualizar bbox proyectada
+        const newBbox = TransformGestureHandler.projectBbox(bbox, m);
+        this.ctx.selection.setBbox(newBbox);
+
+        await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
+        await this.onSandboxNeedsRegen?.();
+    }
+
+    // ── DUPLICATE ─────────────────────────────────────────────────────────
+
+    /**
+     * Clona los trazos seleccionados con un offset de +20/+20.
+     * Devuelve los IDs nuevos para que el Tool reseleccione sobre ellos.
+     */
+    public async duplicate(): Promise<string[]> {
+        if (!this.ctx.selection.hasSelection()) return [];
+
+        const targetIds = Array.from(this.ctx.selection.selectedIds);
+        const { active, transforms } = this.ctx.history.getState();
+        const newIds: string[] = [];
+
+        for (const id of targetIds) {
+            const ev = active.find(e => e.id === id);
+            if (!ev) continue;
+            if (!ev.data) ev.data = await this.ctx.storage.loadEventData(id);
+            if (!ev.data) continue;
+
+            const newId = crypto.randomUUID();
+            newIds.push(newId);
+
+            const clone: TimelineEvent = {
+                ...ev,
+                id: newId,
+                timestamp: Date.now(),
+                isSaved: false,
+            };
+            this.ctx.history.push(clone);
+            await this.ctx.storage.saveEvent(clone);
+            clone.isSaved = true;
+
+            const existingMatrix = transforms.get(id) ?? new DOMMatrix();
+            const offsetMatrix = new DOMMatrix().translate(20, 20).multiply(existingMatrix);
+
+            const m = [
+                offsetMatrix.a, offsetMatrix.b,
+                offsetMatrix.c, offsetMatrix.d,
+                offsetMatrix.e, offsetMatrix.f,
+            ];
+            const transformEv = await this.ctx.history.commitTransform([newId], m);
+            await this.ctx.storage.saveEvent(transformEv);
+            transformEv.isSaved = true;
+        }
+
+        this.ctx.history.commitLayerAction('DUPLICATE_GROUP' as any, this.ctx.engine.activeLayerIndex, {
+            sourceIds: targetIds,
+            newIds,
+        });
+        this.ctx.history.rebuildSpatialGrid();
+
+        return newIds;
+    }
+}
+
+===== src/tools/interaction/transform/TransformHandleTool.ts =====
+
+// src/tools/interaction/transform/TransformHandleTool.ts
+//
+// Orquestador principal del TransformHandle.
+// Responsabilidades que QUEDAN aquí (y solo aquí):
+//   - State machine: IDLE / FOCUSED / DRAGGING / SCALING / ROTATING
+//   - Ciclo de vida ITool: onActivate / onDeactivate / onPointerDown/Move/Up
+//   - IUndoInterceptor: beforeUndo / beforeRedo
+//   - Conexión con EventBus (REQUEST_TRANSFORM_HANDLE_REFRESH, acciones UI)
+//   - Teclado: Enter / Escape / Delete / Shift
+//   - Coordinar TransformSandbox, TransformHandleRenderer, TransformGestureHandler,
+//     TransformContextActions
+//
+// LO QUE YA NO ESTÁ AQUÍ (delegado):
+//   - Cálculo de matrices           → TransformGestureHandler
+//   - Hit testing de esquinas       → TransformGestureHandler
+//   - Renderizado del handle        → TransformHandleRenderer
+//   - Canvas offscreen de selección → TransformSandbox
+//   - Acciones DELETE/FLIP/DUP      → TransformContextActions
+
+import type { ITool, ToolContext } from '../../core/ITool';
+import type { PointerData } from '../../../input/InputManager';
+import type { BoundingBox } from '../../../core/math/BoundingBox';
+import type { TimelineEvent } from '../../../history/TimelineTypes';
+import type { IUndoInterceptor, InterceptorResult } from '../../../history/UndoRedoController';
+import { ToolRegistry } from '../../core/ToolRegistry';
+import { DiagnosticsService } from '../../../history/DiagnosticsService';
+
+import { TransformHandleRenderer } from './TransformHandleRenderer';
+import { TransformGestureHandler } from './TransformGestureHandler';
+import { TransformSandbox } from './TransformSandbox';
+import { TransformContextActions } from './TransformContextActions';
+
+// ─── Estado de la máquina ────────────────────────────────────────────────────
+const TransformState = {
+    IDLE: 'IDLE',
+    FOCUSED: 'FOCUSED',
+    DRAGGING: 'DRAGGING',
+    SCALING: 'SCALING',
+    ROTATING: 'ROTATING',
+} as const;
+type TransformState = typeof TransformState[keyof typeof TransformState];
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+export class TransformHandleTool implements ITool, IUndoInterceptor {
+    public readonly id = 'transform-handle';
+
+    private ctx: ToolContext;
+    private state: TransformState = TransformState.IDLE;
+
+    // Módulos delegados
+    private renderer: TransformHandleRenderer;
+    private gesture: TransformGestureHandler;
+    private sandbox: TransformSandbox;
+    private actions: TransformContextActions;
+
+    // Estado de frame actual (la matriz viva durante un gesto)
+    private currentMatrix: number[] = [1, 0, 0, 1, 0, 0];
+
+    // Tracking para Diagnostics
+    private lastAction: 'move' | 'scale' | 'none' = 'none';
+    private isShiftDown = false;
+
+    constructor(ctx: ToolContext) {
+        this.ctx = ctx;
+
+        this.renderer = new TransformHandleRenderer();
+        this.gesture = new TransformGestureHandler();
+        this.sandbox = new TransformSandbox(ctx.engine.width, ctx.engine.height);
+
+        this.actions = new TransformContextActions(ctx);
+        // El Tool conecta el callback de regeneración del sandbox
+        this.actions.onSandboxNeedsRegen = async () => {
+            await this.sandbox.generate(this.ctx);
+            this._renderLivePreview();
+        };
+
+        ctx.undoRedoController.registerInterceptor(this);
+
+        // ── EventBus: refresh externo (undo/redo de TRANSFORM) ────────────
+        ctx.eventBus.on('REQUEST_TRANSFORM_HANDLE_REFRESH', async ({ targetIds }) => {
+            if (this.state !== TransformState.FOCUSED) return;
+
+            // Solo actuamos si los IDs coinciden con la selección actual
+            const currentIds = Array.from(this.ctx.selection.selectedIds).sort().join(',');
+            const incomingIds = [...targetIds].sort().join(',');
+            if (currentIds !== incomingIds) return;
+
+            const newBbox = this.ctx.history.getBboxForIds(targetIds);
+            if (newBbox) this.ctx.selection.setBbox(newBbox);
+
+            await this.sandbox.generate(this.ctx);
+            this.currentMatrix = [1, 0, 0, 1, 0, 0];
+            this._renderLivePreview();
+        });
+
+        // ── EventBus: acciones de la barra contextual ─────────────────────
+        ctx.eventBus.on('SELECTION_DELETE', () => this._handleDelete());
+        ctx.eventBus.on('SELECTION_FLIP_H', () => this._handleFlipH());
+        ctx.eventBus.on('SELECTION_FLIP_V', () => this._handleFlipV());
+        ctx.eventBus.on('SELECTION_DUPLICATE', () => this._handleDuplicate());
+    }
+
+    // ── ITool lifecycle ───────────────────────────────────────────────────
+
+    public isBusy(): boolean {
+        return (
+            this.state === TransformState.DRAGGING ||
+            this.state === TransformState.SCALING ||
+            this.state === TransformState.ROTATING
+        );
+    }
+
+    public async onActivate(): Promise<void> {
+        this.ctx.engine.container.style.cursor = 'move';
+        window.addEventListener('keydown', this._handleKeyDown);
+        window.addEventListener('keyup', this._handleKeyUp);
+
+        if (this.ctx.selection.hasSelection() && this.state !== TransformState.FOCUSED) {
+            const ids = Array.from(this.ctx.selection.selectedIds);
+            const bbox = this.ctx.selection.bbox;
+            this.lastAction = 'none';
+            this.currentMatrix = [1, 0, 0, 1, 0, 0];
+            if (bbox) await this._enterFocused(ids, bbox, false);
+        }
+    }
+
+    public onDeactivate(reason?: string): void {
+        window.removeEventListener('keydown', this._handleKeyDown);
+        window.removeEventListener('keyup', this._handleKeyUp);
+
+        if (this.state !== TransformState.IDLE || this.ctx.selection.hasSelection()) {
+            DiagnosticsService.logTransformState(reason || 'interruption', this.lastAction);
+            this._abortAndExit().catch(console.error);
+        }
+    }
+
+    // ── Pointer events ────────────────────────────────────────────────────
+
+    public onPointerDown(data: PointerData): void {
+        if (this.state !== TransformState.FOCUSED) return;
+
+        const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
+        const bbox = this.ctx.selection.bbox;
+        if (!bbox) return;
+
+        const hit = this.gesture.hitTest(canvasPos.x, canvasPos.y, bbox, this.ctx.viewport.zoom);
+
+        if (hit.kind === 'scale') {
+            this.state = TransformState.SCALING;
+            this.gesture.beginScale(hit);
+            this.ctx.engine.container.style.cursor = 'nwse-resize';
+        }
+        else if (hit.kind === 'rotate') {
+            this.state = TransformState.ROTATING;
+            this.gesture.beginRotate(hit, canvasPos.x, canvasPos.y);
+            this.ctx.engine.container.style.cursor = 'alias';
+        }
+        else if (hit.kind === 'drag') {
+            this.state = TransformState.DRAGGING;
+            this.gesture.beginDrag(canvasPos.x, canvasPos.y);
+            this.ctx.engine.container.style.cursor = 'move';
+        }
+        else {
+            // Click fuera → salir
+            DiagnosticsService.logTransformState('click_outside', this.lastAction);
+            this._exitToLasso();
+        }
+    }
+
+    public onPointerMove(data: PointerData): void {
+        if (this.state === TransformState.IDLE || this.state === TransformState.FOCUSED) return;
+
+        const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
+        const matrix = this.gesture.computeMatrix(canvasPos.x, canvasPos.y, this.isShiftDown);
+        if (matrix) {
+            this.currentMatrix = matrix;
+            this._renderLivePreview();
+        }
+    }
+
+    public async onPointerUp(_data: PointerData): Promise<void> {
+        if (this.state === TransformState.IDLE || this.state === TransformState.FOCUSED) return;
+
+        const gestureType = this.gesture.getGestureType();
+        this.state = TransformState.FOCUSED;
+        this.ctx.engine.container.style.cursor = 'move';
+
+        const IDENTITY = '1,0,0,1,0,0';
+        if (this.currentMatrix.join(',') !== IDENTITY) {
+            this.lastAction = gestureType === 'scale' ? 'scale' : 'move';
+
+            const targetIds = Array.from(this.ctx.selection.selectedIds);
+            const event = await this.ctx.history.commitTransform(targetIds, this.currentMatrix);
+            await this.ctx.storage.saveEvent(event);
+            event.isSaved = true;
+            this.ctx.history.enforceRamLimit();
+
+            // ── Actualizar bbox ───────────────────────────────────────────
+            // Para drag y scale: projectBbox es suficiente (transformación afín simple).
+            // Para rotate: projectBbox daría un AABB inflado (el envolvente axis-aligned
+            // de un rectángulo rotado siempre es mayor). En su lugar recalculamos el
+            // bbox real desde los puntos transformados via getBboxForIds(), que lee las
+            // matrices acumuladas en computeTimelineState y devuelve el bbox exacto.
+            // Usamos getBboxForIds para todos los casos: es más robusto y preciso.
+            await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
+            if (this.state !== TransformState.FOCUSED) return;
+
+            const freshBbox = this.ctx.history.getBboxForIds(targetIds);
+            if (freshBbox) this.ctx.selection.setBbox(freshBbox);
+
+            await this.sandbox.generate(this.ctx);
+            this.currentMatrix = [1, 0, 0, 1, 0, 0];
+        }
+
+        if (this.state === TransformState.FOCUSED) {
+            this._renderLivePreview();
+        }
+    }
+
+    // ── IUndoInterceptor ──────────────────────────────────────────────────
+
+    public async beforeUndo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
+        if (this.isBusy()) return { handled: true };
+
+        if (this.state === TransformState.IDLE) {
+            if (nextEvent?.type === 'TRANSFORM') {
+                const bbox = this.ctx.history.getBboxForIds(nextEvent.targetIds!);
+                if (bbox) {
+                    this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bbox);
+                    this.lastAction = 'none';
+                    this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
+                    DiagnosticsService.logTransformState('resurrect_undo', 'none');
+                }
+                return { handled: true };
+            }
+            return { handled: false };
+        }
+
+        if (this.state === TransformState.FOCUSED) {
+            if (
+                !nextEvent ||
+                nextEvent.type !== 'TRANSFORM' ||
+                this._selectedIdsStr() !== [...nextEvent.targetIds!].sort().join(',')
+            ) {
+                DiagnosticsService.logTransformState('undo_exit', this.lastAction);
+                await this._exitToLasso();
+                return { handled: true };
+            }
+            return { handled: false };
+        }
+
+        return { handled: false };
+    }
+
+    public async beforeRedo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
+        if (this.isBusy()) return { handled: true };
+
+        if (this.state === TransformState.IDLE) {
+            if (nextEvent?.type === 'TRANSFORM') {
+                const bbox = this.ctx.history.getBboxForIds(nextEvent.targetIds!);
+                if (bbox) {
+                    this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bbox);
+                    this.lastAction = 'none';
+                    this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
+                    DiagnosticsService.logTransformState('resurrect_redo', 'none');
+                }
+                return { handled: true };
+            }
+            return { handled: false };
+        }
+
+        if (this.state === TransformState.FOCUSED) {
+            if (
+                !nextEvent ||
+                nextEvent.type !== 'TRANSFORM' ||
+                this._selectedIdsStr() !== [...nextEvent.targetIds!].sort().join(',')
+            ) {
+                DiagnosticsService.logTransformState('redo_exit', this.lastAction);
+                await this._exitToLasso();
+                return { handled: true };
+            }
+            return { handled: false };
+        }
+
+        return { handled: false };
+    }
+
+    // ── Acciones contextuales (delegadas a TransformContextActions) ───────
+
+    private async _handleDelete(): Promise<void> {
+        if (this.state !== TransformState.FOCUSED || !this.ctx.selection.hasSelection()) return;
+        const deleted = await this.actions.delete();
+        if (deleted) await this._exitToLasso();
+    }
+
+    private async _handleFlipH(): Promise<void> {
+        if (this.state !== TransformState.FOCUSED || !this.ctx.selection.hasSelection()) return;
+        await this.actions.flipH();
+    }
+
+    private async _handleFlipV(): Promise<void> {
+        if (this.state !== TransformState.FOCUSED || !this.ctx.selection.hasSelection()) return;
+        await this.actions.flipV();
+    }
+
+    private async _handleDuplicate(): Promise<void> {
+        if (this.state !== TransformState.FOCUSED || !this.ctx.selection.hasSelection()) return;
+
+        const newIds = await this.actions.duplicate();
+        if (newIds.length === 0) return;
+
+        const newBbox = this.ctx.history.getBboxForIds(newIds);
+        if (newBbox) {
+            this._clearVisuals();
+            await this._enterFocused(newIds, newBbox, false);
+        }
+    }
+
+    // ── Ciclo de vida interno ─────────────────────────────────────────────
+
+    private async _enterFocused(
+        ids: string[],
+        bbox: BoundingBox,
+        skipRebuild: boolean
+    ): Promise<void> {
+        this.state = TransformState.FOCUSED;
+        this.ctx.selection.setSelection(new Set(ids), bbox);
+        this.currentMatrix = [1, 0, 0, 1, 0, 0];
+        this.lastAction = 'none';
+
+        if (!skipRebuild) await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
+        if (this.state !== TransformState.FOCUSED) return;
+
+        await this.sandbox.generate(this.ctx);
+        if (this.state !== TransformState.FOCUSED) return;
+
+        this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '0.3';
+        this._renderLivePreview();
+        this.ctx.engine.container.style.cursor = 'move';
+    }
+
+    private async _abortAndExit(): Promise<void> {
+        if (this.state === TransformState.IDLE && !this.ctx.selection.hasSelection()) return;
+
+        this._clearVisuals();
+        this.state = TransformState.IDLE;
+        this.gesture.clear();
+        this.ctx.selection.clear();
+        await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
+    }
+
+    private async _exitToLasso(): Promise<void> {
+        await this._abortAndExit();
+        this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', 'lasso');
+    }
+
+    private _clearVisuals(): void {
+        this.ctx.engine.clearPaintingCanvas();
+        this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '1';
+    }
+
+    private _renderLivePreview(): void {
+        this.renderer.renderLivePreview(
+            this.ctx.engine.paintingContext,
+            this.sandbox.canvas,
+            this.currentMatrix,
+            this.ctx.selection.bbox,
+            this.ctx.viewport.zoom
+        );
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    private _selectedIdsStr(): string {
+        return Array.from(this.ctx.selection.selectedIds).sort().join(',');
+    }
+
+    // ── Keyboard ──────────────────────────────────────────────────────────
+
+    private _handleKeyDown = async (e: KeyboardEvent): Promise<void> => {
+        if (e.key === 'Shift') {
+            this.isShiftDown = true;
+            if (this.state === TransformState.SCALING || this.state === TransformState.ROTATING) {
+                this._renderLivePreview();
+            }
+        }
+
+        if (this.state === TransformState.IDLE) return;
+
+        if (e.key === 'Enter') {
+            e.preventDefault(); e.stopPropagation();
+            DiagnosticsService.logTransformState('enter', this.lastAction);
+            await this._exitToLasso();
+        }
+        else if (e.key === 'Escape') {
+            e.preventDefault(); e.stopPropagation();
+            DiagnosticsService.logTransformState('escape', this.lastAction);
+            await this._exitToLasso();
+        }
+
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+            e.preventDefault();
+            await this._handleDelete();
+        }
+    };
+
+    private _handleKeyUp = (e: KeyboardEvent): void => {
+        if (e.key === 'Shift') {
+            this.isShiftDown = false;
+            if (this.state === TransformState.SCALING || this.state === TransformState.ROTATING) {
+                this._renderLivePreview();
+            }
+        }
+    };
+}
+
+ToolRegistry.register({
+    id: 'transform-handle',
+    factory: (ctx) => new TransformHandleTool(ctx),
+});
+
+===== src/tools/interaction/transform/TransformGestureHandler.ts =====
+
+// src/tools/interaction/transform/TransformGestureHandler.ts
+//
+// Responsabilidad ÚNICA: hit testing de esquinas + cálculo de matrices afines
+// para las 3 operaciones (drag, scale, rotate).
+//
+// No tiene estado de canvas. No conoce ITool ni ToolContext.
+// El estado mutable (startX, pivotX, etc.) es interno a la sesión de gesto activa.
+// El TransformHandleTool es el único que llama a este módulo.
+//
+// ZONAS DE HIT (modelo Concepts App):
+//
+//         ╔═══════════════════════╗
+//   [rot] ║  [drag — interior]   ║ [rot]
+//         ║                       ║
+//   [rot] ║                       ║ [rot]
+//         ╚═══════════════════════╝
+//
+//   • Interior del bbox          → drag (mover)
+//   • Círculo ≤ scaleRadius      → scale (esquina, dentro o fuera)
+//   • Corona scaleRadius..rotateRadius, FUERA del bbox → rotate
+//   • Cualquier otra cosa        → outside (deseleccionar)
+//
+// El orden de evaluación es: escala > interior > rotación > fuera.
+// Así, el interior siempre es drag aunque esté cerca de una esquina.
+
+import type { BoundingBox } from '../../../core/math/BoundingBox';
+
+export type HitZone =
+    | { kind: 'scale'; cornerX: number; cornerY: number; pivotX: number; pivotY: number }
+    | { kind: 'rotate'; cx: number; cy: number }
+    | { kind: 'drag' }
+    | { kind: 'outside' };
+
+type GestureState =
+    | { type: 'drag'; startX: number; startY: number }
+    | { type: 'scale'; dragStartX: number; dragStartY: number; pivotX: number; pivotY: number }
+    | { type: 'rotate'; initialAngle: number; centerX: number; centerY: number }
+    | null;
+
+export class TransformGestureHandler {
+
+    private gesture: GestureState = null;
+
+    // ── Hit Testing ───────────────────────────────────────────────────────
+
+    public hitTest(
+        canvasX: number,
+        canvasY: number,
+        bbox: BoundingBox,
+        zoom: number
+    ): HitZone {
+        // Estos valores deben coincidir exactamente con TransformHandleRenderer
+        const SCALE_R = 6 / zoom;
+        const ROTATE_R = 5 / zoom;
+        const ROTATE_OFFSET = 20 / zoom;
+        // Radio de hit algo más generoso que el visual para facilitar la interacción
+        const SCALE_HIT = SCALE_R + 6 / zoom;
+        const ROTATE_HIT = ROTATE_R + 8 / zoom;
+
+        const cx = (bbox.minX + bbox.maxX) / 2;
+        const cy = (bbox.minY + bbox.maxY) / 2;
+
+        const corners = [
+            { x: bbox.minX, y: bbox.minY, px: bbox.maxX, py: bbox.maxY },
+            { x: bbox.maxX, y: bbox.minY, px: bbox.minX, py: bbox.maxY },
+            { x: bbox.maxX, y: bbox.maxY, px: bbox.minX, py: bbox.minY },
+            { x: bbox.minX, y: bbox.maxY, px: bbox.maxX, py: bbox.minY },
+        ];
+
+        for (const c of corners) {
+            // Dirección exterior (desde centro hacia el vértice, normalizada)
+            const dx = c.x - cx;
+            const dy = c.y - cy;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            const nx = len > 0 ? dx / len : 0;
+            const ny = len > 0 ? dy / len : 0;
+
+            // Posición del punto de rotación exterior
+            const rx = c.x + nx * ROTATE_OFFSET;
+            const ry = c.y + ny * ROTATE_OFFSET;
+
+            // ── Escala: hit sobre el vértice ──────────────────────────────
+            if (Math.hypot(canvasX - c.x, canvasY - c.y) <= SCALE_HIT) {
+                return { kind: 'scale', cornerX: c.x, cornerY: c.y, pivotX: c.px, pivotY: c.py };
+            }
+
+            // ── Rotación: hit sobre el círculo exterior ───────────────────
+            if (Math.hypot(canvasX - rx, canvasY - ry) <= ROTATE_HIT) {
+                return { kind: 'rotate', cx, cy };
+            }
+        }
+
+        // ── Drag: cualquier punto dentro del bbox ─────────────────────────
+        const inside =
+            canvasX >= bbox.minX && canvasX <= bbox.maxX &&
+            canvasY >= bbox.minY && canvasY <= bbox.maxY;
+
+        return inside ? { kind: 'drag' } : { kind: 'outside' };
+    }
+
+    // ── Inicio de gesto ───────────────────────────────────────────────────
+
+    public beginDrag(canvasX: number, canvasY: number): void {
+        this.gesture = { type: 'drag', startX: canvasX, startY: canvasY };
+    }
+
+    public beginScale(hit: Extract<HitZone, { kind: 'scale' }>): void {
+        this.gesture = {
+            type: 'scale',
+            dragStartX: hit.cornerX,
+            dragStartY: hit.cornerY,
+            pivotX: hit.pivotX,
+            pivotY: hit.pivotY,
+        };
+    }
+
+    public beginRotate(hit: Extract<HitZone, { kind: 'rotate' }>, canvasX: number, canvasY: number): void {
+        this.gesture = {
+            type: 'rotate',
+            initialAngle: Math.atan2(canvasY - hit.cy, canvasX - hit.cx),
+            centerX: hit.cx,
+            centerY: hit.cy,
+        };
+    }
+
+    // ── Cálculo del frame actual ──────────────────────────────────────────
+
+    /**
+     * Devuelve la matriz [a,b,c,d,tx,ty] para el frame actual.
+     * Si isShiftDown=true aplica el snap de 15° en rotate.
+     * Devuelve null si no hay gesto activo.
+     */
+    public computeMatrix(
+        canvasX: number,
+        canvasY: number,
+        isShiftDown: boolean
+    ): number[] | null {
+        if (!this.gesture) return null;
+
+        if (this.gesture.type === 'drag') {
+            const dx = canvasX - this.gesture.startX;
+            const dy = canvasY - this.gesture.startY;
+            return [1, 0, 0, 1, dx, dy];
+        }
+
+        if (this.gesture.type === 'scale') {
+            const { dragStartX, dragStartY, pivotX, pivotY } = this.gesture;
+            const dxOrig = dragStartX - pivotX;
+            const dyOrig = dragStartY - pivotY;
+
+            let sx = Math.abs(dxOrig) > 0.001 ? (canvasX - pivotX) / dxOrig : 1;
+            let sy = Math.abs(dyOrig) > 0.001 ? (canvasY - pivotY) / dyOrig : 1;
+
+            if (Math.abs(sx) < 0.01) sx = 0.01 * Math.sign(sx) || 0.01;
+            if (Math.abs(sy) < 0.01) sy = 0.01 * Math.sign(sy) || 0.01;
+
+            if (!isShiftDown) {
+                // Escala uniforme: tomamos el mayor
+                const scale = Math.max(Math.abs(sx), Math.abs(sy));
+                sx = scale * Math.sign(sx);
+                sy = scale * Math.sign(sy);
+            }
+
+            return [
+                sx, 0,
+                0, sy,
+                pivotX * (1 - sx),
+                pivotY * (1 - sy),
+            ];
+        }
+
+        if (this.gesture.type === 'rotate') {
+            const { initialAngle, centerX, centerY } = this.gesture;
+            const currentAngle = Math.atan2(canvasY - centerY, canvasX - centerX);
+            let deltaDeg = ((currentAngle - initialAngle) * 180) / Math.PI;
+
+            if (isShiftDown) {
+                deltaDeg = Math.round(deltaDeg / 15) * 15;
+            }
+
+            const m = new DOMMatrix()
+                .translate(centerX, centerY)
+                .rotate(deltaDeg)
+                .translate(-centerX, -centerY);
+
+            return [m.a, m.b, m.c, m.d, m.e, m.f];
+        }
+
+        return null;
+    }
+
+    public getGestureType(): 'drag' | 'scale' | 'rotate' | null {
+        return this.gesture?.type ?? null;
+    }
+
+    public clear(): void {
+        this.gesture = null;
+    }
+
+    // ── Utilidad: recalcula bbox proyectada tras aplicar una matriz ───────
+
+    public static projectBbox(bbox: BoundingBox, m: number[]): BoundingBox {
+        const pts = [
+            { x: bbox.minX, y: bbox.minY }, { x: bbox.maxX, y: bbox.minY },
+            { x: bbox.maxX, y: bbox.maxY }, { x: bbox.minX, y: bbox.maxY },
+        ].map(p => ({
+            x: p.x * m[0] + p.y * m[2] + m[4],
+            y: p.x * m[1] + p.y * m[3] + m[5],
+        }));
+
+        return {
+            minX: Math.min(...pts.map(p => p.x)),
+            minY: Math.min(...pts.map(p => p.y)),
+            maxX: Math.max(...pts.map(p => p.x)),
+            maxY: Math.max(...pts.map(p => p.y)),
+        };
+    }
+}
+
+===== src/tools/interaction/transform/TransformSandbox.ts =====
+
+// src/tools/interaction/transform/TransformSandbox.ts
+//
+// Responsabilidad ÚNICA: mantener el canvas offscreen con los trazos seleccionados
+// renderizados en su estado actual (con transforms aplicados).
+//
+// El sandbox es un canvas invisible que se vuelca al paintingCanvas con la
+// matriz de transformación activa en _renderLivePreview().
+//
+// CUÁNDO se regenera:
+//   - Al entrar en estado FOCUSED (enterFocused)
+//   - Después de commit de transform (la posición base cambió)
+//   - En REQUEST_TRANSFORM_HANDLE_REFRESH (undo/redo externo)
+//
+// CONTRATOS:
+//   generate()  → pinta los trazos seleccionados en el canvas offscreen
+//   canvas      → getter del HTMLCanvasElement para pasarlo al renderer
+
+import type { ToolContext } from '../../core/ITool';
+import { CommandFactory } from '../../../history/commands/CommandFactory';
+
+export class TransformSandbox {
+    private _canvas: HTMLCanvasElement;
+
+    constructor(width: number, height: number) {
+        this._canvas = document.createElement('canvas');
+        this._canvas.width = width;
+        this._canvas.height = height;
+    }
+
+    public get canvas(): HTMLCanvasElement {
+        return this._canvas;
+    }
+
+    /**
+     * Regenera el sandbox dibujando todos los trazos seleccionados con sus transforms.
+     * Llama a storage si algún trazo no tiene datos en RAM.
+     */
+    public async generate(ctx: ToolContext): Promise<void> {
+        const sCtx = this._canvas.getContext('2d')!;
+        sCtx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+
+        const { active, transforms, hiddenIds } = ctx.history.getState();
+
+        for (const eventId of ctx.selection.selectedIds) {
+            if (hiddenIds.has(eventId)) continue;
+
+            const ev = active.find(e => e.id === eventId);
+            if (!ev) continue;
+
+            const cmd = CommandFactory.create(ev, ctx.activeBrush);
+            await cmd.loadDataIfNeeded(ctx.storage);
+
+            const t = transforms.get(eventId);
+            if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+
+            cmd.execute(sCtx);
+        }
+    }
+}
 
 ===== src/tools/interaction/LassoTool.ts =====
 
@@ -4834,608 +5922,6 @@ ToolRegistry.register({
     factory: (ctx) => new LassoTool(ctx),
     downShortcut: 'l',
     isSticky: true
-});
-
-===== src/tools/interaction/TransformHandleTool.ts =====
-
-// src/tools/interaction/TransformHandleTool.ts
-import type { ITool, ToolContext } from '../core/ITool';
-import type { PointerData } from '../../input/InputManager';
-import type { BoundingBox } from '../../core/math/BoundingBox';
-import type { TimelineEvent } from '../../history/TimelineTypes';
-import type { IUndoInterceptor, InterceptorResult } from '../../history/UndoRedoController';
-import { BinarySerializer } from '../../core/io/BinarySerializer';
-import { CommandFactory } from '../../history/commands/CommandFactory';
-import { ToolRegistry } from '../core/ToolRegistry';
-import { DiagnosticsService } from '../../history/DiagnosticsService';
-
-const TransformState = {
-    IDLE: 'IDLE',
-    FOCUSED: 'FOCUSED',
-    DRAGGING: 'DRAGGING',
-    SCALING: 'SCALING',
-    ROTATING: 'ROTATING', // <--- NUEVO ESTADO DE ROTACIÓN
-} as const;
-type TransformState = typeof TransformState[keyof typeof TransformState];
-
-export class TransformHandleTool implements ITool, IUndoInterceptor {
-    public readonly id = 'transform-handle';
-    private ctx: ToolContext;
-    private state: TransformState = TransformState.IDLE;
-    private sandboxCanvas: HTMLCanvasElement;
-
-    private currentMatrix: number[] = [1, 0, 0, 1, 0, 0];
-    private dragStartX = 0;
-    private dragStartY = 0;
-    private pivotX = 0;
-    private pivotY = 0;
-
-    // === NUEVO: Variables para controlar la rotación matemáticamente ===
-    private initialRotationAngle = 0;
-    private rotationCenterX = 0;
-    private rotationCenterY = 0;
-
-    private lastAction: 'move' | 'scale' | 'none' = 'none';
-    private isShiftDown = false;
-
-    constructor(ctx: ToolContext) {
-        this.ctx = ctx;
-        this.sandboxCanvas = document.createElement('canvas');
-        this.sandboxCanvas.width = ctx.engine.width;
-        this.sandboxCanvas.height = ctx.engine.height;
-
-        ctx.undoRedoController.registerInterceptor(this);
-
-        ctx.eventBus.on('REQUEST_TRANSFORM_HANDLE_REFRESH', async ({ targetIds }) => {
-            if (this.state !== TransformState.FOCUSED) return;
-            const currentIds = Array.from(this.ctx.selection.selectedIds).sort().join(',');
-            const incomingIds = [...targetIds].sort().join(',');
-            if (currentIds !== incomingIds) return;
-
-            const newBbox = this.ctx.history.getBboxForIds(targetIds);
-            if (newBbox) this.ctx.selection.setBbox(newBbox);
-
-            await this._generateSandbox();
-            this.currentMatrix = [1, 0, 0, 1, 0, 0];
-            this._renderLivePreview();
-        });
-
-        // ── CONEXIÓN CON LA BARRA CONTEXTUAL ──────────────────────────────
-        ctx.eventBus.on('SELECTION_DELETE', () => this._handleContextAction('DELETE'));
-        ctx.eventBus.on('SELECTION_FLIP_H', () => this._handleContextAction('FLIP_H'));
-        ctx.eventBus.on('SELECTION_FLIP_V', () => this._handleContextAction('FLIP_V'));
-        ctx.eventBus.on('SELECTION_DUPLICATE', () => this._handleContextAction('DUPLICATE'));
-    }
-
-    private async _handleContextAction(action: 'DELETE' | 'FLIP_H' | 'FLIP_V' | 'DUPLICATE') {
-        if (this.state !== TransformState.FOCUSED || !this.ctx.selection.hasSelection()) return;
-
-        if (action === 'DELETE') {
-            const targetIds = Array.from(this.ctx.selection.selectedIds);
-            const event = this.ctx.history.commitHide(targetIds, this.id);
-            await this.ctx.storage.saveEvent(event);
-            event.isSaved = true;
-            DiagnosticsService.logTransformState('delete', this.lastAction);
-            await this._exitToLasso();
-            return;
-        }
-
-        const bbox = this.ctx.selection.bbox!;
-        const cx = (bbox.minX + bbox.maxX) / 2;
-        const cy = (bbox.minY + bbox.maxY) / 2;
-        const targetIds = Array.from(this.ctx.selection.selectedIds);
-
-        if (action === 'FLIP_H' || action === 'FLIP_V') {
-            const m = action === 'FLIP_H'
-                ? [-1, 0, 0, 1, cx * 2, 0]
-                : [1, 0, 0, -1, 0, cy * 2];
-
-            this.lastAction = 'scale';
-
-            const event = await this.ctx.history.commitTransform(targetIds, m);
-            await this.ctx.storage.saveEvent(event);
-            event.isSaved = true;
-            this.ctx.history.enforceRamLimit();
-
-            const pts = [
-                { x: bbox.minX, y: bbox.minY }, { x: bbox.maxX, y: bbox.minY },
-                { x: bbox.maxX, y: bbox.maxY }, { x: bbox.minX, y: bbox.maxY }
-            ].map(p => ({ x: p.x * m[0] + p.y * m[2] + m[4], y: p.x * m[1] + p.y * m[3] + m[5] }));
-
-            this.ctx.selection.setBbox({
-                minX: Math.min(...pts.map(p => p.x)), minY: Math.min(...pts.map(p => p.y)),
-                maxX: Math.max(...pts.map(p => p.x)), maxY: Math.max(...pts.map(p => p.y)),
-            });
-
-            await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
-            await this._generateSandbox();
-            this._renderLivePreview();
-        }
-
-        if (action === 'DUPLICATE') {
-            const { active, transforms } = this.ctx.history.getState();
-            const newIds: string[] = [];
-
-            for (const id of targetIds) {
-                const ev = active.find(e => e.id === id);
-                if (!ev) continue;
-                if (!ev.data) ev.data = await this.ctx.storage.loadEventData(id);
-                if (!ev.data) continue;
-
-                const newId = crypto.randomUUID();
-                newIds.push(newId);
-
-                const clone: TimelineEvent = { ...ev, id: newId, timestamp: Date.now(), isSaved: false };
-                this.ctx.history.push(clone);
-                await this.ctx.storage.saveEvent(clone);
-                clone.isSaved = true;
-
-                const existingMatrix = transforms.get(id) ?? new DOMMatrix();
-                const offsetMatrix = new DOMMatrix().translate(20, 20).multiply(existingMatrix);
-
-                const m = [offsetMatrix.a, offsetMatrix.b, offsetMatrix.c, offsetMatrix.d, offsetMatrix.e, offsetMatrix.f];
-                const transformEv = await this.ctx.history.commitTransform([newId], m);
-                await this.ctx.storage.saveEvent(transformEv);
-                transformEv.isSaved = true;
-            }
-
-            this.ctx.history.commitLayerAction('DUPLICATE_GROUP' as any, this.ctx.engine.activeLayerIndex, {
-                sourceIds: targetIds, newIds: newIds
-            });
-
-            this.ctx.history.rebuildSpatialGrid();
-
-            const newBbox = this.ctx.history.getBboxForIds(newIds);
-            if (newBbox) {
-                this._clearVisuals();
-                await this._enterFocused(newIds, newBbox, false);
-            }
-        }
-    }
-
-    public async beforeUndo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
-        if (this.state === TransformState.DRAGGING || this.state === TransformState.SCALING || this.state === TransformState.ROTATING) return { handled: true };
-
-        if (this.state === TransformState.IDLE) {
-            if (nextEvent?.type === 'TRANSFORM') {
-                const bbox = this.ctx.history.getBboxForIds(nextEvent.targetIds!);
-                if (bbox) {
-                    this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bbox);
-                    this.lastAction = 'none';
-                    this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
-                    DiagnosticsService.logTransformState('resurrect_undo', 'none');
-                }
-                return { handled: true };
-            }
-            return { handled: false };
-        }
-
-        if (this.state === TransformState.FOCUSED) {
-            if (!nextEvent || nextEvent.type !== 'TRANSFORM' || this._selectedIdsStr() !== [...nextEvent.targetIds!].sort().join(',')) {
-                DiagnosticsService.logTransformState('undo_exit', this.lastAction);
-                await this._exitToLasso();
-                return { handled: true };
-            }
-            return { handled: false };
-        }
-        return { handled: false };
-    }
-
-    public async beforeRedo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
-        if (this.state === TransformState.DRAGGING || this.state === TransformState.SCALING || this.state === TransformState.ROTATING) return { handled: true };
-
-        if (this.state === TransformState.IDLE) {
-            if (nextEvent?.type === 'TRANSFORM') {
-                const bbox = this.ctx.history.getBboxForIds(nextEvent.targetIds!);
-                if (bbox) {
-                    this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bbox);
-                    this.lastAction = 'none';
-                    this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
-                    DiagnosticsService.logTransformState('resurrect_redo', 'none');
-                }
-                return { handled: true };
-            }
-            return { handled: false };
-        }
-
-        if (this.state === TransformState.FOCUSED) {
-            if (!nextEvent || nextEvent.type !== 'TRANSFORM' || this._selectedIdsStr() !== [...nextEvent.targetIds!].sort().join(',')) {
-                DiagnosticsService.logTransformState('redo_exit', this.lastAction);
-                await this._exitToLasso();
-                return { handled: true };
-            }
-            return { handled: false };
-        }
-        return { handled: false };
-    }
-
-    public isBusy(): boolean {
-        return this.state === TransformState.DRAGGING || this.state === TransformState.SCALING || this.state === TransformState.ROTATING;
-    }
-
-    public async onActivate(): Promise<void> {
-        this.ctx.engine.container.style.cursor = 'move';
-        window.addEventListener('keydown', this._handleKeyDown);
-        window.addEventListener('keyup', this._handleKeyUp);
-
-        if (this.ctx.selection.hasSelection() && this.state !== TransformState.FOCUSED) {
-            const ids = Array.from(this.ctx.selection.selectedIds);
-            const bbox = this.ctx.selection.bbox;
-            this.lastAction = 'none';
-            this.currentMatrix = [1, 0, 0, 1, 0, 0];
-            if (bbox) await this._enterFocused(ids, bbox, false);
-        }
-    }
-
-    public onDeactivate(reason?: string): void {
-        window.removeEventListener('keydown', this._handleKeyDown);
-        window.removeEventListener('keyup', this._handleKeyUp);
-
-        if (this.state !== TransformState.IDLE || this.ctx.selection.hasSelection()) {
-            DiagnosticsService.logTransformState(reason || 'interruption', this.lastAction);
-            this._abortAndExit().catch(console.error);
-        }
-    }
-
-    public onPointerDown(data: PointerData): void {
-        if (this.state !== TransformState.FOCUSED) return;
-
-        const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
-        const bbox = this.ctx.selection.bbox;
-        if (!bbox) return;
-
-        const zoom = this.ctx.viewport.zoom;
-        const scaleRadius = 12 / zoom;    // Hit-test interno para escalar
-        const rotateRadius = 35 / zoom;   // Hit-test externo para rotar
-
-        const cx = (bbox.minX + bbox.maxX) / 2;
-        const cy = (bbox.minY + bbox.maxY) / 2;
-
-        const corners = [
-            { id: 'nw', x: bbox.minX, y: bbox.minY, px: bbox.maxX, py: bbox.maxY },
-            { id: 'ne', x: bbox.maxX, y: bbox.minY, px: bbox.minX, py: bbox.maxY },
-            { id: 'se', x: bbox.maxX, y: bbox.maxY, px: bbox.minX, py: bbox.minY },
-            { id: 'sw', x: bbox.minX, y: bbox.maxY, px: bbox.maxX, py: bbox.minY }
-        ];
-
-        // Detección de Colisiones (Hit-Test)
-        for (const c of corners) {
-            const dist = Math.hypot(canvasPos.x - c.x, canvasPos.y - c.y);
-
-            if (dist <= scaleRadius) {
-                this.state = TransformState.SCALING;
-                this.dragStartX = c.x;
-                this.dragStartY = c.y;
-                this.pivotX = c.px;
-                this.pivotY = c.py;
-                this.ctx.engine.container.style.cursor = 'nwse-resize';
-                return;
-            }
-            else if (dist <= rotateRadius) {
-                // === LÓGICA DE ACTIVACIÓN DE ROTACIÓN ===
-                this.state = TransformState.ROTATING;
-                this.rotationCenterX = cx;
-                this.rotationCenterY = cy;
-                this.initialRotationAngle = Math.atan2(canvasPos.y - cy, canvasPos.x - cx);
-                this.ctx.engine.container.style.cursor = 'alias';
-                return;
-            }
-        }
-
-        const inside =
-            canvasPos.x >= bbox.minX && canvasPos.x <= bbox.maxX &&
-            canvasPos.y >= bbox.minY && canvasPos.y <= bbox.maxY;
-
-        if (inside) {
-            this.state = TransformState.DRAGGING;
-            this.dragStartX = canvasPos.x;
-            this.dragStartY = canvasPos.y;
-            this.ctx.engine.container.style.cursor = 'move';
-        } else {
-            DiagnosticsService.logTransformState('click_outside', this.lastAction);
-            this._exitToLasso();
-        }
-    }
-
-    public onPointerMove(data: PointerData): void {
-        if (this.state === TransformState.IDLE || this.state === TransformState.FOCUSED) return;
-        const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
-
-        if (this.state === TransformState.DRAGGING) {
-            const dx = canvasPos.x - this.dragStartX;
-            const dy = canvasPos.y - this.dragStartY;
-            this.currentMatrix = [1, 0, 0, 1, dx, dy];
-        }
-        else if (this.state === TransformState.SCALING) {
-            const dx = this.dragStartX - this.pivotX;
-            const dy = this.dragStartY - this.pivotY;
-
-            let sx = Math.abs(dx) > 0.001 ? (canvasPos.x - this.pivotX) / dx : 1;
-            let sy = Math.abs(dy) > 0.001 ? (canvasPos.y - this.pivotY) / dy : 1;
-
-            if (Math.abs(sx) < 0.01) sx = 0.01 * Math.sign(sx) || 0.01;
-            if (Math.abs(sy) < 0.01) sy = 0.01 * Math.sign(sy) || 0.01;
-
-            if (!this.isShiftDown) {
-                const scale = Math.max(Math.abs(sx), Math.abs(sy));
-                sx = scale * Math.sign(sx);
-                sy = scale * Math.sign(sy);
-            }
-
-            this.currentMatrix = [
-                sx, 0,
-                0, sy,
-                this.pivotX * (1 - sx),
-                this.pivotY * (1 - sy)
-            ];
-        }
-        else if (this.state === TransformState.ROTATING) {
-            // === LÓGICA DE ROTACIÓN MATEMÁTICA ===
-            const currentAngle = Math.atan2(canvasPos.y - this.rotationCenterY, canvasPos.x - this.rotationCenterX);
-            const deltaAngle = currentAngle - this.initialRotationAngle;
-            let deltaDeg = (deltaAngle * 180) / Math.PI;
-
-            // BONUS UX: Si se presiona Shift, la rotación encaja en ángulos perfectos de 15 grados
-            if (this.isShiftDown) {
-                deltaDeg = Math.round(deltaDeg / 15) * 15;
-            }
-
-            const m = new DOMMatrix()
-                .translate(this.rotationCenterX, this.rotationCenterY)
-                .rotate(deltaDeg)
-                .translate(-this.rotationCenterX, -this.rotationCenterY);
-
-            this.currentMatrix = [m.a, m.b, m.c, m.d, m.e, m.f];
-        }
-
-        this._renderLivePreview();
-    }
-
-    public async onPointerUp(_data: PointerData): Promise<void> {
-        if (this.state === TransformState.IDLE || this.state === TransformState.FOCUSED) return;
-
-        const wasScaling = this.state === TransformState.SCALING;
-        const wasRotating = this.state === TransformState.ROTATING;
-        this.state = TransformState.FOCUSED;
-        this.ctx.engine.container.style.cursor = 'move';
-
-        if (this.currentMatrix.join(',') !== '1,0,0,1,0,0') {
-            // La consola del Diagnostics registrará el rotate como un "move" genérico para mantener la compatibilidad
-            this.lastAction = wasScaling ? 'scale' : 'move';
-
-            const targetIds = Array.from(this.ctx.selection.selectedIds);
-            const event = await this.ctx.history.commitTransform(targetIds, this.currentMatrix);
-            await this.ctx.storage.saveEvent(event);
-            event.isSaved = true;
-            this.ctx.history.enforceRamLimit();
-
-            const oldBbox = this.ctx.selection.bbox!;
-            const m = this.currentMatrix;
-            const pts = [
-                { x: oldBbox.minX, y: oldBbox.minY }, { x: oldBbox.maxX, y: oldBbox.minY },
-                { x: oldBbox.maxX, y: oldBbox.maxY }, { x: oldBbox.minX, y: oldBbox.maxY }
-            ].map(p => ({ x: p.x * m[0] + p.y * m[2] + m[4], y: p.x * m[1] + p.y * m[3] + m[5] }));
-
-            this.ctx.selection.setBbox({
-                minX: Math.min(...pts.map(p => p.x)), minY: Math.min(...pts.map(p => p.y)),
-                maxX: Math.max(...pts.map(p => p.x)), maxY: Math.max(...pts.map(p => p.y)),
-            });
-
-            await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
-            if (this.state !== TransformState.FOCUSED) return;
-            await this._generateSandbox();
-
-            this.currentMatrix = [1, 0, 0, 1, 0, 0];
-        }
-
-        if (this.state === TransformState.FOCUSED) {
-            this._renderLivePreview();
-        }
-    }
-
-    private async _abortAndExit(): Promise<void> {
-        if (this.state === TransformState.IDLE && !this.ctx.selection.hasSelection()) return;
-
-        this._clearVisuals();
-        this.state = TransformState.IDLE;
-        this.ctx.selection.clear();
-        await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
-    }
-
-    private async _exitToLasso(): Promise<void> {
-        await this._abortAndExit();
-        this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', 'lasso');
-    }
-
-    private async _enterFocused(ids: string[], bbox: BoundingBox, skipRebuild: boolean): Promise<void> {
-        this.state = TransformState.FOCUSED;
-        this.ctx.selection.setSelection(new Set(ids), bbox);
-        this.currentMatrix = [1, 0, 0, 1, 0, 0];
-        this.lastAction = 'none';
-
-        if (!skipRebuild) await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
-        if (this.state !== TransformState.FOCUSED) return;
-
-        await this._generateSandbox();
-        if (this.state !== TransformState.FOCUSED) return;
-
-        this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '0.3';
-        this._renderLivePreview();
-        this.ctx.engine.container.style.cursor = 'move';
-    }
-
-    private _clearVisuals(): void {
-        this.ctx.engine.clearPaintingCanvas();
-        this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '1';
-    }
-
-    private _renderLivePreview(): void {
-        this.ctx.engine.clearPaintingCanvas();
-        const pCtx = this.ctx.engine.paintingContext;
-        pCtx.save();
-
-        const m = this.currentMatrix;
-        pCtx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
-
-        pCtx.drawImage(this.sandboxCanvas, 0, 0);
-        pCtx.restore();
-
-        this._drawHandle(this.currentMatrix);
-    }
-
-    private _drawHandle(m: number[]): void {
-        if (!this.ctx.selection.bbox) return;
-
-        const { minX, minY, maxX, maxY } = this.ctx.selection.bbox;
-        const pts = [
-            { x: minX, y: minY }, { x: maxX, y: minY },
-            { x: maxX, y: maxY }, { x: minX, y: maxY }
-        ].map(p => ({
-            x: p.x * m[0] + p.y * m[2] + m[4],
-            y: p.x * m[1] + p.y * m[3] + m[5]
-        }));
-
-        const pCtx = this.ctx.engine.paintingContext;
-        const zoom = this.ctx.viewport.zoom;
-
-        pCtx.save();
-
-        // 1. Overlay Tint
-        pCtx.beginPath();
-        pCtx.moveTo(pts[0].x, pts[0].y);
-        pCtx.lineTo(pts[1].x, pts[1].y);
-        pCtx.lineTo(pts[2].x, pts[2].y);
-        pCtx.lineTo(pts[3].x, pts[3].y);
-        pCtx.closePath();
-        pCtx.fillStyle = 'rgba(0, 168, 255, 0.05)';
-        pCtx.fill();
-
-        // 2. Guías Proyectadas
-        const ext = 25 / zoom;
-        pCtx.beginPath();
-        pCtx.moveTo(pts[0].x - ext, pts[0].y); pCtx.lineTo(pts[1].x + ext, pts[1].y);
-        pCtx.moveTo(pts[3].x - ext, pts[3].y); pCtx.lineTo(pts[2].x + ext, pts[2].y);
-        pCtx.moveTo(pts[0].x, pts[0].y - ext); pCtx.lineTo(pts[3].x, pts[3].y + ext);
-        pCtx.moveTo(pts[1].x, pts[1].y - ext); pCtx.lineTo(pts[2].x, pts[2].y + ext);
-
-        pCtx.lineWidth = 1 / zoom;
-        pCtx.strokeStyle = 'rgba(0, 168, 255, 0.3)';
-        pCtx.stroke();
-
-        // 3. Rectángulo Punteado Principal
-        pCtx.beginPath();
-        pCtx.moveTo(pts[0].x, pts[0].y);
-        pCtx.lineTo(pts[1].x, pts[1].y);
-        pCtx.lineTo(pts[2].x, pts[2].y);
-        pCtx.lineTo(pts[3].x, pts[3].y);
-        pCtx.closePath();
-
-        pCtx.lineWidth = 1.5 / zoom;
-        pCtx.strokeStyle = '#00a8ff';
-        pCtx.setLineDash([6 / zoom, 6 / zoom]);
-        pCtx.stroke();
-        pCtx.setLineDash([]);
-
-        // 4. Centro del Cuadro de Transformación
-        const cx = (pts[0].x + pts[2].x) / 2;
-        const cy = (pts[0].y + pts[2].y) / 2;
-
-        // 5. Manijas Circulares y Arcos de Rotación
-        const r = 6 / zoom;
-        pCtx.lineWidth = 2 / zoom;
-
-        for (const p of pts) {
-            // Círculo del vértice (Para escalar)
-            pCtx.beginPath();
-            pCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
-            pCtx.fillStyle = '#ffffff';
-            pCtx.strokeStyle = '#00a8ff';
-            pCtx.fill();
-            pCtx.stroke();
-
-            // === NUEVO: Arco indicativo de rotación (Zonas Rojas) ===
-            pCtx.beginPath();
-            pCtx.strokeStyle = 'rgba(231, 76, 60, 0.8)'; // Rojo vibrante (#e74c3c)
-            pCtx.lineWidth = 2.5 / zoom;
-            const angleToCenter = Math.atan2(p.y - cy, p.x - cx);
-            // Dibujamos un pequeño arco curvado alejado del centro para simular la flecha de Concepts
-            pCtx.arc(p.x, p.y, 16 / zoom, angleToCenter - 0.6, angleToCenter + 0.6);
-            pCtx.stroke();
-        }
-
-        // 6. Pivote Central (Crosshair)
-        pCtx.beginPath();
-        pCtx.arc(cx, cy, 3 / zoom, 0, Math.PI * 2);
-        pCtx.fillStyle = '#00a8ff';
-        pCtx.fill();
-
-        pCtx.restore();
-    }
-
-    private async _generateSandbox(): Promise<void> {
-        const sCtx = this.sandboxCanvas.getContext('2d')!;
-        sCtx.clearRect(0, 0, this.sandboxCanvas.width, this.sandboxCanvas.height);
-
-        const { active, transforms, hiddenIds } = this.ctx.history.getState();
-
-        for (const eventId of this.ctx.selection.selectedIds) {
-            if (hiddenIds.has(eventId)) continue;
-            const ev = active.find(e => e.id === eventId);
-            if (!ev) continue;
-
-            const cmd = CommandFactory.create(ev, this.ctx.activeBrush);
-            await cmd.loadDataIfNeeded(this.ctx.storage);
-
-            const t = transforms.get(eventId);
-            if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-
-            cmd.execute(sCtx);
-        }
-    }
-
-    private _selectedIdsStr(): string {
-        return Array.from(this.ctx.selection.selectedIds).sort().join(',');
-    }
-
-    private _handleKeyDown = async (e: KeyboardEvent): Promise<void> => {
-        if (e.key === 'Shift') {
-            this.isShiftDown = true;
-            if (this.state === TransformState.SCALING || this.state === TransformState.ROTATING) {
-                this._renderLivePreview(); // Re-calcular si el shift se aprieta a mitad del movimiento
-            }
-        }
-
-        if (this.state === TransformState.IDLE) return;
-
-        if (e.key === 'Enter') {
-            e.preventDefault(); e.stopPropagation();
-            DiagnosticsService.logTransformState('enter', this.lastAction);
-            await this._exitToLasso();
-        } else if (e.key === 'Escape') {
-            e.preventDefault(); e.stopPropagation();
-            DiagnosticsService.logTransformState('escape', this.lastAction);
-            await this._exitToLasso();
-        }
-
-        if (e.key === 'Delete' || e.key === 'Backspace') {
-            e.preventDefault();
-            this._handleContextAction('DELETE');
-        }
-    };
-
-    private _handleKeyUp = (e: KeyboardEvent): void => {
-        if (e.key === 'Shift') {
-            this.isShiftDown = false;
-            if (this.state === TransformState.SCALING || this.state === TransformState.ROTATING) {
-                this._renderLivePreview();
-            }
-        }
-    };
-}
-
-ToolRegistry.register({
-    id: 'transform-handle',
-    factory: (ctx) => new TransformHandleTool(ctx),
 });
 
 ===== src/tools/interaction/PanTool.ts =====

@@ -16,7 +16,7 @@ import type { IBrushRenderer } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
 import type { StrokePoint } from '../../io/BinarySerializer';
-
+import { BezierEasing } from '../../math/BezierEasing';
 class SeededRNG {
     private s: number;
     constructor(seed: number) { this.s = (seed | 0) || 1; }
@@ -145,20 +145,50 @@ export class InkRenderer implements IBrushRenderer {
         color: string,
         x: number,
         y: number,
-        pressure: number
+        rawPressure: number
     ): void {
-        const sizeMultiplier = 1 + (pressure - 0.5) * profile.pressureSizeSensitivity * 2;
-        const finalSize = Math.max(0.5, profile.baseSize * sizeMultiplier);
+        const p1y = profile.physics?.pressureCurve?.p1y ?? 0.1;
+        const p2y = profile.physics?.pressureCurve?.p2y ?? 0.5;
+
+        // 1. Mapeamos la presión con la curva de la pluma (Cóncava)
+        const mappedPressure = BezierEasing.evaluate(rawPressure, p1y, p2y);
+
+        // 2. INTERPOLACIÓN DE TAMAÑO (14% a 84%)
+        const sizeMin = profile.pressureSizeMin ?? 0.0;
+        const sizeMax = profile.pressureSizeMax ?? 1.0;
+        const currentSizeMultiplier = sizeMin + (sizeMax - sizeMin) * mappedPressure;
+        const finalSize = Math.max(0.5, profile.baseSize * currentSizeMultiplier);
 
         const radiusY = finalSize / 2;
         const radiusX = radiusY * profile.aspectRatio;
 
+        // 3. INTERPOLACIÓN DE OPACIDAD (30% a 100%)
+        const opMin = profile.pressureOpacityMin ?? 0.0;
+        const opMax = profile.pressureOpacityMax ?? 1.0;
+        const currentOpacityMultiplier = opMin + (opMax - opMin) * mappedPressure;
+
+        // 4. INTERPOLACIÓN DE FLUJO
+        const flowMin = profile.pressureFlowMin ?? 1.0;
+        const flowMax = profile.pressureFlowMax ?? 1.0;
+        const baseFlow = profile.baseFlow ?? profile.physics?.flow ?? 1.0;
+        const currentFlowMultiplier = flowMin + (flowMax - flowMin) * mappedPressure;
+        const dynamicFlow = baseFlow * currentFlowMultiplier;
+
+        // 5. OPACIDAD FINAL Y ESCUDO ANTI-SOLARIZACIÓN
+        // Opacidad = (Techo del Slider) * (Curva de Opacidad) * (Flujo de Acumulación)
+        let rawOpacity = profile.baseOpacity * currentOpacityMultiplier * dynamicFlow;
+
+        // Escudo 8-bits: Si es matemática "basura" (< 0.5%), la descartamos
+        if (rawOpacity < 0.005) return;
+
+        // Piso seguro del 2.5% para evitar colores extraños
+        const stampOpacity = Math.max(0.025, Math.min(1, rawOpacity));
+
         const showFibers = radiusX > 2.0;
 
         if (!showFibers) {
-            // Trazo pequeño: dibujar directamente sin offscreen — puro y rápido
             ctx.save();
-            ctx.globalAlpha = profile.baseOpacity;
+            ctx.globalAlpha = stampOpacity;
             ctx.fillStyle = color;
             ctx.translate(x, y);
             ctx.rotate((profile.angle * Math.PI) / 180);
@@ -169,10 +199,7 @@ export class InkRenderer implements IBrushRenderer {
             return;
         }
 
-        // Trazo grande: usar offscreen para aislar destination-out
-        // El offscreen se trata como sprite temporal — dibujamos y volcamos
-
-        // Tamaño del offscreen: diagonal del óvalo + margen
+        // --- Lógica de Fibras y Offscreen ---
         const needed = Math.ceil(finalSize * 2) + 4;
         if (this.offscreen.width < needed || this.offscreen.height < needed) {
             this.offscreen.width = needed;
@@ -184,20 +211,15 @@ export class InkRenderer implements IBrushRenderer {
 
         this.offCtx.clearRect(0, 0, this.offscreen.width, this.offscreen.height);
 
-        // Aplicar rotación de la pluma en el offscreen
         this.offCtx.save();
         this.offCtx.translate(cx, cy);
         this.offCtx.rotate((profile.angle * Math.PI) / 180);
 
-        // ── 1. Óvalo sólido ───────────────────────────────────────────────
         this.offCtx.fillStyle = color;
         this.offCtx.beginPath();
         this.offCtx.ellipse(0, 0, radiusX, radiusY, 0, 0, Math.PI * 2);
         this.offCtx.fill();
 
-        // ── 2. Fibras del felt tip ─────────────────────────────────────────
-        // destination-out sobre el offscreen → solo afecta al óvalo recién dibujado
-        // No toca nada del canvas principal
         this.offCtx.globalCompositeOperation = 'destination-out';
         this.offCtx.fillStyle = 'rgba(0,0,0,1)';
 
@@ -221,11 +243,9 @@ export class InkRenderer implements IBrushRenderer {
         this.offCtx.globalCompositeOperation = 'source-over';
         this.offCtx.restore();
 
-        // ── 3. Volcar el offscreen sobre el canvas principal ──────────────
-        // source-over garantiza que el negro puro del óvalo quede negro puro
-        // sin interactuar con lo que hay debajo
+        // Volcado Final
         ctx.save();
-        ctx.globalAlpha = profile.baseOpacity;
+        ctx.globalAlpha = stampOpacity;
         ctx.drawImage(
             this.offscreen,
             0, 0, this.offscreen.width, this.offscreen.height,
@@ -233,7 +253,6 @@ export class InkRenderer implements IBrushRenderer {
         );
         ctx.restore();
     }
-
     // === Limpiamos el buffer al levantar el lápiz ===
     public endStroke(): void {
         this.inputBuffer = [];

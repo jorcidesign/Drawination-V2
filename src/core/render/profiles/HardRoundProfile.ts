@@ -5,30 +5,33 @@ export const HardRoundProfile: IBrushProfile = {
     id: 'hard-round',
     name: 'Pincel Duro Redondo',
 
-    minSize: 60,
+    minSize: 1,
     maxSize: 120,
     baseSize: 80,
-    baseOpacity: 0.60,         // Límite máximo de opacidad por trazo
+    baseOpacity: 1.0,
+    baseFlow: 1.0,            // Flujo maestro al 100%
+
     blendMode: 'source-over',
+    renderer: 'hard-round',
 
-    renderer: 'hard-round',   // Activa la nueva estrategia matemática
-
-    spacing: 0.08,            // Muy junto para que el borde sea continuo
+    spacing: 0.03,            // 13% exacto
     angle: 0,
-    aspectRatio: 1.0,         // Círculo perfecto
+    aspectRatio: 1.0,
 
-    // Estos se ignoran en favor de la curva Bezier de la física,
-    // pero los mantenemos en 0 para compatibilidad de interfaz.
     pressureSizeSensitivity: 0.0,
     pressureOpacitySensitivity: 0.0,
-    smoothing: 0.0,
+
+    // === LA MAGIA DEL TACTO SUAVE ===
+    pressureFlowMin: 0.0,     // A presión mínima: 0% de flujo (ultra suave)
+    pressureFlowMax: 0.60,    // A presión máxima: 60% de flujo 
+
+    smoothing: 0.08,          // Streamline 8%
 
     physics: {
-        flow: 0.4,                  // Depósito por stamp
-        stabilizerWindow: 8,        // Elimina el temblor de la tableta
-        pressureCurve: {            // Zona muerta al inicio, saturación suave al final
-            p1y: 0.05,
-            p2y: 0.7
+        stabilizerWindow: 2,
+        pressureCurve: {
+            p1y: 0.333,       // Curva diagonal recta perfecta (lineal)
+            p2y: 0.667
         }
     }
 };
