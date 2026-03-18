@@ -1,6 +1,8 @@
 // src/main.ts
 import { DrawinationApp } from './app/DrawinationApp';
-
+// En src/main.ts (o donde inicies tu app)
+import './ui/tokens/design-tokens.css';
+import './ui/tokens/base.css';
 document.addEventListener('DOMContentLoaded', async () => {
   try {
     const app = new DrawinationApp('drawination-workspace');

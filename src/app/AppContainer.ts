@@ -17,6 +17,9 @@ import { ToolManager } from '../tools/core/ToolManager';
 import { UndoRedoController } from '../history/UndoRedoController';
 import { WorkspaceController } from './WorkspaceController';
 import { LayerManager } from '../core/engine/LayerManager';
+import { UIRoot } from '../ui/UIRoot';
+import '../ui/tokens/design-tokens.css'; // Importa variables
+import '../ui/tokens/base.css';          // Importa reset y layout base
 
 export class AppContainer {
     public eventBus: EventBus;

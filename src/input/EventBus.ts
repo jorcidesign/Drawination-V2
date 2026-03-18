@@ -40,6 +40,23 @@ export interface AppEventMap {
     'SET_PROFILE_HARD_ROUND': void;
     'SET_PROFILE_AIRBRUSH': void;
     'SET_PROFILE_CHARCOAL': void;
+
+    'TOGGLE_COLOR_PANEL': void;
+    'TOGGLE_LAYER_PANEL': void;
+    'TOGGLE_MENU_PANEL': void;
+
+    'LAYER_SELECT': number;
+    'LAYER_VISIBILITY': { id: number; visible: boolean };
+    'LAYER_OPACITY': { id: number; opacity: number };
+    'LAYER_CREATE': number;
+
+    'DOWNLOAD_PNG': void;
+    'DOWNLOAD_VIDEO': void;
+
+    'REQUEST_UNDO': void;
+    'REQUEST_REDO': void;
+    'RESET_ZOOM': void;
+    'VIEWPORT_CHANGED': { zoom: number; angle: number };
 }
 
 export class EventBus {
