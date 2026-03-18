@@ -49,6 +49,10 @@ export interface AppEventMap {
     'LAYER_VISIBILITY': { id: number; visible: boolean };
     'LAYER_OPACITY': { id: number; opacity: number };
     'LAYER_CREATE': number;
+    'LAYER_ACTION_LOCK': number;
+    'LAYER_ACTION_DUPLICATE': number;
+    'LAYER_ACTION_MERGE': number;
+    'LAYER_ACTION_DELETE': number;
 
     'DOWNLOAD_PNG': void;
     'DOWNLOAD_VIDEO': void;

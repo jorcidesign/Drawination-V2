@@ -1,14 +1,15 @@
 // src/ui/panels/LayerPanel.ts
-import { IconButton } from '../atoms/IconButton';
 import { LayerItem } from '../molecules/LayerItem';
 import type { EventBus } from '../../input/EventBus';
 import Sortable from 'sortablejs';
+
 interface LayerStateUI {
     id: number;
     name: string;
     visible: boolean;
     opacity: number;
     active: boolean;
+    expanded: boolean;
 }
 
 export class LayerPanel {
@@ -19,9 +20,8 @@ export class LayerPanel {
     private isVisible = false;
     private listContainer: HTMLDivElement;
 
-    // Estado local mockeado de la UI (El core luego lo sincronizará)
     private layers: LayerStateUI[] = [
-        { id: 0, name: 'Capa 1', visible: true, opacity: 1, active: true }
+        { id: 0, name: 'Capa 1', visible: true, opacity: 1, active: true, expanded: false }
     ];
 
     constructor(eventBus: EventBus) {
@@ -32,7 +32,6 @@ export class LayerPanel {
         this.element.className = 'panel';
         this.element.id = 'panel-layers';
 
-        // 1. Header (Título, Botón + y X)
         const header = document.createElement('div');
         header.className = 'panel-hdr';
         header.innerHTML = `<span class="panel-title">Capas</span>`;
@@ -57,18 +56,18 @@ export class LayerPanel {
         header.appendChild(actionsWrap);
         this.element.appendChild(header);
 
-        // 2. Lista de Capas ordenables
         this.listContainer = document.createElement('div');
         this.listContainer.className = 'layer-list';
         this.element.appendChild(this.listContainer);
 
-        // 3. Capa Base (Fondo - No movible)
         const bgLayer = document.createElement('div');
-        bgLayer.className = 'layer-item layer-item--bg';
+        bgLayer.className = 'layer-item-wrapper layer-item--bg';
         bgLayer.innerHTML = `
-      <div class="layer-bg-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M2 10L6 6L9 9L11 7L14 10"/><circle cx="11.5" cy="5" r="1.5"/></svg></div>
-      <span class="layer-name" style="color:var(--text-secondary)">Fondo</span>
-    `;
+          <div class="layer-main">
+            <div class="layer-bg-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M2 10L6 6L9 9L11 7L14 10"/><circle cx="11.5" cy="5" r="1.5"/></svg></div>
+            <span class="layer-name" style="color:var(--text-secondary)">Fondo</span>
+          </div>
+        `;
         this.element.appendChild(bgLayer);
 
         this.bindEvents();
@@ -80,7 +79,7 @@ export class LayerPanel {
             this.isVisible = !this.isVisible;
             if (this.isVisible) {
                 this.element.classList.add('visible');
-                this.initSortable(); // <--- Llamamos directo a initSortable()
+                this.initSortable();
             } else {
                 this.element.classList.remove('visible');
             }
@@ -89,29 +88,51 @@ export class LayerPanel {
 
     private renderLayers() {
         this.listContainer.innerHTML = '';
-
-        // Invertimos el array para que la capa más nueva (index mayor) se vea arriba
         const reversedLayers = [...this.layers].reverse();
 
         reversedLayers.forEach(layer => {
             const item = new LayerItem({
                 ...layer,
                 isActive: layer.active,
+                isExpanded: layer.expanded,
                 onSelect: (id) => {
-                    this.layers.forEach(l => l.active = l.id === id);
-                    this.renderLayers();
-                    // this.eventBus.emit('LAYER_SELECT', id);
+                    const clickedLayer = this.layers.find(l => l.id === id);
+                    if (clickedLayer) {
+                        if (clickedLayer.active) {
+                            // FIX FLUJO UX: Si ya estaba activa, el segundo clic alterna el menú (abre/cierra)
+                            clickedLayer.expanded = !clickedLayer.expanded;
+                        } else {
+                            // FIX FLUJO UX: Si no estaba activa, solo la activamos, NO la expandimos
+                            this.layers.forEach(l => {
+                                l.active = l.id === id;
+                                l.expanded = false; // Se asegura de cerrar cualquier otra
+                            });
+                        }
+                        this.renderLayers();
+                    }
                 },
                 onToggleVis: (id) => {
                     const l = this.layers.find(x => x.id === id);
                     if (l) l.visible = !l.visible;
                     this.renderLayers();
-                    // this.eventBus.emit('LAYER_VISIBILITY', id, l.visible);
                 },
                 onOpacityChange: (id, op) => {
                     const l = this.layers.find(x => x.id === id);
                     if (l) l.opacity = op;
-                    // this.eventBus.emit('LAYER_OPACITY', id, op);
+                },
+                onLock: (id) => this.eventBus.emit('LAYER_ACTION_LOCK', id),
+                onDuplicate: (id) => this.eventBus.emit('LAYER_ACTION_DUPLICATE', id),
+                onMergeDown: (id) => this.eventBus.emit('LAYER_ACTION_MERGE', id),
+                onDelete: (id) => {
+                    if (confirm('¿Eliminar esta capa?')) {
+                        this.eventBus.emit('LAYER_ACTION_DELETE', id);
+                        this.layers = this.layers.filter(l => l.id !== id);
+                        if (this.layers.length > 0 && layer.active) {
+                            this.layers[0].active = true;
+                            this.layers[0].expanded = false;
+                        }
+                        this.renderLayers();
+                    }
                 }
             });
             item.mount(this.listContainer);
@@ -119,36 +140,44 @@ export class LayerPanel {
     }
 
     private addLayer() {
-        if (this.layers.length >= 10) return; // Límite del motor
-        const newId = Math.max(...this.layers.map(l => l.id)) + 1;
-        this.layers.forEach(l => l.active = false);
-        this.layers.push({ id: newId, name: `Capa ${newId + 1}`, visible: true, opacity: 1, active: true });
+        if (this.layers.length >= 10) return;
+        const newId = Math.max(...this.layers.map(l => l.id), -1) + 1;
+        this.layers.forEach(l => { l.active = false; l.expanded = false; });
+        this.layers.push({ id: newId, name: `Capa ${newId + 1}`, visible: true, opacity: 1, active: true, expanded: false });
         this.renderLayers();
-        // this.eventBus.emit('LAYER_CREATE', newId);
     }
 
-    // private loadSortableJS() {
-    //     if ((window as any).Sortable) {
-    //         this.initSortable();
-    //         return;
-    //     }
-    //     const script = document.createElement('script');
-    //     script.src = 'https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js';
-    //     script.onload = () => this.initSortable();
-    //     document.head.appendChild(script);
-    // }
-    // 2. Actualiza initSortable para usar el import nativo
     private initSortable() {
         if ((this.listContainer as any)._sortable) return;
 
-        // Ahora usamos Sortable directamente
         (this.listContainer as any)._sortable = Sortable.create(this.listContainer, {
             handle: '.layer-handle',
             animation: 120,
             ghostClass: 'layer-ghost',
-            onEnd: (evt) => {
-                // Aquí luego conectaremos con tu HistoryManager para reordenar
-                console.log(`Capa movida de ${evt.oldIndex} a ${evt.newIndex}`);
+            onStart: () => {
+                this.listContainer.classList.add('is-dragging');
+            },
+            onEnd: () => {
+                this.listContainer.classList.remove('is-dragging');
+
+                // FIX SORTABLE: Sincronizamos el array de datos con la nueva realidad del DOM
+                // 1. Obtenemos el orden visual actual leyendo los IDs del DOM de arriba a abajo
+                const domItems = Array.from(this.listContainer.querySelectorAll('.layer-item-wrapper'));
+                const visualOrderIds = domItems.map(el => parseInt((el as HTMLElement).dataset.id || '-1', 10));
+
+                // 2. Como renderizamos haciendo un .reverse(), nuestro array interno debe ser el inverso del DOM
+                const newLayersOrder = [...visualOrderIds].reverse();
+
+                // 3. Reconstruimos this.layers en el orden correcto
+                const updatedLayers: LayerStateUI[] = [];
+                newLayersOrder.forEach(id => {
+                    const layer = this.layers.find(l => l.id === id);
+                    if (layer) updatedLayers.push(layer);
+                });
+
+                this.layers = updatedLayers;
+                // No llamamos a renderLayers() aquí para no parpadear el DOM recién soltado por Sortable.
+                // ¡El estado ya está sincronizado para el próximo clic!
             }
         });
     }
@@ -173,36 +202,72 @@ export class LayerPanel {
       .layer-list {
         display: flex;
         flex-direction: column;
-        gap: 2px;
+        gap: 4px;
         overflow-y: auto;
         max-height: calc(100vh - 240px);
+        padding-right: 4px;
       }
-      .layer-item {
+      
+      .layer-item-wrapper {
+        display: flex;
+        flex-direction: column;
+        border-radius: 7px;
+        transition: background var(--t-fast);
+        border: 1px solid transparent;
+        background: transparent;
+      }
+      .layer-item-wrapper:hover {
+        background: var(--surface-hover);
+      }
+      .layer-item-wrapper.active {
+        background: var(--surface-active);
+        border-color: rgba(1,109,232,.22);
+      }
+      
+      .layer-main {
         display: flex;
         align-items: center;
         gap: 6px;
         padding: 5px 7px;
-        border-radius: 7px;
         cursor: pointer;
-        transition: background var(--t-fast);
-        border: 1px solid transparent;
         min-height: 44px;
       }
-      .layer-item:hover {
-        background: var(--surface-hover);
+      
+      /* ── Animación del Acordeón (CSS Grid Trick) ── */
+      .layer-actions-wrapper {
+        display: grid;
+        grid-template-rows: 0fr; 
+        transition: grid-template-rows 200ms cubic-bezier(0.4, 0, 0.2, 1);
       }
-      .layer-item.active {
-        background: var(--surface-active);
-        border-color: rgba(1,109,232,.22);
+      .layer-item-wrapper.expanded .layer-actions-wrapper {
+        grid-template-rows: 1fr; 
       }
+      .layer-actions-overflow {
+        overflow: hidden; 
+      }
+      .layer-actions-inner {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+        padding: 0 8px 6px 8px; 
+      }
+
+      /* ── Fix visual durante el arrastre (Sortable) ── */
+      .layer-list.is-dragging .layer-actions-wrapper {
+        grid-template-rows: 0fr !important;
+      }
+
       .layer-item--bg {
         margin-top: 6px;
-        padding-top: 8px;
         border-top: 1px solid var(--surface-panel-border);
         cursor: default;
         background: transparent !important;
-        min-height: 36px;
       }
+      .layer-item--bg:hover {
+        background: transparent !important;
+      }
+      
       .layer-handle {
         cursor: grab;
         color: var(--text-disabled);
