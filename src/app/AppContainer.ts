@@ -29,14 +29,12 @@ function getSavedCanvasSize(): { width: number; height: number } {
         const saved = localStorage.getItem(CANVAS_SIZE_KEY);
         if (saved) {
             const parsed = JSON.parse(saved);
-            // Validar que sea un preset conocido
             const validPreset = CANVAS_PRESETS.find(
                 p => p.width === parsed.width && p.height === parsed.height
             );
             if (validPreset) return { width: parsed.width, height: parsed.height };
         }
     } catch (_) { }
-    // Default: cuadrado
     return { width: 1180, height: 1180 };
 }
 
@@ -67,21 +65,29 @@ export class AppContainer {
     public newProjectModal: NewProjectModal;
 
     constructor(containerEl: HTMLElement) {
-        // Leer dimensiones guardadas (o usar cuadrado por defecto)
         const { width, height } = getSavedCanvasSize();
 
         this.engine = new CanvasEngine(width, height);
-        this.engine.container.style.backgroundColor = '#ecf0f1';
-        this.engine.transformContainer.style.backgroundColor = '#ffffff';
         containerEl.appendChild(this.engine.container);
 
         this.eventBus = new EventBus();
         this.storage = new StorageManager();
         this.shortcuts = new ShortcutManager();
         this.selection = new SelectionManager();
-        this.cache = new CacheManager(this.engine.width, this.engine.height);
+        this.cache = new CacheManager(width, height);
         this.checkpoint = new CheckpointManager();
+
         this.viewport = new ViewportManager(this.engine.transformContainer);
+
+        // Centrar el canvas correctamente al arrancar.
+        // Se llama aquí en el constructor para que el primer frame
+        // ya tenga la posición correcta, sin esperar a start().
+        // Usamos requestAnimationFrame para asegurarnos de que el DOM
+        // ya tiene dimensiones reales (window.innerWidth/Height correctos).
+        requestAnimationFrame(() => {
+            this.viewport.reset(width, height);
+        });
+
         this.input = new InputManager(this.engine.container);
         this.activeBrush = new BrushEngine(PencilProfile);
         this.activeBrush.color = '#2980b9';
@@ -108,7 +114,6 @@ export class AppContainer {
             this.rebuilder,
         );
 
-        // NewProjectModal — recibe una función que comprueba si hay trazos
         this.newProjectModal = new NewProjectModal(
             this.eventBus,
             () => this.history.getTimelineSpine().length > 0
