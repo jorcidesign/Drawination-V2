@@ -12,7 +12,6 @@ export class TopLeftBar {
     private activeColorSwatch: ColorSwatch;
     private currentColor: string = '#000000';
 
-    // Los 6 colores fijos de acceso rápido
     private readonly quickColors = [
         { hex: '#000000', name: 'Negro' },
         { hex: '#E74C3C', name: 'Rojo' },
@@ -29,7 +28,6 @@ export class TopLeftBar {
         this.element = document.createElement('div');
         this.element.className = 'bar bar-tl';
 
-        // 1. Botón Hamburguesa (Menú)
         const menuBtn = new IconButton({
             icon: 'menu',
             title: 'Menú',
@@ -37,24 +35,25 @@ export class TopLeftBar {
         });
         menuBtn.mount(this.element);
 
-        // Separador
         this.element.appendChild(this.createSeparator());
 
-        // 2. Fila de Paleta de Colores
         const paletteRow = document.createElement('div');
         paletteRow.className = 'palette-row';
 
-        // 2.1 Colores fijos
+        // Paleta rápida — elección explícita → APPLY_COLOR + SET_COLOR
         this.quickColors.forEach(c => {
             const swatch = new ColorSwatch({
                 color: c.hex,
                 title: c.name,
-                onClick: (color) => this.eventBus.emit('SET_COLOR', color)
+                onClick: (color) => {
+                    this.eventBus.emit('APPLY_COLOR', color);
+                    this.eventBus.emit('SET_COLOR', color);
+                }
             });
             swatch.mount(paletteRow);
         });
 
-        // 2.2 Slot de Color Activo (El 7mo más grande)
+        // Cuadradito 7 — abre el panel de color
         this.activeColorSwatch = new ColorSwatch({
             color: this.currentColor,
             title: 'Color activo — abrir paleta',
@@ -64,11 +63,8 @@ export class TopLeftBar {
         this.activeColorSwatch.mount(paletteRow);
 
         this.element.appendChild(paletteRow);
-
-        // Separador
         this.element.appendChild(this.createSeparator());
 
-        // 3. Botón Lazo
         this.lassoBtn = new IconButton({
             icon: 'lasso',
             title: 'Lazo (L)',
@@ -76,7 +72,6 @@ export class TopLeftBar {
         });
         this.lassoBtn.mount(this.element);
 
-        // 4. Botón Flip Horizontal
         const flipHBtn = new IconButton({
             icon: 'flipH',
             title: 'Espejo Horizontal',
@@ -94,19 +89,20 @@ export class TopLeftBar {
     }
 
     private bindEvents() {
-        // Escuchar cambios de color para actualizar el 7mo slot
+        // Cuadradito 7 responde a SET_COLOR — siempre, venga de donde venga
         this.eventBus.on('SET_COLOR', (color) => {
             this.currentColor = color;
             this.activeColorSwatch.setColor(color);
         });
 
-        // Escuchar cambio de herramienta para iluminar el Lazo si se selecciona
+        // También actualizar en APPLY_COLOR por si acaso
+        this.eventBus.on('APPLY_COLOR', (color) => {
+            this.currentColor = color;
+            this.activeColorSwatch.setColor(color);
+        });
+
         this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId) => {
-            if (toolId === 'lasso') {
-                this.lassoBtn.setActive(true);
-            } else {
-                this.lassoBtn.setActive(false);
-            }
+            this.lassoBtn.setActive(toolId === 'lasso');
         });
     }
 
@@ -120,17 +116,17 @@ export class TopLeftBar {
 
         const style = document.createElement('style');
         style.textContent = `
-      .bar-tl {
-        top: 12px;
-        left: 12px;
-        z-index: var(--z-bar);
-      }
-      .palette-row {
-        display: flex;
-        gap: 2px;
-        align-items: center;
-      }
-    `;
+            .bar-tl {
+                top: 12px;
+                left: 12px;
+                z-index: var(--z-bar);
+            }
+            .palette-row {
+                display: flex;
+                gap: 2px;
+                align-items: center;
+            }
+        `;
         document.head.appendChild(style);
     }
 }

@@ -93,10 +93,11 @@ export class HistoryManager {
             bbox: eventToUndo.bbox, isSaved: false,
         });
 
-        // === FIX VITAL ===
-        // Borramos el caché en cada viaje en el tiempo.
-        // Previene el "Bug del Snapshot Rancio" que hacía desaparecer trazos al soltar la selección.
-        this.cacheManager.clearAll();
+        // Invalidamos solo snapshots posteriores al evento desecho.
+        // Los anteriores siguen válidos — el rebuild arranca desde el más cercano
+        // en lugar de repintar los 1100 trazos desde cero.
+        const allIds = this.timeline.map(e => e.id);
+        this.cacheManager.invalidateFrom(eventToUndo.id, allIds);
 
         return eventToUndo;
     }
@@ -116,8 +117,9 @@ export class HistoryManager {
             bbox: eventToRedo.bbox, isSaved: false,
         });
 
-        // === FIX VITAL ===
-        this.cacheManager.clearAll();
+        // Invalidamos solo snapshots posteriores al evento rehecho.
+        const allIds = this.timeline.map(e => e.id);
+        this.cacheManager.invalidateFrom(eventToRedo.id, allIds);
 
         return eventToRedo;
     }
@@ -310,16 +312,23 @@ export class HistoryManager {
             protectedIds.add(undone[i].id);
         }
 
+        // Recorremos hacia atrás y salimos en cuanto los N más recientes
+        // ya caben en RAM — no iteramos el timeline completo innecesariamente.
         let activeCount = 0;
         for (let i = this.timeline.length - 1; i >= 0; i--) {
             const ev = this.timeline[i];
-
             if (ev.data === null) continue;
             if (protectedIds.has(ev.id)) continue;
 
             activeCount++;
-            if (activeCount > this.MAX_RAM_EVENTS && ev.isSaved) {
-                (ev as any).data = null;
+            if (activeCount > this.MAX_RAM_EVENTS) {
+                if (ev.isSaved) {
+                    (ev as any).data = null;
+                }
+            } else if (activeCount === this.MAX_RAM_EVENTS) {
+                // Ya tenemos exactamente MAX_RAM_EVENTS con data en RAM.
+                // Todo lo que queda hacia atrás ya fue nulleado en iteraciones anteriores.
+                break;
             }
         }
     }

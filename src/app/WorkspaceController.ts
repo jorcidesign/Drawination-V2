@@ -4,7 +4,7 @@ import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { InputManager } from '../input/InputManager';
 import type { ShortcutManager } from '../input/ShortcutManager';
 import type { HistoryManager } from '../history/HistoryManager';
-import type { TimelapsePlayer } from '../history/TimelapsePlayer';
+import type { TimelapseViewer } from '../history/TimelapseViewer';
 import type { BrushEngine } from '../core/render/BrushEngine';
 import type { StorageManager } from '../storage/StorageManager';
 import type { ViewportManager } from '../core/camera/ViewportManager';
@@ -22,13 +22,14 @@ import { PaintProfile } from '../core/render/profiles/PaintProfile';
 import { HardRoundProfile } from '../core/render/profiles/HardRoundProfile';
 import { AirbrushProfile } from '../core/render/profiles/AirbrushProfile';
 import { CharcoalProfile } from '../core/render/profiles/CharcoalProfile';
+import { ExportManager } from '../export/ExportManager';
 
 export class WorkspaceController {
     private engine: CanvasEngine;
     private input: InputManager;
     private shortcuts: ShortcutManager;
     private history: HistoryManager;
-    private timelapse: TimelapsePlayer;
+    private timelapseViewer: TimelapseViewer;
     private activeBrush: BrushEngine;
     private storage: StorageManager;
     private viewport: ViewportManager;
@@ -38,13 +39,14 @@ export class WorkspaceController {
     private toolManager: ToolManager;
     private undoRedoController: UndoRedoController;
     private checkpoint: CheckpointManager | null;
+    private exportManager: ExportManager;
 
     constructor(
         engine: CanvasEngine,
         input: InputManager,
         shortcuts: ShortcutManager,
         history: HistoryManager,
-        timelapse: TimelapsePlayer,
+        timelapseViewer: TimelapseViewer,
         activeBrush: BrushEngine,
         storage: StorageManager,
         viewport: ViewportManager,
@@ -59,7 +61,7 @@ export class WorkspaceController {
         this.input = input;
         this.shortcuts = shortcuts;
         this.history = history;
-        this.timelapse = timelapse;
+        this.timelapseViewer = timelapseViewer;
         this.activeBrush = activeBrush;
         this.storage = storage;
         this.viewport = viewport;
@@ -69,6 +71,13 @@ export class WorkspaceController {
         this.toolManager = toolManager;
         this.undoRedoController = undoRedoController;
         this.checkpoint = checkpoint;
+
+        this.exportManager = new ExportManager(
+            this.engine,
+            this.history,
+            this.activeBrush,
+            this.storage,
+        );
 
         this.bindInputEvents();
         this.bindShortcuts();
@@ -88,24 +97,40 @@ export class WorkspaceController {
     }
 
     private bindBusEvents(): void {
+
+        // ── Timelapse viewer (SPA overlay) ────────────────────────────────
         this.eventBus.on('PLAY_TIMELAPSE', async () => {
-            // === FIX: Interrumpir estado (ej: TransformHandle) antes de iniciar ===
+            if (this.timelapseViewer.isPlaying()) return;
+
+            // Interrumpir cualquier herramienta activa antes de abrir el viewer
             this.eventBus.emit('GLOBAL_INTERRUPTION');
-
-            if (this.timelapse.isPlaying) return;
-
-            const spine = this.history.getTimelineSpine();
-            if (spine.length === 0) return;
 
             this.history.isTimelapseRunning = true;
             try {
-                await this.timelapse.play(spine, this.activeBrush, 30);
+                await this.timelapseViewer.play();
             } finally {
                 this.history.isTimelapseRunning = false;
                 this.history.enforceRamLimit();
             }
+        });
 
-            await this.rebuilder.rebuild(this.activeBrush);
+        // ── Exportación ───────────────────────────────────────────────────
+        this.eventBus.on('DOWNLOAD_PNG', async () => {
+            try {
+                await this.exportManager.exportPNG();
+            } catch (e) {
+                console.error('[ExportManager] Error exportando PNG:', e);
+                alert('Error al exportar la imagen. Intenta de nuevo.');
+            }
+        });
+
+        this.eventBus.on('DOWNLOAD_VIDEO', async () => {
+            try {
+                await this.exportManager.exportVideo();
+            } catch (e) {
+                console.error('[ExportManager] Error exportando video:', e);
+                alert('Error al exportar el video. Intenta de nuevo.');
+            }
         });
 
         this.eventBus.on('DEBUG_DRAW_POINTS', () => {
@@ -113,7 +138,6 @@ export class WorkspaceController {
         });
 
         this.eventBus.on('CLEAR_ALL', async () => {
-            // === FIX: Interrumpir estado antes de limpiar el mundo ===
             this.eventBus.emit('GLOBAL_INTERRUPTION');
 
             this.history.timeline = [];

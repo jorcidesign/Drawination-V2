@@ -27,7 +27,7 @@ export class CacheManager {
     }
 
     private initDB() {
-        const req = indexedDB.open('DrawinationCacheDB', 2); // Subimos versión
+        const req = indexedDB.open('DrawinationCacheDB', 2);
         req.onupgradeneeded = (e) => {
             const db = (e.target as IDBOpenDBRequest).result;
             if (!db.objectStoreNames.contains('snapshots')) {
@@ -40,8 +40,6 @@ export class CacheManager {
         req.onsuccess = (e) => { this.db = (e.target as IDBOpenDBRequest).result; };
     }
 
-    // ── SOLUCIÓN MULTICAPA ──────────────────────────────────────────────
-    // Toma una foto de los 10 canvas simultáneamente
     public async bake(eventId: string, engine: CanvasEngine, isKeyframe: boolean = false): Promise<void> {
         const bitmaps = new Map<number, ImageBitmap>();
 
@@ -109,7 +107,6 @@ export class CacheManager {
     private persistToDB(eventId: string, bitmaps: Map<number, ImageBitmap>) {
         if (!this.db) return;
 
-        // Convertimos todos los bitmaps a blobs en paralelo
         Promise.all(Array.from(bitmaps.entries()).map(async ([index, bmp]) => {
             const offscreen = new OffscreenCanvas(this.canvasWidth, this.canvasHeight);
             const ctx = offscreen.getContext('2d')!;
@@ -125,7 +122,7 @@ export class CacheManager {
 
     public garbageCollect(validEventIds: string[]) {
         const validSet = new Set(validEventIds);
-        for (const [id, _] of this.memoryCache.entries()) {
+        for (const [id] of this.memoryCache.entries()) {
             if (!validSet.has(id)) this.memoryCache.delete(id);
         }
         if (this.db) {
@@ -136,6 +133,40 @@ export class CacheManager {
                 const cursor = (e.target as IDBRequest).result as IDBCursorWithValue;
                 if (cursor) {
                     if (!validSet.has(cursor.key as string)) cursor.delete();
+                    cursor.continue();
+                }
+            };
+        }
+    }
+
+    // Invalida snapshots a partir de un eventId específico.
+    // Los snapshots anteriores al evento desecho siguen siendo válidos
+    // para que el rebuild arranque desde el más cercano en lugar de desde cero.
+    public invalidateFrom(eventId: string, allEventIds: string[]): void {
+        const cutoffIndex = allEventIds.indexOf(eventId);
+        if (cutoffIndex === -1) {
+            // Evento no encontrado — safe fallback, no tocamos nada
+            return;
+        }
+
+        const validIds = new Set(allEventIds.slice(0, cutoffIndex));
+
+        // Limpiar memoria solo para snapshots posteriores al cutoff
+        for (const [id] of this.memoryCache.entries()) {
+            if (!validIds.has(id)) {
+                this.memoryCache.delete(id);
+            }
+        }
+
+        // Limpiar IDB solo para snapshots posteriores al cutoff
+        if (this.db) {
+            const tx = this.db.transaction('snapshots', 'readwrite');
+            const store = tx.objectStore('snapshots');
+            const req = store.openCursor();
+            req.onsuccess = (e) => {
+                const cursor = (e.target as IDBRequest).result as IDBCursorWithValue;
+                if (cursor) {
+                    if (!validIds.has(cursor.key as string)) cursor.delete();
                     cursor.continue();
                 }
             };

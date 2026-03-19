@@ -12,12 +12,22 @@ export interface AppEventMap {
     'GLOBAL_INTERRUPTION': void;
     'SYNC_LAYERS_CSS': void;
 
+    // SET_COLOR — mueve el cuadradito 7, actualiza el motor de dibujo y la toolbar.
+    // Lo emiten: BrushToolbar (cambio de herramienta), iro.js durante drag, etc.
+    // NO garantiza que el color vaya al historial.
     'SET_COLOR': string;
+
+    // APPLY_COLOR — el usuario eligió este color explícitamente.
+    // Lo emiten: paleta rápida, eyedropper, iro.js en input:end, DynamicShades NO.
+    // Siempre añade al historial.
+    // También emite SET_COLOR internamente para actualizar todo lo demás.
+    'APPLY_COLOR': string;
+
     'UPDATE_BRUSH_SIZE': number;
     'UPDATE_BRUSH_OPACITY': number;
     'REQUEST_TOOL_SWITCH': string;
+    'ACTIVE_TOOL_CHANGED': string;
 
-    // ── Acciones de la Barra Contextual (NUEVO) ───────────────────────────
     'TOGGLE_LASSO_MODE': 'partial' | 'total';
     'SELECTION_DELETE': void;
     'SELECTION_DUPLICATE': void;

@@ -10,7 +10,7 @@ import { ShortcutManager } from '../input/ShortcutManager';
 import { ViewportManager } from '../core/camera/ViewportManager';
 import { BrushEngine } from '../core/render/BrushEngine';
 import { PencilProfile } from '../core/render/profiles/PencilProfiles';
-import { TimelapsePlayer } from '../history/TimelapsePlayer';
+import { TimelapseViewer } from '../history/TimelapseViewer';
 import { SelectionManager } from '../core/selection/SelectionManager';
 import { CanvasRebuilder } from '../core/render/CanvasRebuilder';
 import { ToolManager } from '../tools/core/ToolManager';
@@ -18,8 +18,8 @@ import { UndoRedoController } from '../history/UndoRedoController';
 import { WorkspaceController } from './WorkspaceController';
 import { LayerManager } from '../core/engine/LayerManager';
 import { UIRoot } from '../ui/UIRoot';
-import '../ui/tokens/design-tokens.css'; // Importa variables
-import '../ui/tokens/base.css';          // Importa reset y layout base
+import '../ui/tokens/design-tokens.css';
+import '../ui/tokens/base.css';
 
 export class AppContainer {
     public eventBus: EventBus;
@@ -32,7 +32,7 @@ export class AppContainer {
     public shortcuts: ShortcutManager;
     public activeBrush: BrushEngine;
     public history: HistoryManager;
-    public timelapse: TimelapsePlayer;
+    public timelapseViewer: TimelapseViewer;
     public selection: SelectionManager;
     public rebuilder: CanvasRebuilder;
     public undoRedoController: UndoRedoController;
@@ -61,7 +61,6 @@ export class AppContainer {
         const worker = new Worker(workerUrl, { type: 'module' });
 
         this.history = new HistoryManager(this.engine, worker, this.cache);
-        this.timelapse = new TimelapsePlayer(this.engine, this.storage);
 
         (this.history as any).eventBus = this.eventBus;
 
@@ -71,6 +70,15 @@ export class AppContainer {
             this.storage,
             this.selection,
             this.checkpoint,
+        );
+
+        // TimelapseViewer — reemplaza al TimelapsePlayer en el WorkspaceController
+        this.timelapseViewer = new TimelapseViewer(
+            this.engine,
+            this.history,
+            this.activeBrush,
+            this.storage,
+            this.rebuilder,
         );
 
         const commandContext = {
@@ -112,7 +120,7 @@ export class AppContainer {
             this.input,
             this.shortcuts,
             this.history,
-            this.timelapse,
+            this.timelapseViewer,
             this.activeBrush,
             this.storage,
             this.viewport,
@@ -142,14 +150,12 @@ export class AppContainer {
         if (spine.length > 0) {
             const lastSpineEvent = spine[spine.length - 1];
 
-            // Ahora devuelve un Map<number, ImageBitmap>
             const checkpointBitmaps = await this.checkpoint.tryRestore(
                 lastSpineEvent.id,
                 spine.length
             );
 
             if (checkpointBitmaps) {
-                // Restauramos todas las capas de golpe
                 for (const [index, bmp] of checkpointBitmaps.entries()) {
                     this.engine.getLayerContext(index).drawImage(bmp, 0, 0);
                 }
@@ -157,12 +163,10 @@ export class AppContainer {
                 const activeCommands = this.history.getActiveCommands(this.activeBrush);
                 if (activeCommands.length > 0) {
                     const lastCmd = activeCommands[activeCommands.length - 1];
-                    // Subimos la foto multicapa al RAM cache
                     await this.history.cacheManager.bake(lastCmd.id, this.engine, false);
                 }
 
                 this.eventBus.emit('SYNC_LAYERS_CSS');
-
                 console.info(`[AppContainer] ⚡ Checkpoint restaurado. ${spine.length} eventos activos.`);
                 return;
             }
