@@ -14,6 +14,7 @@ import type { CanvasRebuilder } from '../core/render/CanvasRebuilder';
 import type { ToolManager } from '../tools/core/ToolManager';
 import type { UndoRedoController } from '../history/UndoRedoController';
 import type { CheckpointManager } from '../history/CheckpointManager';
+import type { NewProjectModal } from '../ui/panels/NewProjectModal';
 
 import { PencilProfile } from '../core/render/profiles/PencilProfiles';
 import { InkProfile } from '../core/render/profiles/InkProfile';
@@ -39,6 +40,8 @@ export class WorkspaceController {
     private toolManager: ToolManager;
     private undoRedoController: UndoRedoController;
     private checkpoint: CheckpointManager | null;
+    private newProjectModal: NewProjectModal;
+    private saveCanvasSize: (w: number, h: number) => void;
     private exportManager: ExportManager;
 
     constructor(
@@ -56,6 +59,8 @@ export class WorkspaceController {
         toolManager: ToolManager,
         undoRedoController: UndoRedoController,
         checkpoint: CheckpointManager | null = null,
+        newProjectModal: NewProjectModal,
+        saveCanvasSize: (w: number, h: number) => void,
     ) {
         this.engine = engine;
         this.input = input;
@@ -71,6 +76,8 @@ export class WorkspaceController {
         this.toolManager = toolManager;
         this.undoRedoController = undoRedoController;
         this.checkpoint = checkpoint;
+        this.newProjectModal = newProjectModal;
+        this.saveCanvasSize = saveCanvasSize;
 
         this.exportManager = new ExportManager(
             this.engine,
@@ -98,13 +105,10 @@ export class WorkspaceController {
 
     private bindBusEvents(): void {
 
-        // ── Timelapse viewer (SPA overlay) ────────────────────────────────
+        // ── Timelapse viewer ──────────────────────────────────────────────
         this.eventBus.on('PLAY_TIMELAPSE', async () => {
             if (this.timelapseViewer.isPlaying()) return;
-
-            // Interrumpir cualquier herramienta activa antes de abrir el viewer
             this.eventBus.emit('GLOBAL_INTERRUPTION');
-
             this.history.isTimelapseRunning = true;
             try {
                 await this.timelapseViewer.play();
@@ -112,6 +116,52 @@ export class WorkspaceController {
                 this.history.isTimelapseRunning = false;
                 this.history.enforceRamLimit();
             }
+        });
+
+        // ── Nuevo proyecto ────────────────────────────────────────────────
+        this.eventBus.on('SHOW_NEW_PROJECT', () => {
+            this.newProjectModal.show();
+        });
+
+        this.eventBus.on('NEW_PROJECT', async ({ width, height }) => {
+            // 1. Interrumpir herramientas activas
+            this.eventBus.emit('GLOBAL_INTERRUPTION');
+
+            // 2. Limpiar historia, selección y canvas
+            this.history.timeline = [];
+            this.history.rebuildSpatialGrid();
+            this.history['invalidateCache']?.();
+            this.selection.clear();
+            this.engine.clearAllLayers();
+            this.engine.clearPaintingCanvas();
+
+            // 3. Limpiar IDB y checkpoint
+            await this.storage.clearAll?.();
+            await this.checkpoint?.invalidate();
+
+            // 4. Aplicar nuevas dimensiones al engine (resize DOM + canvas elements)
+            this.engine.resize(width, height);
+
+            // 5. Actualizar el contenedor visual del workspace (#canvas-area).
+            //    Este div envuelve al engine y define el tamaño del "papel"
+            //    visible (fondo blanco, sombra, etc.). Sin esto el wrapper
+            //    sigue siendo 1180×1180 aunque el canvas interno ya cambió.
+            const canvasArea = document.getElementById('canvas-area');
+            if (canvasArea) {
+                canvasArea.style.width = `${width}px`;
+                canvasArea.style.height = `${height}px`;
+            }
+
+            // 6. Guardar en localStorage para próxima sesión
+            this.saveCanvasSize(width, height);
+
+            // 7. Resetear viewport — centra el nuevo canvas en pantalla
+            //    viewport.reset() calcula x/y correctos y llama applyTransform()
+            //    internamente. Sin esto la transformación CSS no se actualiza
+            //    y el InputManager recibe coordenadas desfasadas.
+            this.viewport.reset(width, height);
+
+            console.info(`[WorkspaceController] ✅ Nuevo proyecto: ${width}×${height}`);
         });
 
         // ── Exportación ───────────────────────────────────────────────────
@@ -137,17 +187,15 @@ export class WorkspaceController {
             this.rebuilder.debugDrawPoints(this.activeBrush);
         });
 
+        // ── CLEAR_ALL (borrar todo sin cambiar formato) ───────────────────
         this.eventBus.on('CLEAR_ALL', async () => {
             this.eventBus.emit('GLOBAL_INTERRUPTION');
-
             this.history.timeline = [];
             this.history.rebuildSpatialGrid();
             this.history['invalidateCache']?.();
             this.selection.clear();
-
             this.engine.clearAllLayers();
             this.engine.clearPaintingCanvas();
-
             await this.storage.clearAll?.();
             await this.checkpoint?.invalidate();
         });

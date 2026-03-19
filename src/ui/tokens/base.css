@@ -16,13 +16,11 @@ body {
     width: 100%;
     height: 100%;
     overflow: hidden;
-    /* Prohíbe scroll en la ventana principal */
     background: var(--surface-app);
     font-family: var(--font-ui);
     color: var(--text-primary);
     -webkit-font-smoothing: antialiased;
     user-select: none;
-    /* Evita que se seleccione texto al arrastrar */
 }
 
 /* Scrollbars minimalistas */
@@ -36,58 +34,46 @@ body {
 }
 
 /* ── UI Overlay Root ─────────────────────────────────────── */
-/* Este contenedor alojará toda nuestra interfaz de UIRoot.ts */
 #ui-root {
     position: fixed;
     inset: 0;
     z-index: var(--z-bar);
     pointer-events: none;
-    /* CRUCIAL: Deja pasar los trazos hacia el CanvasEngine */
 }
 
 #ui-root>* {
     pointer-events: all;
-    /* Reactiva los clicks dentro de las barras y paneles */
 }
 
+/* ════════════════ WORKSPACE ════════════════ */
 
-/* src/ui/tokens/base.css (Añadir al final) */
-
-/* ════════════════ FIX DEL WORKSPACE ════════════════ */
-
-/* ════════════════ FIX DEFINITIVO DEL WORKSPACE ════════════════ */
-
-/* 1. El contenedor original que pones en el HTML (lo ignoramos para que no estorbe) */
+/* El contenedor del HTML no interfiere */
 #drawination-workspace {
     display: contents;
 }
 
-/* 2. Convertimos el motor en el "Mundo Infinito" oscuro (Toda la pantalla) */
+/* El engine ocupa toda la pantalla — es el "mundo infinito" oscuro */
 #drawination-engine {
     position: fixed !important;
     inset: 0 !important;
     width: 100vw !important;
     height: 100vh !important;
     background-color: var(--surface-app) !important;
-    /* Fondo negro puro */
     overflow: hidden !important;
 }
 
-/* 3. Convertimos el transformContainer (hijo directo) en el "Papel Blanco" */
+/* El transformContainer es el "papel blanco".
+   Sus dimensiones (width/height) las setea CanvasEngine en px via style inline.
+   El CSS solo aporta la apariencia visual — nunca el tamaño. */
 #drawination-engine>div {
-    width: 1180px !important;
-    height: 1180px !important;
-
-    /* Le damos el estilo de lienzo con la sombra brutal de tu prototipo */
+    /* SIN width ni height aquí — los pone el CanvasEngine en style inline */
     background-color: #ffffff !important;
     box-shadow: 0 0 0 1px rgba(255, 255, 255, .07), 0 32px 80px rgba(0, 0, 0, .8) !important;
-
-    /* El patrón de ajedrez directamente en el fondo del papel para ver transparencias */
     background-image: repeating-conic-gradient(#f8f8f8 0% 25%, #ececec 0% 50%) !important;
     background-size: 20px 20px !important;
 }
 
-/* 4. Aseguramos que las capas físicas calcen perfectas en el papel */
+/* Las capas físicas llenan el transformContainer */
 .drawination-layer {
     width: 100% !important;
     height: 100% !important;

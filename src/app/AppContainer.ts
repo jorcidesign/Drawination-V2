@@ -17,9 +17,34 @@ import { ToolManager } from '../tools/core/ToolManager';
 import { UndoRedoController } from '../history/UndoRedoController';
 import { WorkspaceController } from './WorkspaceController';
 import { LayerManager } from '../core/engine/LayerManager';
+import { NewProjectModal, CANVAS_PRESETS } from '../ui/panels/NewProjectModal';
 import { UIRoot } from '../ui/UIRoot';
 import '../ui/tokens/design-tokens.css';
 import '../ui/tokens/base.css';
+
+const CANVAS_SIZE_KEY = 'drawination_canvas_size';
+
+function getSavedCanvasSize(): { width: number; height: number } {
+    try {
+        const saved = localStorage.getItem(CANVAS_SIZE_KEY);
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            // Validar que sea un preset conocido
+            const validPreset = CANVAS_PRESETS.find(
+                p => p.width === parsed.width && p.height === parsed.height
+            );
+            if (validPreset) return { width: parsed.width, height: parsed.height };
+        }
+    } catch (_) { }
+    // Default: cuadrado
+    return { width: 1180, height: 1180 };
+}
+
+function saveCanvasSize(width: number, height: number): void {
+    try {
+        localStorage.setItem(CANVAS_SIZE_KEY, JSON.stringify({ width, height }));
+    } catch (_) { }
+}
 
 export class AppContainer {
     public eventBus: EventBus;
@@ -39,9 +64,13 @@ export class AppContainer {
     public toolManager: ToolManager;
     public workspaceController: WorkspaceController;
     public layerManager: LayerManager;
+    public newProjectModal: NewProjectModal;
 
     constructor(containerEl: HTMLElement) {
-        this.engine = new CanvasEngine(1180, 1180);
+        // Leer dimensiones guardadas (o usar cuadrado por defecto)
+        const { width, height } = getSavedCanvasSize();
+
+        this.engine = new CanvasEngine(width, height);
         this.engine.container.style.backgroundColor = '#ecf0f1';
         this.engine.transformContainer.style.backgroundColor = '#ffffff';
         containerEl.appendChild(this.engine.container);
@@ -61,7 +90,6 @@ export class AppContainer {
         const worker = new Worker(workerUrl, { type: 'module' });
 
         this.history = new HistoryManager(this.engine, worker, this.cache);
-
         (this.history as any).eventBus = this.eventBus;
 
         this.rebuilder = new CanvasRebuilder(
@@ -72,13 +100,18 @@ export class AppContainer {
             this.checkpoint,
         );
 
-        // TimelapseViewer — reemplaza al TimelapsePlayer en el WorkspaceController
         this.timelapseViewer = new TimelapseViewer(
             this.engine,
             this.history,
             this.activeBrush,
             this.storage,
             this.rebuilder,
+        );
+
+        // NewProjectModal — recibe una función que comprueba si hay trazos
+        this.newProjectModal = new NewProjectModal(
+            this.eventBus,
+            () => this.history.getTimelineSpine().length > 0
         );
 
         const commandContext = {
@@ -130,6 +163,8 @@ export class AppContainer {
             this.toolManager,
             this.undoRedoController,
             this.checkpoint,
+            this.newProjectModal,
+            saveCanvasSize,
         );
     }
 

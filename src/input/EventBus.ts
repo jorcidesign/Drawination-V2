@@ -12,15 +12,10 @@ export interface AppEventMap {
     'GLOBAL_INTERRUPTION': void;
     'SYNC_LAYERS_CSS': void;
 
-    // SET_COLOR — mueve el cuadradito 7, actualiza el motor de dibujo y la toolbar.
-    // Lo emiten: BrushToolbar (cambio de herramienta), iro.js durante drag, etc.
-    // NO garantiza que el color vaya al historial.
+    // SET_COLOR — mueve el cuadradito 7 y actualiza el motor. No garantiza historial.
     'SET_COLOR': string;
 
-    // APPLY_COLOR — el usuario eligió este color explícitamente.
-    // Lo emiten: paleta rápida, eyedropper, iro.js en input:end, DynamicShades NO.
-    // Siempre añade al historial.
-    // También emite SET_COLOR internamente para actualizar todo lo demás.
+    // APPLY_COLOR — el usuario eligió explícitamente. Siempre va al historial.
     'APPLY_COLOR': string;
 
     'UPDATE_BRUSH_SIZE': number;
@@ -54,6 +49,12 @@ export interface AppEventMap {
     'TOGGLE_COLOR_PANEL': void;
     'TOGGLE_LAYER_PANEL': void;
     'TOGGLE_MENU_PANEL': void;
+
+    // Abre el modal de nuevo proyecto
+    'SHOW_NEW_PROJECT': void;
+
+    // Nuevo proyecto — limpia todo y aplica el formato elegido
+    'NEW_PROJECT': { width: number; height: number };
 
     'LAYER_SELECT': number;
     'LAYER_VISIBILITY': { id: number; visible: boolean };
@@ -93,3 +94,4 @@ export class EventBus {
         if (callbacks) [...callbacks].forEach(cb => cb(payload));
     }
 }
+// SHOW_NEW_PROJECT ya incluido arriba

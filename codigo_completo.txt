@@ -3702,7 +3702,7 @@ export class CanvasEngine {
     public paintingCanvas: HTMLCanvasElement;
     public paintingContext: CanvasRenderingContext2D;
 
-    constructor(width: number = 700, height: number = 700) {
+    constructor(width: number = 1180, height: number = 1180) {
         this.width = width;
         this.height = height;
 
@@ -3722,7 +3722,6 @@ export class CanvasEngine {
         this.transformContainer.style.transformOrigin = '0 0';
         this.container.appendChild(this.transformContainer);
 
-        // Crear las 10 capas físicas
         for (let i = 0; i < this.MAX_LAYERS; i++) {
             this.addLayer(i);
         }
@@ -3734,6 +3733,29 @@ export class CanvasEngine {
         this.paintingContext = this.paintingCanvas.getContext('2d')!;
 
         this.transformContainer.appendChild(this.paintingCanvas);
+    }
+
+    // ── Resize del lienzo ─────────────────────────────────────────────────
+    // Llamado solo al crear un nuevo proyecto — no toca el timeline.
+    // Actualiza dimensiones de todos los canvas y el contenedor DOM.
+    public resize(newWidth: number, newHeight: number): void {
+        this.width = newWidth;
+        this.height = newHeight;
+
+        // Actualizar contenedor principal
+        this.container.style.width = `${newWidth}px`;
+        this.container.style.height = `${newHeight}px`;
+
+        // Actualizar todas las capas
+        for (let i = 0; i < this.MAX_LAYERS; i++) {
+            const layer = this.layers[i];
+            layer.width = newWidth;
+            layer.height = newHeight;
+        }
+
+        // Actualizar painting canvas
+        this.paintingCanvas.width = newWidth;
+        this.paintingCanvas.height = newHeight;
     }
 
     private setupCanvasDimensions(canvas: HTMLCanvasElement) {
@@ -3748,9 +3770,7 @@ export class CanvasEngine {
         const layer = document.createElement('canvas');
         layer.className = `drawination-layer layer-${index}`;
         this.setupCanvasDimensions(layer);
-
         layer.style.zIndex = index.toString();
-
         this.layers.push(layer);
         this.transformContainer.appendChild(layer);
     }
@@ -3777,17 +3797,11 @@ export class CanvasEngine {
 
     public commitPaintingCanvas() {
         const activeContext = this.getActiveLayerContext();
-
-        // === BLINDAJE CONTRA CORRUPCIÓN DE OPACIDAD ===
         activeContext.save();
-        activeContext.globalAlpha = 1.0; // Transfiere el dibujo exactamente como se ve, sin atenuarlo
+        activeContext.globalAlpha = 1.0;
         activeContext.globalCompositeOperation = 'source-over';
-
         activeContext.drawImage(this.paintingCanvas, 0, 0);
-
-        activeContext.restore(); // Quitamos el candado
-        // ==============================================
-
+        activeContext.restore();
         this.clearPaintingCanvas();
     }
 
@@ -3950,16 +3964,41 @@ import { ShortcutManager } from '../input/ShortcutManager';
 import { ViewportManager } from '../core/camera/ViewportManager';
 import { BrushEngine } from '../core/render/BrushEngine';
 import { PencilProfile } from '../core/render/profiles/PencilProfiles';
-import { TimelapsePlayer } from '../history/TimelapsePlayer';
+import { TimelapseViewer } from '../history/TimelapseViewer';
 import { SelectionManager } from '../core/selection/SelectionManager';
 import { CanvasRebuilder } from '../core/render/CanvasRebuilder';
 import { ToolManager } from '../tools/core/ToolManager';
 import { UndoRedoController } from '../history/UndoRedoController';
 import { WorkspaceController } from './WorkspaceController';
 import { LayerManager } from '../core/engine/LayerManager';
+import { NewProjectModal, CANVAS_PRESETS } from '../ui/panels/NewProjectModal';
 import { UIRoot } from '../ui/UIRoot';
-import '../ui/tokens/design-tokens.css'; // Importa variables
-import '../ui/tokens/base.css';          // Importa reset y layout base
+import '../ui/tokens/design-tokens.css';
+import '../ui/tokens/base.css';
+
+const CANVAS_SIZE_KEY = 'drawination_canvas_size';
+
+function getSavedCanvasSize(): { width: number; height: number } {
+    try {
+        const saved = localStorage.getItem(CANVAS_SIZE_KEY);
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            // Validar que sea un preset conocido
+            const validPreset = CANVAS_PRESETS.find(
+                p => p.width === parsed.width && p.height === parsed.height
+            );
+            if (validPreset) return { width: parsed.width, height: parsed.height };
+        }
+    } catch (_) { }
+    // Default: cuadrado
+    return { width: 1180, height: 1180 };
+}
+
+function saveCanvasSize(width: number, height: number): void {
+    try {
+        localStorage.setItem(CANVAS_SIZE_KEY, JSON.stringify({ width, height }));
+    } catch (_) { }
+}
 
 export class AppContainer {
     public eventBus: EventBus;
@@ -3972,16 +4011,20 @@ export class AppContainer {
     public shortcuts: ShortcutManager;
     public activeBrush: BrushEngine;
     public history: HistoryManager;
-    public timelapse: TimelapsePlayer;
+    public timelapseViewer: TimelapseViewer;
     public selection: SelectionManager;
     public rebuilder: CanvasRebuilder;
     public undoRedoController: UndoRedoController;
     public toolManager: ToolManager;
     public workspaceController: WorkspaceController;
     public layerManager: LayerManager;
+    public newProjectModal: NewProjectModal;
 
     constructor(containerEl: HTMLElement) {
-        this.engine = new CanvasEngine(1180, 1180);
+        // Leer dimensiones guardadas (o usar cuadrado por defecto)
+        const { width, height } = getSavedCanvasSize();
+
+        this.engine = new CanvasEngine(width, height);
         this.engine.container.style.backgroundColor = '#ecf0f1';
         this.engine.transformContainer.style.backgroundColor = '#ffffff';
         containerEl.appendChild(this.engine.container);
@@ -4001,8 +4044,6 @@ export class AppContainer {
         const worker = new Worker(workerUrl, { type: 'module' });
 
         this.history = new HistoryManager(this.engine, worker, this.cache);
-        this.timelapse = new TimelapsePlayer(this.engine, this.storage);
-
         (this.history as any).eventBus = this.eventBus;
 
         this.rebuilder = new CanvasRebuilder(
@@ -4011,6 +4052,20 @@ export class AppContainer {
             this.storage,
             this.selection,
             this.checkpoint,
+        );
+
+        this.timelapseViewer = new TimelapseViewer(
+            this.engine,
+            this.history,
+            this.activeBrush,
+            this.storage,
+            this.rebuilder,
+        );
+
+        // NewProjectModal — recibe una función que comprueba si hay trazos
+        this.newProjectModal = new NewProjectModal(
+            this.eventBus,
+            () => this.history.getTimelineSpine().length > 0
         );
 
         const commandContext = {
@@ -4052,7 +4107,7 @@ export class AppContainer {
             this.input,
             this.shortcuts,
             this.history,
-            this.timelapse,
+            this.timelapseViewer,
             this.activeBrush,
             this.storage,
             this.viewport,
@@ -4062,6 +4117,8 @@ export class AppContainer {
             this.toolManager,
             this.undoRedoController,
             this.checkpoint,
+            this.newProjectModal,
+            saveCanvasSize,
         );
     }
 
@@ -4082,14 +4139,12 @@ export class AppContainer {
         if (spine.length > 0) {
             const lastSpineEvent = spine[spine.length - 1];
 
-            // Ahora devuelve un Map<number, ImageBitmap>
             const checkpointBitmaps = await this.checkpoint.tryRestore(
                 lastSpineEvent.id,
                 spine.length
             );
 
             if (checkpointBitmaps) {
-                // Restauramos todas las capas de golpe
                 for (const [index, bmp] of checkpointBitmaps.entries()) {
                     this.engine.getLayerContext(index).drawImage(bmp, 0, 0);
                 }
@@ -4097,12 +4152,10 @@ export class AppContainer {
                 const activeCommands = this.history.getActiveCommands(this.activeBrush);
                 if (activeCommands.length > 0) {
                     const lastCmd = activeCommands[activeCommands.length - 1];
-                    // Subimos la foto multicapa al RAM cache
                     await this.history.cacheManager.bake(lastCmd.id, this.engine, false);
                 }
 
                 this.eventBus.emit('SYNC_LAYERS_CSS');
-
                 console.info(`[AppContainer] ⚡ Checkpoint restaurado. ${spine.length} eventos activos.`);
                 return;
             }
@@ -4154,7 +4207,7 @@ import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { InputManager } from '../input/InputManager';
 import type { ShortcutManager } from '../input/ShortcutManager';
 import type { HistoryManager } from '../history/HistoryManager';
-import type { TimelapsePlayer } from '../history/TimelapsePlayer';
+import type { TimelapseViewer } from '../history/TimelapseViewer';
 import type { BrushEngine } from '../core/render/BrushEngine';
 import type { StorageManager } from '../storage/StorageManager';
 import type { ViewportManager } from '../core/camera/ViewportManager';
@@ -4164,6 +4217,7 @@ import type { CanvasRebuilder } from '../core/render/CanvasRebuilder';
 import type { ToolManager } from '../tools/core/ToolManager';
 import type { UndoRedoController } from '../history/UndoRedoController';
 import type { CheckpointManager } from '../history/CheckpointManager';
+import type { NewProjectModal } from '../ui/panels/NewProjectModal';
 
 import { PencilProfile } from '../core/render/profiles/PencilProfiles';
 import { InkProfile } from '../core/render/profiles/InkProfile';
@@ -4172,13 +4226,14 @@ import { PaintProfile } from '../core/render/profiles/PaintProfile';
 import { HardRoundProfile } from '../core/render/profiles/HardRoundProfile';
 import { AirbrushProfile } from '../core/render/profiles/AirbrushProfile';
 import { CharcoalProfile } from '../core/render/profiles/CharcoalProfile';
+import { ExportManager } from '../export/ExportManager';
 
 export class WorkspaceController {
     private engine: CanvasEngine;
     private input: InputManager;
     private shortcuts: ShortcutManager;
     private history: HistoryManager;
-    private timelapse: TimelapsePlayer;
+    private timelapseViewer: TimelapseViewer;
     private activeBrush: BrushEngine;
     private storage: StorageManager;
     private viewport: ViewportManager;
@@ -4188,13 +4243,16 @@ export class WorkspaceController {
     private toolManager: ToolManager;
     private undoRedoController: UndoRedoController;
     private checkpoint: CheckpointManager | null;
+    private newProjectModal: NewProjectModal;
+    private saveCanvasSize: (w: number, h: number) => void;
+    private exportManager: ExportManager;
 
     constructor(
         engine: CanvasEngine,
         input: InputManager,
         shortcuts: ShortcutManager,
         history: HistoryManager,
-        timelapse: TimelapsePlayer,
+        timelapseViewer: TimelapseViewer,
         activeBrush: BrushEngine,
         storage: StorageManager,
         viewport: ViewportManager,
@@ -4204,12 +4262,14 @@ export class WorkspaceController {
         toolManager: ToolManager,
         undoRedoController: UndoRedoController,
         checkpoint: CheckpointManager | null = null,
+        newProjectModal: NewProjectModal,
+        saveCanvasSize: (w: number, h: number) => void,
     ) {
         this.engine = engine;
         this.input = input;
         this.shortcuts = shortcuts;
         this.history = history;
-        this.timelapse = timelapse;
+        this.timelapseViewer = timelapseViewer;
         this.activeBrush = activeBrush;
         this.storage = storage;
         this.viewport = viewport;
@@ -4219,6 +4279,15 @@ export class WorkspaceController {
         this.toolManager = toolManager;
         this.undoRedoController = undoRedoController;
         this.checkpoint = checkpoint;
+        this.newProjectModal = newProjectModal;
+        this.saveCanvasSize = saveCanvasSize;
+
+        this.exportManager = new ExportManager(
+            this.engine,
+            this.history,
+            this.activeBrush,
+            this.storage,
+        );
 
         this.bindInputEvents();
         this.bindShortcuts();
@@ -4238,42 +4307,92 @@ export class WorkspaceController {
     }
 
     private bindBusEvents(): void {
+
+        // ── Timelapse viewer ──────────────────────────────────────────────
         this.eventBus.on('PLAY_TIMELAPSE', async () => {
-            // === FIX: Interrumpir estado (ej: TransformHandle) antes de iniciar ===
+            if (this.timelapseViewer.isPlaying()) return;
             this.eventBus.emit('GLOBAL_INTERRUPTION');
-
-            if (this.timelapse.isPlaying) return;
-
-            const spine = this.history.getTimelineSpine();
-            if (spine.length === 0) return;
-
             this.history.isTimelapseRunning = true;
             try {
-                await this.timelapse.play(spine, this.activeBrush, 30);
+                await this.timelapseViewer.play();
             } finally {
                 this.history.isTimelapseRunning = false;
                 this.history.enforceRamLimit();
             }
+        });
 
-            await this.rebuilder.rebuild(this.activeBrush);
+        // ── Nuevo proyecto ────────────────────────────────────────────────
+        this.eventBus.on('SHOW_NEW_PROJECT', () => {
+            this.newProjectModal.show();
+        });
+
+        this.eventBus.on('NEW_PROJECT', async ({ width, height }) => {
+            // Interrumpir herramientas activas
+            this.eventBus.emit('GLOBAL_INTERRUPTION');
+
+            // Limpiar historia, selección y canvas
+            this.history.timeline = [];
+            this.history.rebuildSpatialGrid();
+            this.history['invalidateCache']?.();
+            this.selection.clear();
+            this.engine.clearAllLayers();
+            this.engine.clearPaintingCanvas();
+
+            // Limpiar IDB y checkpoint
+            await this.storage.clearAll?.();
+            await this.checkpoint?.invalidate();
+
+            // Aplicar nuevas dimensiones al engine
+            this.engine.resize(width, height);
+
+            // Guardar en localStorage para próxima sesión
+            this.saveCanvasSize(width, height);
+
+            // Resetear viewport al centro
+            const containerW = this.engine.container.parentElement?.clientWidth ?? window.innerWidth;
+            const containerH = this.engine.container.parentElement?.clientHeight ?? window.innerHeight;
+            this.viewport.x = (containerW - width) / 2;
+            this.viewport.y = (containerH - height) / 2;
+            this.viewport.zoom = 1;
+            this.viewport.angle = 0;
+            this.viewport.scaleX = 1;
+            (this.viewport as any).applyTransform?.();
+
+            console.info(`[WorkspaceController] Nuevo proyecto: ${width}×${height}`);
+        });
+
+        // ── Exportación ───────────────────────────────────────────────────
+        this.eventBus.on('DOWNLOAD_PNG', async () => {
+            try {
+                await this.exportManager.exportPNG();
+            } catch (e) {
+                console.error('[ExportManager] Error exportando PNG:', e);
+                alert('Error al exportar la imagen. Intenta de nuevo.');
+            }
+        });
+
+        this.eventBus.on('DOWNLOAD_VIDEO', async () => {
+            try {
+                await this.exportManager.exportVideo();
+            } catch (e) {
+                console.error('[ExportManager] Error exportando video:', e);
+                alert('Error al exportar el video. Intenta de nuevo.');
+            }
         });
 
         this.eventBus.on('DEBUG_DRAW_POINTS', () => {
             this.rebuilder.debugDrawPoints(this.activeBrush);
         });
 
+        // ── CLEAR_ALL (borrar todo sin cambiar formato) ───────────────────
         this.eventBus.on('CLEAR_ALL', async () => {
-            // === FIX: Interrumpir estado antes de limpiar el mundo ===
             this.eventBus.emit('GLOBAL_INTERRUPTION');
-
             this.history.timeline = [];
             this.history.rebuildSpatialGrid();
             this.history['invalidateCache']?.();
             this.selection.clear();
-
             this.engine.clearAllLayers();
             this.engine.clearPaintingCanvas();
-
             await this.storage.clearAll?.();
             await this.checkpoint?.invalidate();
         });
@@ -4360,6 +4479,667 @@ ctx.onmessage = async (e: MessageEvent) => {
         bbox
     }, [binaryData, compressedData]);
 };
+
+===== src/export/ExportManager.ts =====
+
+// src/export/ExportManager.ts
+//
+// Exportación PNG 2x y video timelapse estilo Procreate.
+//
+// REPRODUCCIÓN CRONOLÓGICA:
+//   El video reproduce los eventos en orden real incluyendo TRANSFORM y HIDE.
+//   Misma lógica que TimelapsePlayer.buildPlaylist() — los TRANSFORM consecutivos
+//   sobre el mismo grupo se colapsan en una sola matriz para evitar micro-saltos.
+//   Los trazos ocultos por HIDE desaparecen en el momento correcto del video.
+//
+// ESTRUCTURA DEL VIDEO:
+//   1. Resultado final   — 2s
+//   2. Fade a blanco     — 0.5s
+//   3. Timelapse         — duración dinámica (5.5s – 25.5s)
+//   4. Fade a blanco     — 0.5s
+//   5. Marca de agua     — 1.5s
+
+import type { CanvasEngine } from '../core/engine/CanvasEngine';
+import type { HistoryManager } from '../history/HistoryManager';
+import type { BrushEngine } from '../core/render/BrushEngine';
+import type { StorageManager } from '../storage/StorageManager';
+import type { TimelineEvent } from '../history/TimelineTypes';
+import { CommandFactory } from '../history/commands/CommandFactory';
+
+const EXPORT_SCALE = 2;
+const INTRO_MS = 2_000;
+const FADE_IN_MS = 500;
+const FADE_OUT_MS = 500;
+const WATERMARK_MS = 1_500;
+const FIXED_MS = INTRO_MS + FADE_IN_MS + FADE_OUT_MS + WATERMARK_MS;
+const MIN_TIMELAPSE_MS = 5_500;
+const MAX_TIMELAPSE_MS = 25_500;
+const MS_PER_STROKE = 50;
+const VIDEO_FPS = 30;
+const FADE_STEPS = 20;
+
+// Evento interno para transforms colapsados
+interface CollapsedTransform {
+    kind: 'transform';
+    targetIds: string[];
+    matrix: number[];
+}
+
+// Evento interno para hides
+interface HideEvent {
+    kind: 'hide';
+    targetIds: string[];
+}
+
+// Evento de dibujo enriquecido con data lista
+interface DrawEvent {
+    kind: 'draw';
+    event: TimelineEvent;
+    data: ArrayBuffer;
+}
+
+type PlaylistItem = DrawEvent | CollapsedTransform | HideEvent;
+
+export class ExportManager {
+    private engine: CanvasEngine;
+    private history: HistoryManager;
+    private activeBrush: BrushEngine;
+    private storage: StorageManager;
+
+    private _cancelled = false;
+    private _overlay: HTMLDivElement | null = null;
+
+    constructor(
+        engine: CanvasEngine,
+        history: HistoryManager,
+        activeBrush: BrushEngine,
+        storage: StorageManager,
+    ) {
+        this.engine = engine;
+        this.history = history;
+        this.activeBrush = activeBrush;
+        this.storage = storage;
+    }
+
+    // ── PNG 2x ────────────────────────────────────────────────────────────
+
+    public async exportPNG(): Promise<void> {
+        const srcW = this.engine.width;
+        const srcH = this.engine.height;
+        const dstW = srcW * EXPORT_SCALE;
+        const dstH = srcH * EXPORT_SCALE;
+
+        const out = document.createElement('canvas');
+        out.width = dstW;
+        out.height = dstH;
+        const ctx = out.getContext('2d')!;
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, dstW, dstH);
+
+        const { layersState, layerRoute } = this.history.getState();
+
+        for (let i = 0; i < 10; i++) {
+            const layerState = layersState.get(i);
+            if (!layerState?.visible) continue;
+            const routedIndex = layerRoute.get(i) ?? i;
+            if (routedIndex !== i) continue;
+            const srcCanvas = this.engine.getLayerCanvas(i);
+            ctx.save();
+            ctx.globalAlpha = layerState.opacity;
+            ctx.drawImage(srcCanvas, 0, 0, dstW, dstH);
+            ctx.restore();
+        }
+
+        this._downloadCanvas(out, `drawination_${this._timestamp()}.png`, 'image/png');
+    }
+
+    // ── Video timelapse ───────────────────────────────────────────────────
+
+    public async exportVideo(): Promise<void> {
+        if (!this._isMediaRecorderSupported()) {
+            alert('Tu navegador no soporta grabación de video (MediaRecorder API). Prueba con Chrome o Edge.');
+            return;
+        }
+
+        const spine = this.history.getTimelineSpine();
+        if (spine.length === 0) {
+            alert('No hay trazos para exportar.');
+            return;
+        }
+
+        this._cancelled = false;
+
+        // Construir playlist cronológica con transforms y hides
+        const { playlist, drawCount } = await this._buildPlaylist(spine);
+
+        if (drawCount === 0) {
+            alert('No hay trazos para exportar.');
+            return;
+        }
+
+        // Calcular duración dinámica basada en trazos de dibujo
+        const idealTimelapse = drawCount * MS_PER_STROKE;
+        const timelapseMs = Math.max(MIN_TIMELAPSE_MS, Math.min(MAX_TIMELAPSE_MS, idealTimelapse));
+        const msPerStroke = timelapseMs / drawCount;
+        const totalMs = FIXED_MS + timelapseMs;
+
+        this._showOverlay(totalMs);
+
+        const W = this.engine.width;
+        const H = this.engine.height;
+
+        const recCanvas = document.createElement('canvas');
+        recCanvas.width = W;
+        recCanvas.height = H;
+        const ctx = recCanvas.getContext('2d')!;
+
+        const finalSnapshot = this._captureFinalResult(W, H);
+
+        if (this._cancelled) { this._hideOverlay(); return; }
+
+        const stream = recCanvas.captureStream(VIDEO_FPS);
+        const mimeType = this._getSupportedMimeType();
+        const recorder = new MediaRecorder(stream, {
+            mimeType,
+            videoBitsPerSecond: 8_000_000,
+        });
+
+        const chunks: Blob[] = [];
+        recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) chunks.push(e.data);
+        };
+
+        const recordingDone = new Promise<void>((resolve) => {
+            recorder.onstop = () => {
+                if (!this._cancelled) {
+                    const blob = new Blob(chunks, { type: mimeType });
+                    const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+                    this._downloadBlob(blob, `drawination_timelapse_${this._timestamp()}.${ext}`);
+                }
+                resolve();
+            };
+        });
+
+        recorder.start();
+
+        // ── FASE 1: Resultado final — 2s ──────────────────────────────────
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, W, H);
+        ctx.drawImage(finalSnapshot, 0, 0);
+        await this._sleep(INTRO_MS);
+        if (this._cancelled) { recorder.stop(); await recordingDone; this._hideOverlay(); return; }
+
+        // ── FASE 2: Fade a blanco — 0.5s ─────────────────────────────────
+        await this._fadeToWhite(ctx, W, H, FADE_IN_MS);
+        if (this._cancelled) { recorder.stop(); await recordingDone; this._hideOverlay(); return; }
+
+        // ── FASE 3: Timelapse cronológico ─────────────────────────────────
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, W, H);
+
+        // Estado mutable durante la reproducción
+        const currentTransforms = new Map<string, DOMMatrix>();
+        const hiddenIds = new Set<string>();
+        let strokesDone = 0;
+
+        for (const item of playlist) {
+            if (this._cancelled) break;
+
+            if (item.kind === 'draw') {
+                const cmd = CommandFactory.create(item.event, this.activeBrush);
+                const t = currentTransforms.get(item.event.id);
+                if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+
+                ctx.save();
+                cmd.execute(ctx);
+                ctx.restore();
+
+                strokesDone++;
+                this._updateProgress(strokesDone, drawCount);
+                await this._sleep(msPerStroke);
+
+            } else if (item.kind === 'transform') {
+                // Aplicar transform en vivo: redibujar todo el canvas
+                const newMatrix = new DOMMatrix(item.matrix);
+                for (const id of item.targetIds) {
+                    const current = currentTransforms.get(id) ?? new DOMMatrix();
+                    currentTransforms.set(id, newMatrix.multiply(current));
+                }
+
+                // Redibujar canvas completo con las nuevas matrices
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, W, H);
+
+                for (const pItem of playlist) {
+                    if (pItem.kind !== 'draw') continue;
+                    if (hiddenIds.has(pItem.event.id)) continue;
+                    // Solo redibujar los que ya fueron pintados (antes del cursor actual)
+                    const idx = playlist.indexOf(pItem);
+                    const currentIdx = playlist.indexOf(item);
+                    if (idx >= currentIdx) continue;
+
+                    const cmd = CommandFactory.create(pItem.event, this.activeBrush);
+                    const t = currentTransforms.get(pItem.event.id);
+                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                    ctx.save();
+                    cmd.execute(ctx);
+                    ctx.restore();
+                }
+
+                // Pausa breve para que el transform sea visible
+                await this._sleep(msPerStroke * 3);
+
+            } else if (item.kind === 'hide') {
+                for (const id of item.targetIds) hiddenIds.add(id);
+
+                // Redibujar canvas sin los trazos ocultos
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, W, H);
+
+                for (const pItem of playlist) {
+                    if (pItem.kind !== 'draw') continue;
+                    if (hiddenIds.has(pItem.event.id)) continue;
+                    const idx = playlist.indexOf(pItem);
+                    const currentIdx = playlist.indexOf(item);
+                    if (idx >= currentIdx) continue;
+
+                    const cmd = CommandFactory.create(pItem.event, this.activeBrush);
+                    const t = currentTransforms.get(pItem.event.id);
+                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                    ctx.save();
+                    cmd.execute(ctx);
+                    ctx.restore();
+                }
+
+                await this._sleep(msPerStroke * 2);
+            }
+        }
+
+        if (this._cancelled) { recorder.stop(); await recordingDone; this._hideOverlay(); return; }
+
+        // ── FASE 4: Fade a blanco — 0.5s ─────────────────────────────────
+        await this._fadeToWhite(ctx, W, H, FADE_OUT_MS);
+        if (this._cancelled) { recorder.stop(); await recordingDone; this._hideOverlay(); return; }
+
+        // ── FASE 5: Marca de agua — 1.5s ──────────────────────────────────
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, W, H);
+        this._drawWatermark(ctx, W, H);
+
+        await this._sleepFrames(4);
+        await this._sleep(WATERMARK_MS - 67);
+        await this._sleepFrames(4);
+
+        recorder.stop();
+        await recordingDone;
+        this._hideOverlay();
+    }
+
+    // ── Construcción de playlist cronológica ──────────────────────────────
+
+    private async _buildPlaylist(spine: TimelineEvent[]): Promise<{ playlist: PlaylistItem[]; drawCount: number }> {
+        const playlist: PlaylistItem[] = [];
+        const hiddenByEnd = new Set<string>();
+        let drawCount = 0;
+
+        // Pre-calcular qué IDs están ocultos al final (para saber qué precargar)
+        for (const ev of spine) {
+            if (ev.type === 'HIDE' && ev.targetIds) {
+                for (const id of ev.targetIds) hiddenByEnd.add(id);
+            }
+        }
+
+        // Precargar datos de trazos visibles
+        const drawingSpine = spine.filter(
+            ev => ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL'
+        );
+        const dataMap = await this._preloadAll(drawingSpine);
+
+        // Construir playlist en orden cronológico
+        let i = 0;
+        while (i < spine.length) {
+            const ev = spine[i];
+
+            if (ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL') {
+                const data = dataMap.get(ev.id);
+                if (data) {
+                    playlist.push({
+                        kind: 'draw',
+                        event: { ...ev, data },
+                        data,
+                    });
+                    drawCount++;
+                }
+                i++;
+
+            } else if (ev.type === 'TRANSFORM' && ev.targetIds && ev.transformMatrix) {
+                // Colapsar transforms consecutivos sobre el mismo grupo
+                let currentMatrix = new DOMMatrix(ev.transformMatrix);
+                const sortedIds = ev.targetIds.slice().sort().join(',');
+
+                let j = i + 1;
+                while (
+                    j < spine.length &&
+                    spine[j].type === 'TRANSFORM' &&
+                    spine[j].targetIds!.slice().sort().join(',') === sortedIds
+                ) {
+                    const nextM = new DOMMatrix(spine[j].transformMatrix);
+                    currentMatrix = nextM.multiply(currentMatrix);
+                    j++;
+                }
+
+                playlist.push({
+                    kind: 'transform',
+                    targetIds: ev.targetIds,
+                    matrix: [
+                        currentMatrix.a, currentMatrix.b,
+                        currentMatrix.c, currentMatrix.d,
+                        currentMatrix.e, currentMatrix.f,
+                    ],
+                });
+
+                i = j;
+
+            } else if (ev.type === 'HIDE' && ev.targetIds) {
+                playlist.push({
+                    kind: 'hide',
+                    targetIds: ev.targetIds,
+                });
+                i++;
+
+            } else {
+                i++;
+            }
+        }
+
+        return { playlist, drawCount };
+    }
+
+    // ── Overlay de progreso ───────────────────────────────────────────────
+
+    private _showOverlay(totalMs: number): void {
+        const overlay = document.createElement('div');
+        overlay.id = 'export-overlay';
+
+        const totalSec = Math.round(totalMs / 1000);
+
+        overlay.innerHTML = `
+            <div class="export-card">
+                <div class="export-spinner"></div>
+                <div class="export-title">Exportando video</div>
+                <div class="export-sub">Duración estimada: ~${totalSec}s</div>
+                <div class="export-bar-wrap">
+                    <div class="export-bar" id="export-bar"></div>
+                </div>
+                <div class="export-pct" id="export-pct">Preparando trazos…</div>
+                <button class="export-cancel" id="export-cancel">Cancelar</button>
+            </div>
+        `;
+
+        const style = document.createElement('style');
+        style.id = 'export-overlay-styles';
+        style.textContent = `
+            #export-overlay {
+                position: fixed;
+                inset: 0;
+                background: rgba(0,0,0,0.72);
+                backdrop-filter: blur(6px);
+                -webkit-backdrop-filter: blur(6px);
+                z-index: 999999;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .export-card {
+                background: #1c1c1e;
+                border: 1px solid rgba(255,255,255,0.1);
+                border-radius: 16px;
+                padding: 36px 40px;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 14px;
+                min-width: 320px;
+                box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+            }
+            .export-spinner {
+                width: 36px;
+                height: 36px;
+                border: 3px solid rgba(255,255,255,0.12);
+                border-top-color: #0066cc;
+                border-radius: 50%;
+                animation: export-spin 0.8s linear infinite;
+            }
+            @keyframes export-spin { to { transform: rotate(360deg); } }
+            .export-title {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 17px;
+                font-weight: 600;
+                color: #ffffff;
+                letter-spacing: -0.2px;
+            }
+            .export-sub {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 13px;
+                color: rgba(255,255,255,0.45);
+            }
+            .export-bar-wrap {
+                width: 240px;
+                height: 4px;
+                background: rgba(255,255,255,0.1);
+                border-radius: 2px;
+                overflow: hidden;
+            }
+            .export-bar {
+                height: 100%;
+                width: 0%;
+                background: #0066cc;
+                border-radius: 2px;
+                transition: width 0.1s ease;
+            }
+            .export-pct {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 12px;
+                color: rgba(255,255,255,0.4);
+                font-variant-numeric: tabular-nums;
+            }
+            .export-cancel {
+                margin-top: 6px;
+                padding: 8px 24px;
+                background: rgba(255,255,255,0.07);
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+                color: rgba(255,255,255,0.6);
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 13px;
+                cursor: pointer;
+                transition: background 0.15s, color 0.15s;
+            }
+            .export-cancel:hover {
+                background: rgba(231,76,60,0.2);
+                border-color: rgba(231,76,60,0.4);
+                color: #e74c3c;
+            }
+        `;
+
+        document.head.appendChild(style);
+        document.body.appendChild(overlay);
+        this._overlay = overlay;
+
+        document.getElementById('export-cancel')?.addEventListener('click', () => {
+            this._cancelled = true;
+            const btn = document.getElementById('export-cancel') as HTMLButtonElement;
+            if (btn) { btn.textContent = 'Cancelando…'; btn.disabled = true; }
+        });
+    }
+
+    private _updateProgress(done: number, total: number): void {
+        const pct = Math.round((done / total) * 100);
+        const bar = document.getElementById('export-bar');
+        const label = document.getElementById('export-pct');
+        if (bar) bar.style.width = `${pct}%`;
+        if (label) label.textContent = `Trazo ${done} de ${total} (${pct}%)`;
+    }
+
+    private _hideOverlay(): void {
+        this._overlay?.remove();
+        this._overlay = null;
+        document.getElementById('export-overlay-styles')?.remove();
+    }
+
+    // ── Helpers de render ─────────────────────────────────────────────────
+
+    private _captureFinalResult(W: number, H: number): HTMLCanvasElement {
+        const snap = document.createElement('canvas');
+        snap.width = W;
+        snap.height = H;
+        const ctx = snap.getContext('2d')!;
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, W, H);
+
+        const { layersState, layerRoute } = this.history.getState();
+
+        for (let i = 0; i < 10; i++) {
+            const layerState = layersState.get(i);
+            if (!layerState?.visible) continue;
+            const routedIndex = layerRoute.get(i) ?? i;
+            if (routedIndex !== i) continue;
+            const srcCanvas = this.engine.getLayerCanvas(i);
+            ctx.save();
+            ctx.globalAlpha = layerState.opacity;
+            ctx.drawImage(srcCanvas, 0, 0);
+            ctx.restore();
+        }
+
+        return snap;
+    }
+
+    private async _fadeToWhite(
+        ctx: CanvasRenderingContext2D,
+        W: number,
+        H: number,
+        durationMs: number
+    ): Promise<void> {
+        const stepMs = durationMs / FADE_STEPS;
+        const alphaStep = 1 / FADE_STEPS;
+
+        for (let i = 1; i <= FADE_STEPS; i++) {
+            ctx.save();
+            ctx.globalAlpha = alphaStep * i;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, W, H);
+            ctx.restore();
+            await this._sleep(stepMs);
+        }
+    }
+
+    private _drawWatermark(ctx: CanvasRenderingContext2D, W: number, H: number): void {
+        const cx = W / 2;
+        const cy = H / 2;
+
+        ctx.beginPath();
+        ctx.arc(cx - 128, cy - 2, 9, 0, Math.PI * 2);
+        ctx.fillStyle = '#0066cc';
+        ctx.fill();
+
+        ctx.font = '500 34px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        ctx.fillStyle = '#1a1a1a';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('DrawinationV2', cx + 18, cy);
+
+        ctx.font = '400 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        ctx.fillStyle = '#888888';
+        ctx.fillText('Built with Drawination V2', cx, cy + 46);
+
+        ctx.font = '400 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        ctx.fillStyle = '#0066cc';
+        ctx.fillText('drawinationv2.vercel.app', cx, cy + 70);
+    }
+
+    // ── Helpers genéricos ─────────────────────────────────────────────────
+
+    private async _preloadAll(events: TimelineEvent[]): Promise<Map<string, ArrayBuffer>> {
+        const dataMap = new Map<string, ArrayBuffer>();
+        const idsNeeded: string[] = [];
+
+        for (const ev of events) {
+            if (ev.data) {
+                dataMap.set(ev.id, ev.data);
+            } else {
+                idsNeeded.push(ev.id);
+            }
+        }
+
+        if (idsNeeded.length > 0) {
+            const batch = await this.storage.loadEventDataBatch(idsNeeded);
+            for (const [id, buf] of batch.entries()) {
+                dataMap.set(id, buf);
+            }
+        }
+
+        return dataMap;
+    }
+
+    private _sleepFrames(n: number): Promise<void> {
+        return new Promise((resolve) => {
+            let remaining = n;
+            const tick = () => {
+                remaining--;
+                if (remaining <= 0) resolve();
+                else requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+        });
+    }
+
+    private _downloadCanvas(canvas: HTMLCanvasElement, filename: string, type: string): void {
+        canvas.toBlob((blob) => {
+            if (!blob) return;
+            this._downloadBlob(blob, filename);
+        }, type, 1.0);
+    }
+
+    private _downloadBlob(blob: Blob, filename: string): void {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+
+    private _timestamp(): string {
+        const d = new Date();
+        return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}_${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`;
+    }
+
+    private _sleep(ms: number): Promise<void> {
+        return new Promise(r => setTimeout(r, Math.max(0, ms)));
+    }
+
+    private _isMediaRecorderSupported(): boolean {
+        return typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported !== undefined;
+    }
+
+    private _getSupportedMimeType(): string {
+        const types = [
+            'video/mp4;codecs=avc1',
+            'video/webm;codecs=vp9',
+            'video/webm;codecs=vp8',
+            'video/webm',
+        ];
+        for (const type of types) {
+            if (MediaRecorder.isTypeSupported(type)) return type;
+        }
+        return 'video/webm';
+    }
+}
 
 ===== src/utils/Logger.ts =====
 
@@ -6460,7 +7240,6 @@ import { Slider } from '../atoms/Slider';
 import { IconButton } from '../atoms/IconButton';
 import type { EventBus } from '../../input/EventBus';
 
-// Funciones matemáticas para la curva del slider de tamaño
 function linearToExp(t: number, min: number, max: number, power: number = 3): number {
     return min + (max - min) * Math.pow(t, power);
 }
@@ -6471,6 +7250,24 @@ function expToLinear(val: number, min: number, max: number, power: number = 3): 
     return Math.pow((val - min) / (max - min), 1 / power);
 }
 
+const TOOL_SLIDER_CONFIG: Record<string, { size: boolean; opacity: boolean }> = {
+    'pencil-hb': { size: true, opacity: true },
+    'ink-pen': { size: true, opacity: true },
+    'oil-brush': { size: true, opacity: true },
+    'hard-round': { size: true, opacity: true },
+    'airbrush': { size: true, opacity: true },
+    'charcoal': { size: true, opacity: true },
+    'solid-fill': { size: false, opacity: true },
+    'eraser': { size: true, opacity: true },
+    'vector-eraser': { size: false, opacity: false },
+    'lasso': { size: false, opacity: false },
+    'transform-handle': { size: false, opacity: false },
+    'pan': { size: false, opacity: false },
+    'zoom': { size: false, opacity: false },
+    'rotate': { size: false, opacity: false },
+    'move': { size: false, opacity: false },
+};
+
 export class TopCenterBar {
     public element: HTMLDivElement;
     private eventBus: EventBus;
@@ -6478,6 +7275,10 @@ export class TopCenterBar {
 
     private sizeSlider: Slider;
     private opacitySlider: Slider;
+    private sizeWrap: HTMLDivElement;
+    private opacityWrap: HTMLDivElement;
+    private sep1: HTMLDivElement;
+    private sep2: HTMLDivElement;
 
     private currentMinSize = 1;
     private currentMaxSize = 100;
@@ -6489,79 +7290,84 @@ export class TopCenterBar {
         this.element = document.createElement('div');
         this.element.className = 'bar bar-tc';
 
-        // 1. Átomo: Slider de Tamaño
+        this.sizeWrap = document.createElement('div');
+        this.sizeWrap.className = 'slider-outer';
+
         this.sizeSlider = new Slider({
-            min: 0,
-            max: 1000,
-            value: 130,
+            min: 0, max: 1000, value: 130,
             formatLabel: (val) => {
-                const t = val / 1000;
-                const sizePx = linearToExp(t, this.currentMinSize, this.currentMaxSize, 3);
-                const finalSize = Math.round(sizePx * 10) / 10;
-                return `Tamaño: ${finalSize}px`;
+                const sizePx = linearToExp(val / 1000, this.currentMinSize, this.currentMaxSize, 3);
+                return `Tamaño: ${Math.round(sizePx * 10) / 10}px`;
             },
             onInput: (val) => {
-                const t = val / 1000;
-                const sizePx = linearToExp(t, this.currentMinSize, this.currentMaxSize, 3);
-                const finalSize = Math.round(sizePx * 10) / 10;
-                this.eventBus.emit('UPDATE_BRUSH_SIZE', finalSize);
+                const sizePx = linearToExp(val / 1000, this.currentMinSize, this.currentMaxSize, 3);
+                this.eventBus.emit('UPDATE_BRUSH_SIZE', Math.round(sizePx * 10) / 10);
             }
         });
+        this.sizeSlider.mount(this.sizeWrap);
 
-        // Separador
-        const sep1 = document.createElement('div');
-        sep1.className = 'sep';
+        this.sep1 = document.createElement('div');
+        this.sep1.className = 'sep';
 
-        // 2. Átomo: Botón Eyedropper
         const eyedropperBtn = new IconButton({
             icon: 'eyedropper',
             title: 'Cuentagotas',
             onClick: () => this.launchEyedropper()
         });
 
-        // Separador
-        const sep2 = document.createElement('div');
-        sep2.className = 'sep';
+        this.sep2 = document.createElement('div');
+        this.sep2.className = 'sep';
 
-        // 3. Átomo: Slider de Opacidad
+        this.opacityWrap = document.createElement('div');
+        this.opacityWrap.className = 'slider-outer';
+
         this.opacitySlider = new Slider({
-            min: 1,
-            max: 100,
-            value: 80,
+            min: 1, max: 100, value: 80,
             formatLabel: (val) => `Opacidad: ${val}%`,
             onInput: (val) => {
                 this.eventBus.emit('UPDATE_BRUSH_OPACITY', val / 100);
             }
         });
+        this.opacitySlider.mount(this.opacityWrap);
 
-        // Ensamblaje
-        this.sizeSlider.mount(this.element);
-        this.element.appendChild(sep1);
+        this.element.appendChild(this.sizeWrap);
+        this.element.appendChild(this.sep1);
         eyedropperBtn.mount(this.element);
-        this.element.appendChild(sep2);
-        this.opacitySlider.mount(this.element);
+        this.element.appendChild(this.sep2);
+        this.element.appendChild(this.opacityWrap);
 
-        // Escuchar cambios desde el core (cuando se cambia de herramienta, por ejemplo)
         this.bindEvents();
     }
 
     private bindEvents() {
         this.eventBus.on('SYNC_UI_SLIDERS', (payload) => {
             const { size, opacity, minSize, maxSize } = payload;
-
             if (minSize !== undefined) this.currentMinSize = minSize;
             if (maxSize !== undefined) this.currentMaxSize = maxSize;
-
-            // Actualizar slider de tamaño
             const t = expToLinear(size, this.currentMinSize, this.currentMaxSize, 3);
-            const sizeVal = Math.round(t * 1000);
-            const sizeFormatted = `Tamaño: ${Math.round(size * 10) / 10}px`;
-            this.sizeSlider.setValue(sizeVal, sizeFormatted);
-
-            // Actualizar slider de opacidad
-            const opacityVal = Math.round(opacity * 100);
-            this.opacitySlider.setValue(opacityVal, `Opacidad: ${opacityVal}%`);
+            this.sizeSlider.setValue(Math.round(t * 1000), `Tamaño: ${Math.round(size * 10) / 10}px`);
+            this.opacitySlider.setValue(Math.round(opacity * 100), `Opacidad: ${Math.round(opacity * 100)}%`);
         });
+
+        this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId: string) => {
+            this._applySliderConfig(toolId);
+        });
+
+        this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId: string) => {
+            this._applySliderConfig(toolId);
+        });
+    }
+
+    private _applySliderConfig(toolId: string): void {
+        const config = TOOL_SLIDER_CONFIG[toolId];
+        if (!config) return;
+        this._setSliderEnabled(this.sizeWrap, this.sep1, config.size);
+        this._setSliderEnabled(this.opacityWrap, this.sep2, config.opacity);
+    }
+
+    private _setSliderEnabled(wrap: HTMLDivElement, sep: HTMLDivElement, enabled: boolean): void {
+        wrap.classList.toggle('slider-outer--disabled', !enabled);
+        sep.style.opacity = enabled ? '1' : '0.2';
     }
 
     private async launchEyedropper() {
@@ -6573,11 +7379,11 @@ export class TopCenterBar {
             const dropper = new (window as any).EyeDropper();
             const result = await dropper.open();
             if (result?.sRGBHex) {
+                // Eyedropper = elección explícita del usuario → va al historial
+                this.eventBus.emit('APPLY_COLOR', result.sRGBHex);
                 this.eventBus.emit('SET_COLOR', result.sRGBHex);
             }
-        } catch (e) {
-            // El usuario canceló (presionó Esc)
-        }
+        } catch (e) { /* usuario canceló */ }
     }
 
     public mount(parent: HTMLElement) {
@@ -6590,31 +7396,32 @@ export class TopCenterBar {
 
         const style = document.createElement('style');
         style.textContent = `
-      .bar {
-        background: var(--surface-bar);
-        border: 1px solid var(--surface-bar-border);
-        border-radius: var(--bar-radius);
-        padding: var(--bar-pad);
-        display: flex;
-        align-items: center;
-        gap: var(--bar-gap);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        position: absolute;
-      }
-      .sep {
-        width: 1px;
-        height: 18px;
-        background: var(--surface-bar-border);
-        flex-shrink: 0;
-      }
-      .bar-tc {
-        top: 12px;
-        left: 50%;
-        transform: translateX(-50%);
-        z-index: var(--z-bar);
-      }
-    `;
+            .bar {
+                background: var(--surface-bar);
+                border: 1px solid var(--surface-bar-border);
+                border-radius: var(--bar-radius);
+                padding: var(--bar-pad);
+                display: flex;
+                align-items: center;
+                gap: var(--bar-gap);
+                backdrop-filter: blur(12px);
+                -webkit-backdrop-filter: blur(12px);
+                position: absolute;
+            }
+            .sep {
+                width: 1px; height: 18px;
+                background: var(--surface-bar-border);
+                flex-shrink: 0;
+                transition: opacity 0.2s;
+            }
+            .bar-tc {
+                top: 12px; left: 50%;
+                transform: translateX(-50%);
+                z-index: var(--z-bar);
+            }
+            .slider-outer { transition: opacity 0.2s; }
+            .slider-outer--disabled { opacity: 0.3; pointer-events: none; }
+        `;
         document.head.appendChild(style);
     }
 }
@@ -6635,7 +7442,6 @@ export class TopLeftBar {
     private activeColorSwatch: ColorSwatch;
     private currentColor: string = '#000000';
 
-    // Los 6 colores fijos de acceso rápido
     private readonly quickColors = [
         { hex: '#000000', name: 'Negro' },
         { hex: '#E74C3C', name: 'Rojo' },
@@ -6652,7 +7458,6 @@ export class TopLeftBar {
         this.element = document.createElement('div');
         this.element.className = 'bar bar-tl';
 
-        // 1. Botón Hamburguesa (Menú)
         const menuBtn = new IconButton({
             icon: 'menu',
             title: 'Menú',
@@ -6660,24 +7465,25 @@ export class TopLeftBar {
         });
         menuBtn.mount(this.element);
 
-        // Separador
         this.element.appendChild(this.createSeparator());
 
-        // 2. Fila de Paleta de Colores
         const paletteRow = document.createElement('div');
         paletteRow.className = 'palette-row';
 
-        // 2.1 Colores fijos
+        // Paleta rápida — elección explícita → APPLY_COLOR + SET_COLOR
         this.quickColors.forEach(c => {
             const swatch = new ColorSwatch({
                 color: c.hex,
                 title: c.name,
-                onClick: (color) => this.eventBus.emit('SET_COLOR', color)
+                onClick: (color) => {
+                    this.eventBus.emit('APPLY_COLOR', color);
+                    this.eventBus.emit('SET_COLOR', color);
+                }
             });
             swatch.mount(paletteRow);
         });
 
-        // 2.2 Slot de Color Activo (El 7mo más grande)
+        // Cuadradito 7 — abre el panel de color
         this.activeColorSwatch = new ColorSwatch({
             color: this.currentColor,
             title: 'Color activo — abrir paleta',
@@ -6687,11 +7493,8 @@ export class TopLeftBar {
         this.activeColorSwatch.mount(paletteRow);
 
         this.element.appendChild(paletteRow);
-
-        // Separador
         this.element.appendChild(this.createSeparator());
 
-        // 3. Botón Lazo
         this.lassoBtn = new IconButton({
             icon: 'lasso',
             title: 'Lazo (L)',
@@ -6699,7 +7502,6 @@ export class TopLeftBar {
         });
         this.lassoBtn.mount(this.element);
 
-        // 4. Botón Flip Horizontal
         const flipHBtn = new IconButton({
             icon: 'flipH',
             title: 'Espejo Horizontal',
@@ -6717,19 +7519,20 @@ export class TopLeftBar {
     }
 
     private bindEvents() {
-        // Escuchar cambios de color para actualizar el 7mo slot
+        // Cuadradito 7 responde a SET_COLOR — siempre, venga de donde venga
         this.eventBus.on('SET_COLOR', (color) => {
             this.currentColor = color;
             this.activeColorSwatch.setColor(color);
         });
 
-        // Escuchar cambio de herramienta para iluminar el Lazo si se selecciona
+        // También actualizar en APPLY_COLOR por si acaso
+        this.eventBus.on('APPLY_COLOR', (color) => {
+            this.currentColor = color;
+            this.activeColorSwatch.setColor(color);
+        });
+
         this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId) => {
-            if (toolId === 'lasso') {
-                this.lassoBtn.setActive(true);
-            } else {
-                this.lassoBtn.setActive(false);
-            }
+            this.lassoBtn.setActive(toolId === 'lasso');
         });
     }
 
@@ -6743,17 +7546,17 @@ export class TopLeftBar {
 
         const style = document.createElement('style');
         style.textContent = `
-      .bar-tl {
-        top: 12px;
-        left: 12px;
-        z-index: var(--z-bar);
-      }
-      .palette-row {
-        display: flex;
-        gap: 2px;
-        align-items: center;
-      }
-    `;
+            .bar-tl {
+                top: 12px;
+                left: 12px;
+                z-index: var(--z-bar);
+            }
+            .palette-row {
+                display: flex;
+                gap: 2px;
+                align-items: center;
+            }
+        `;
         document.head.appendChild(style);
     }
 }
@@ -6891,7 +7694,8 @@ interface ToolDef {
     id: string;
     icon: keyof typeof Icons;
     title: string;
-    eventToEmit: any; // El evento que dispara al hacer clic
+    eventToEmit: any;
+    isBrush: boolean;
 }
 
 export class BrushToolbar {
@@ -6900,24 +7704,45 @@ export class BrushToolbar {
     private static stylesInjected = false;
 
     private buttons: Map<string, IconButton> = new Map();
-    private activeToolId: string = 'pencil';
-    private currentColor: string = '#000000';
+    private activeToolId: string = '';
 
-    // Configuración de los 9 pinceles actuales
+    // Color global actual (cuadradito 7)
+    private currentGlobalColor: string = '#000000';
+
+    // Color guardado por herramienta
+    // null = nunca se ha elegido un color explícito para esta herramienta
+    // Se inicializa null para que usen el color CSS heredado (blanco en UI oscura)
+    private toolColors: Map<string, string | null> = new Map();
+
+    // Flag para evitar loop cuando nosotros emitimos SET_COLOR internamente
+    private _settingColorInternally = false;
+
     private readonly drawingTools: ToolDef[] = [
-        { id: 'pencil', icon: 'pencil', title: 'Lápiz (B)', eventToEmit: 'SET_PROFILE_PENCIL' },
-        { id: 'ink-pen', icon: 'ink', title: 'Pluma de Tinta', eventToEmit: 'SET_PROFILE_INK' },
-        { id: 'oil-brush', icon: 'oil', title: 'Pincel Óleo', eventToEmit: 'SET_PROFILE_PAINT' },
-        { id: 'hard-round', icon: 'hardRound', title: 'Hard Round', eventToEmit: 'SET_PROFILE_HARD_ROUND' },
-        { id: 'airbrush', icon: 'airbrush', title: 'Aerógrafo', eventToEmit: 'SET_PROFILE_AIRBRUSH' },
-        { id: 'charcoal', icon: 'charcoal', title: 'Carboncillo', eventToEmit: 'SET_PROFILE_CHARCOAL' },
-        { id: 'solid-fill', icon: 'fill', title: 'Relleno', eventToEmit: 'SET_PROFILE_FILL' },
+        { id: 'pencil-hb', icon: 'pencil', title: 'Lápiz (B)', eventToEmit: 'SET_PROFILE_PENCIL', isBrush: true },
+        { id: 'ink-pen', icon: 'ink', title: 'Pluma de Tinta', eventToEmit: 'SET_PROFILE_INK', isBrush: true },
+        { id: 'oil-brush', icon: 'oil', title: 'Pincel Óleo', eventToEmit: 'SET_PROFILE_PAINT', isBrush: true },
+        { id: 'hard-round', icon: 'hardRound', title: 'Hard Round', eventToEmit: 'SET_PROFILE_HARD_ROUND', isBrush: true },
+        { id: 'airbrush', icon: 'airbrush', title: 'Aerógrafo', eventToEmit: 'SET_PROFILE_AIRBRUSH', isBrush: true },
+        { id: 'charcoal', icon: 'charcoal', title: 'Carboncillo', eventToEmit: 'SET_PROFILE_CHARCOAL', isBrush: true },
+        { id: 'solid-fill', icon: 'fill', title: 'Relleno', eventToEmit: 'SET_PROFILE_FILL', isBrush: true },
     ];
 
     private readonly eraserTools: ToolDef[] = [
-        { id: 'eraser', icon: 'eraser', title: 'Borrador Duro (E)', eventToEmit: 'SET_TOOL_ERASER' },
-        { id: 'vector-eraser', icon: 'vectorEraser', title: 'Borrador Vectorial (⇧E)', eventToEmit: 'SET_TOOL_VECTOR_ERASER' },
+        { id: 'eraser', icon: 'eraser', title: 'Borrador Duro (E)', eventToEmit: 'SET_TOOL_ERASER', isBrush: false },
+        { id: 'vector-eraser', icon: 'vectorEraser', title: 'Borrador Vectorial (⇧E)', eventToEmit: 'SET_TOOL_VECTOR_ERASER', isBrush: false },
     ];
+
+    private readonly profileEventToToolId: Record<string, string> = {
+        'SET_PROFILE_PENCIL': 'pencil-hb',
+        'SET_PROFILE_INK': 'ink-pen',
+        'SET_PROFILE_PAINT': 'oil-brush',
+        'SET_PROFILE_HARD_ROUND': 'hard-round',
+        'SET_PROFILE_AIRBRUSH': 'airbrush',
+        'SET_PROFILE_CHARCOAL': 'charcoal',
+        'SET_PROFILE_FILL': 'solid-fill',
+        'SET_TOOL_ERASER': 'eraser',
+        'SET_TOOL_VECTOR_ERASER': 'vector-eraser',
+    };
 
     constructor(eventBus: EventBus) {
         BrushToolbar.injectStyles();
@@ -6926,16 +7751,19 @@ export class BrushToolbar {
         this.element = document.createElement('div');
         this.element.className = 'bar bar-v bar-brush';
 
-        // 1. Instanciar herramientas de dibujo
         this.drawingTools.forEach(def => this.createToolButton(def));
 
-        // Separador horizontal
         const sep = document.createElement('div');
         sep.className = 'sep sep--h';
         this.element.appendChild(sep);
 
-        // 2. Instanciar borradores
         this.eraserTools.forEach(def => this.createToolButton(def));
+
+        // Inicializar todos los brushes con null — sin color explícito
+        // el ícono hereda el color del CSS (var(--text-secondary) = gris/blanco)
+        for (const def of this.drawingTools) {
+            this.toolColors.set(def.id, null);
+        }
 
         this.bindEvents();
     }
@@ -6945,7 +7773,6 @@ export class BrushToolbar {
             icon: def.icon,
             title: def.title,
             onClick: () => {
-                // Emitimos el evento específico de la herramienta
                 this.eventBus.emit(def.eventToEmit);
             }
         });
@@ -6955,39 +7782,84 @@ export class BrushToolbar {
     }
 
     private bindEvents() {
-        // Escuchar el cambio global de herramienta
-        this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId) => {
-            // 1. Apagar todos
-            this.buttons.forEach((btn, id) => {
-                btn.setActive(false);
-                btn.element.style.color = ''; // Quitar color personalizado al desactivar
+
+        // ── Cambio de color desde fuera (paleta, eyedropper, cuadradito 7) ──
+        this.eventBus.on('SET_COLOR', (color: string) => {
+            if (this._settingColorInternally) return;
+
+            this.currentGlobalColor = color;
+
+            // Guardar en la herramienta activa si es brush y actualizar su ícono
+            const def = this._findDefById(this.activeToolId);
+            if (def?.isBrush) {
+                this.toolColors.set(this.activeToolId, color);
+                const btn = this.buttons.get(this.activeToolId);
+                if (btn) btn.element.style.color = color;
+            }
+        });
+
+        // ── Activación por eventos de perfil ──────────────────────────────
+        for (const [event, toolId] of Object.entries(this.profileEventToToolId)) {
+            this.eventBus.on(event as any, () => {
+                this._activateTool(toolId);
             });
+        }
 
-            // 2. Encender el nuevo
-            const activeBtn = this.buttons.get(toolId);
-            if (activeBtn) {
-                activeBtn.setActive(true);
-                // Si es una herramienta de dibujo, le aplicamos el color activo
-                if (!this.eraserTools.find(e => e.id === toolId)) {
-                    activeBtn.element.style.color = this.currentColor;
-                }
+        // ── Herramientas de interacción (lasso, pan, etc.) ────────────────
+        this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId: string) => {
+            const isOurButton = this.buttons.has(toolId);
+            if (!isOurButton) {
+                // Solo quitar el estado activo — NO tocar colores
+                const prevBtn = this.buttons.get(this.activeToolId);
+                if (prevBtn) prevBtn.setActive(false);
+
                 this.activeToolId = toolId;
+                this.eventBus.emit('ACTIVE_TOOL_CHANGED', toolId);
             }
         });
+    }
 
-        // Escuchar cambio de color para teñir el ícono de la herramienta activa
-        this.eventBus.on('SET_COLOR', (color) => {
-            this.currentColor = color;
+    private _activateTool(toolId: string): void {
+        // Quitar estado activo del anterior — NO resetear su color
+        const prevBtn = this.buttons.get(this.activeToolId);
+        if (prevBtn) prevBtn.setActive(false);
 
-            // Solo coloreamos si la herramienta activa NO es un borrador
-            if (!this.eraserTools.find(e => e.id === this.activeToolId)) {
-                const activeBtn = this.buttons.get(this.activeToolId);
-                if (activeBtn) {
-                    // El inline style tiene prioridad sobre la clase CSS
-                    activeBtn.element.style.color = this.currentColor;
+        // Activar el nuevo
+        const btn = this.buttons.get(toolId);
+        const def = this._findDefById(toolId);
+
+        if (btn) {
+            btn.setActive(true);
+
+            if (def?.isBrush) {
+                const savedColor = this.toolColors.get(toolId);
+
+                if (savedColor !== null && savedColor !== undefined) {
+                    // Esta herramienta ya tiene un color explícito — aplicarlo
+                    btn.element.style.color = savedColor;
+
+                    // Actualizar cuadradito 7 si cambió
+                    if (savedColor !== this.currentGlobalColor) {
+                        this.currentGlobalColor = savedColor;
+                        this._settingColorInternally = true;
+                        this.eventBus.emit('SET_COLOR', savedColor);
+                        this._settingColorInternally = false;
+                    }
+                } else {
+                    // Primera vez — herramienta sin color explícito todavía
+                    // Dejar que herede el color CSS (visible en UI oscura)
+                    // No emitimos SET_COLOR — el cuadradito 7 no cambia
+                    btn.element.style.color = '';
                 }
             }
-        });
+        }
+
+        this.activeToolId = toolId;
+        this.eventBus.emit('ACTIVE_TOOL_CHANGED', toolId);
+    }
+
+    private _findDefById(id: string): ToolDef | undefined {
+        return [...this.drawingTools, ...this.eraserTools].find(d => d.id === id);
     }
 
     public mount(parent: HTMLElement) {
@@ -7000,23 +7872,23 @@ export class BrushToolbar {
 
         const style = document.createElement('style');
         style.textContent = `
-      .bar-v {
-        flex-direction: column;
-      }
-      .bar-brush {
-        top: 50%;
-        left: 12px;
-        transform: translateY(-50%);
-        z-index: var(--z-bar);
-        padding: 6px;
-      }
-      .sep--h {
-        width: 70%;
-        height: 1px;
-        align-self: center;
-        margin: 2px 0;
-      }
-    `;
+            .bar-v {
+                flex-direction: column;
+            }
+            .bar-brush {
+                top: 50%;
+                left: 12px;
+                transform: translateY(-50%);
+                z-index: var(--z-bar);
+                padding: 6px;
+            }
+            .sep--h {
+                width: 70%;
+                height: 1px;
+                align-self: center;
+                margin: 2px 0;
+            }
+        `;
         document.head.appendChild(style);
     }
 }
@@ -7593,6 +8465,9 @@ export class LayerItem {
 ===== src/ui/molecules/ColorHistory.ts =====
 
 // src/ui/molecules/ColorHistory.ts
+// Solo reacciona a APPLY_COLOR — elecciones explícitas del usuario.
+// No reordena colores que ya están en el historial.
+// No duplica colores.
 import { ColorSwatch } from '../atoms/ColorSwatch';
 import type { EventBus } from '../../input/EventBus';
 
@@ -7600,6 +8475,7 @@ export class ColorHistory {
     public element: HTMLDivElement;
     private eventBus: EventBus;
     private history: string[] = [];
+    private readonly MAX_COLORS = 21;
 
     constructor(eventBus: EventBus) {
         this.eventBus = eventBus;
@@ -7607,24 +8483,34 @@ export class ColorHistory {
         this.element.style.display = 'flex';
         this.element.style.flexWrap = 'wrap';
         this.element.style.gap = '3px';
+
+        // Solo escucha APPLY_COLOR — no SET_COLOR
+        // Esto evita que cambios de herramienta o drag de iro.js contaminen el historial
+        this.eventBus.on('APPLY_COLOR', (color: string) => {
+            this.addColor(color);
+        });
     }
 
     public addColor(hex: string) {
         const color = hex.toUpperCase();
 
-        // Si ya es el primero, no hacemos nada
-        if (this.history[0] === color) return;
+        // Si ya existe en el historial — no hacer nada
+        // No reordenamos: el historial es estable, no baila con cada cambio
+        if (this.history.includes(color)) return;
 
-        // Quitamos si ya existía para subirlo al primer lugar
-        this.history = this.history.filter(c => c !== color);
+        // Color nuevo — añadir al inicio
         this.history.unshift(color);
 
-        // Límite de 21 colores (3 filas de 7)
-        if (this.history.length > 21) {
+        // Respetar límite
+        if (this.history.length > this.MAX_COLORS) {
             this.history.pop();
         }
 
         this.render();
+    }
+
+    public getLastColor(): string | null {
+        return this.history[0] ?? null;
     }
 
     private render() {
@@ -7632,15 +8518,17 @@ export class ColorHistory {
 
         this.history.forEach(color => {
             const swatch = new ColorSwatch({
-                color: color,
-                onClick: (c) => this.eventBus.emit('SET_COLOR', c)
+                color,
+                onClick: (c) => {
+                    // Click en historial = elección explícita
+                    this.eventBus.emit('APPLY_COLOR', c);
+                    this.eventBus.emit('SET_COLOR', c);
+                }
             });
 
-            // Estilo para el grid de historial
             swatch.element.style.width = '26px';
             swatch.element.style.height = '26px';
             swatch.element.style.borderRadius = '4px';
-
             swatch.mount(this.element);
         });
     }
@@ -8309,209 +9197,539 @@ import { DynamicShades } from '../molecules/DynamicShades';
 import { ColorHistory } from '../molecules/ColorHistory';
 import type { EventBus } from '../../input/EventBus';
 import iro from '@jaames/iro';
+
 export class ColorPanel {
-    public element: HTMLDivElement;
+  public element: HTMLDivElement;
+  private eventBus: EventBus;
+  private static stylesInjected = false;
+
+  private isVisible = false;
+  private iroContainer: HTMLDivElement;
+  private iroInstance: any = null;
+
+  private dynamicShades: DynamicShades;
+  private colorHistory: ColorHistory;
+
+  private _isDragging = false;
+
+  constructor(eventBus: EventBus) {
+    ColorPanel.injectStyles();
+    this.eventBus = eventBus;
+
+    this.element = document.createElement('div');
+    this.element.className = 'panel';
+    this.element.id = 'panel-color';
+
+    const header = document.createElement('div');
+    header.className = 'panel-hdr';
+    header.innerHTML = `<span class="panel-title">Color</span>`;
+
+    const closeBtn = new IconButton({
+      icon: 'close',
+      onClick: () => this.eventBus.emit('TOGGLE_COLOR_PANEL')
+    });
+    closeBtn.element.className = 'panel-close';
+    closeBtn.mount(header);
+    this.element.appendChild(header);
+
+    this.iroContainer = document.createElement('div');
+    this.iroContainer.id = 'iro-wrap';
+    this.element.appendChild(this.iroContainer);
+
+    const shadesLbl = document.createElement('span');
+    shadesLbl.className = 'sec-lbl';
+    shadesLbl.textContent = 'Tonalidades';
+    this.element.appendChild(shadesLbl);
+
+    this.dynamicShades = new DynamicShades(this.eventBus);
+    this.dynamicShades.mount(this.element);
+
+    const histLbl = document.createElement('span');
+    histLbl.className = 'sec-lbl';
+    histLbl.textContent = 'Historial';
+    this.element.appendChild(histLbl);
+
+    this.colorHistory = new ColorHistory(this.eventBus);
+    this.colorHistory.mount(this.element);
+
+    this.bindEvents();
+  }
+
+  private bindEvents() {
+    this.eventBus.on('TOGGLE_COLOR_PANEL', () => {
+      this.isVisible = !this.isVisible;
+      if (this.isVisible) {
+        this.element.classList.add('visible');
+        this.initIro();
+      } else {
+        this.element.classList.remove('visible');
+      }
+    });
+
+    // SET_COLOR — solo sincronizar iro.js y tonalidades, NO historial
+    this.eventBus.on('SET_COLOR', (color) => {
+      this.dynamicShades.updateColor(color);
+      if (this.iroInstance) {
+        const iroHex = this.iroInstance.color.hexString.toUpperCase();
+        if (iroHex !== color.toUpperCase()) {
+          this.iroInstance.color.hexString = color;
+        }
+      }
+    });
+
+    // APPLY_COLOR — el usuario eligió explícitamente, añadir al historial
+    this.eventBus.on('APPLY_COLOR', (color) => {
+      this.colorHistory.addColor(color);
+      // También actualizar iro.js y tonalidades
+      this.dynamicShades.updateColor(color);
+      if (this.iroInstance) {
+        const iroHex = this.iroInstance.color.hexString.toUpperCase();
+        if (iroHex !== color.toUpperCase()) {
+          this.iroInstance.color.hexString = color;
+        }
+      }
+    });
+  }
+
+  private initIro() {
+    if (this.iroInstance) return;
+
+    const startColor = this.colorHistory.getLastColor() || '#000000';
+
+    this.iroInstance = new (iro.ColorPicker as any)(this.iroContainer, {
+      width: 208,
+      color: startColor,
+      layout: [
+        { component: iro.ui.Box },
+        { component: iro.ui.Slider, options: { sliderType: 'hue' } }
+      ],
+      borderWidth: 0,
+      padding: 4,
+      handleRadius: 7,
+      handleStrokeWidth: 2
+    });
+
+    // Durante el drag — feedback visual en tiempo real, sin historial
+    this.iroInstance.on('input:start', () => {
+      this._isDragging = true;
+    });
+
+    this.iroInstance.on('color:change', (color: any) => {
+      if (this._isDragging) {
+        // Solo mover cuadradito 7 y toolbar — sin historial
+        this.eventBus.emit('SET_COLOR', color.hexString);
+      }
+    });
+
+    // Al soltar — elección explícita, va al historial
+    this.iroInstance.on('input:end', (color: any) => {
+      this._isDragging = false;
+      this.eventBus.emit('APPLY_COLOR', color.hexString);
+      // También emitir SET_COLOR para que el motor de dibujo lo reciba
+      this.eventBus.emit('SET_COLOR', color.hexString);
+    });
+  }
+
+  public mount(parent: HTMLElement) {
+    parent.appendChild(this.element);
+  }
+
+  private static injectStyles() {
+    if (this.stylesInjected) return;
+    this.stylesInjected = true;
+
+    const style = document.createElement('style');
+    style.textContent = `
+            .panel {
+                position: absolute;
+                background: var(--surface-panel);
+                border: 1px solid var(--surface-panel-border);
+                border-radius: var(--panel-radius);
+                padding: var(--panel-pad);
+                box-shadow: var(--panel-shadow);
+                display: none;
+                flex-direction: column;
+                gap: 10px;
+                pointer-events: all;
+                animation: panel-in var(--t-slow) both;
+            }
+            @keyframes panel-in {
+                from { opacity: 0; transform: translateY(-5px) scale(.97); }
+                to { opacity: 1; transform: none; }
+            }
+            .panel.visible { display: flex; }
+            .panel-hdr {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                padding-bottom: 8px;
+                border-bottom: 1px solid var(--surface-panel-border);
+                flex-shrink: 0;
+            }
+            .panel-title {
+                font-size: var(--text-xs);
+                font-weight: 600;
+                color: var(--text-secondary);
+                text-transform: uppercase;
+                letter-spacing: .8px;
+            }
+            .panel-close {
+                width: 20px; height: 20px;
+                border-radius: 4px; border: none;
+                background: transparent;
+                color: var(--text-secondary);
+                cursor: pointer;
+                display: flex; align-items: center; justify-content: center;
+                transition: background var(--t-fast), color var(--t-fast);
+                outline: none; flex-shrink: 0;
+            }
+            .panel-close:hover { background: rgba(231,76,60,.14); color: #E74C3C; }
+            .sec-lbl {
+                font-size: 9px; color: var(--text-disabled);
+                text-transform: uppercase; letter-spacing: .8px;
+                display: block; margin-top: 2px;
+            }
+            #panel-color {
+                top: 56px; left: 60px;
+                width: 236px; z-index: var(--z-panel);
+            }
+            #iro-wrap {
+                display: flex; justify-content: center;
+                padding: 4px 0 2px;
+            }
+        `;
+    document.head.appendChild(style);
+  }
+}
+
+===== src/ui/panels/NewProjectModal.ts =====
+
+// src/ui/panels/NewProjectModal.ts
+//
+// Modal de nuevo proyecto — mismos estilos que el loader de exportación.
+// Muestra 3 opciones de formato con preview CSS proporcional.
+// Si hay trazos existentes pide confirmación antes de borrar.
+
+import type { EventBus } from '../../input/EventBus';
+
+export interface CanvasPreset {
+    id: string;
+    label: string;
+    sublabel: string;
+    width: number;
+    height: number;
+    // Proporción visual para el preview CSS (no las dimensiones reales)
+    previewW: number;
+    previewH: number;
+}
+
+export const CANVAS_PRESETS: CanvasPreset[] = [
+    {
+        id: 'portrait',
+        label: 'Portrait',
+        sublabel: 'Instagram · 4:5',
+        width: 1056,
+        height: 1320,
+        previewW: 56,
+        previewH: 70,
+    },
+    {
+        id: 'square',
+        label: 'Clásico',
+        sublabel: 'Universal · 1:1',
+        width: 1180,
+        height: 1180,
+        previewW: 64,
+        previewH: 64,
+    },
+    {
+        id: 'landscape',
+        label: 'Escena',
+        sublabel: 'Cine · 16:9',
+        width: 1528,
+        height: 860,
+        previewW: 80,
+        previewH: 45,
+    },
+];
+
+export class NewProjectModal {
     private eventBus: EventBus;
-    private static stylesInjected = false;
+    private _overlay: HTMLDivElement | null = null;
+    private _selectedPreset: CanvasPreset = CANVAS_PRESETS[1]; // cuadrado por defecto
+    private _hasExistingWork: () => boolean;
 
-    private isVisible = false;
-    private iroContainer: HTMLDivElement;
-    private iroInstance: any = null;
-
-    private dynamicShades: DynamicShades;
-    private colorHistory: ColorHistory;
-
-    constructor(eventBus: EventBus) {
-        ColorPanel.injectStyles();
+    constructor(eventBus: EventBus, hasExistingWork: () => boolean) {
         this.eventBus = eventBus;
-
-        this.element = document.createElement('div');
-        this.element.className = 'panel';
-        this.element.id = 'panel-color';
-
-        // 1. Header (Título y Botón X)
-        const header = document.createElement('div');
-        header.className = 'panel-hdr';
-        header.innerHTML = `<span class="panel-title">Color</span>`;
-
-        const closeBtn = new IconButton({
-            icon: 'close',
-            onClick: () => this.eventBus.emit('TOGGLE_COLOR_PANEL')
-        });
-        closeBtn.element.className = 'panel-close'; // Override de clase para botón pequeño
-        closeBtn.mount(header);
-        this.element.appendChild(header);
-
-        // 2. Iro.js Container
-        this.iroContainer = document.createElement('div');
-        this.iroContainer.id = 'iro-wrap';
-        this.element.appendChild(this.iroContainer);
-
-        // 3. Tonalidades (Dynamic Shades)
-        const shadesLbl = document.createElement('span');
-        shadesLbl.className = 'sec-lbl';
-        shadesLbl.textContent = 'Tonalidades';
-        this.element.appendChild(shadesLbl);
-
-        this.dynamicShades = new DynamicShades(this.eventBus);
-        this.dynamicShades.mount(this.element);
-
-        // 4. Historial (Color History)
-        const histLbl = document.createElement('span');
-        histLbl.className = 'sec-lbl';
-        histLbl.textContent = 'Historial';
-        this.element.appendChild(histLbl);
-
-        this.colorHistory = new ColorHistory(this.eventBus);
-        this.colorHistory.mount(this.element);
-
-        this.bindEvents();
+        this._hasExistingWork = hasExistingWork;
     }
 
-    private bindEvents() {
-        this.eventBus.on('TOGGLE_COLOR_PANEL', () => {
-            this.isVisible = !this.isVisible;
-            if (this.isVisible) {
-                this.element.classList.add('visible');
-                this.initIro(); // <--- Llamamos directo a initIro()
-            } else {
-                this.element.classList.remove('visible');
-            }
-        });
-        this.eventBus.on('SET_COLOR', (color) => {
-            // Actualizamos Tonalidades y el Historial
-            this.dynamicShades.updateColor(color);
-            this.colorHistory.addColor(color);
-
-            // Si el panel está abierto y el color NO vino de iro.js, actualizamos iro.js
-            if (this.iroInstance && this.iroInstance.color.hexString.toUpperCase() !== color.toUpperCase()) {
-                this.iroInstance.color.hexString = color;
-            }
-        });
+    public show(): void {
+        if (this._overlay) return;
+        this._selectedPreset = CANVAS_PRESETS[1]; // reset a cuadrado
+        this._render();
     }
 
-    // private loadIroJs() {
-    //     if ((window as any).iro) {
-    //         this.initIro();
-    //         return;
-    //     }
-    //     const script = document.createElement('script');
-    //     script.src = 'https://cdn.jsdelivr.net/npm/@jaames/iro@5';
-    //     script.onload = () => this.initIro();
-    //     document.head.appendChild(script);
-    // }
-
-    private initIro() {
-        if (this.iroInstance) return;
-
-        const startColor = (this.colorHistory as any).history[0] || '#000000';
-
-        // Ahora usamos iro directamente sin el (window as any)
-        this.iroInstance = new (iro.ColorPicker as any)(this.iroContainer, {
-            width: 208,
-            color: startColor,
-            layout: [
-                { component: iro.ui.Box },
-                { component: iro.ui.Slider, options: { sliderType: 'hue' } }
-            ],
-            borderWidth: 0,
-            padding: 4,
-            handleRadius: 7,
-            handleStrokeWidth: 2
-        });
-
-        this.iroInstance.on('color:change', (color: any) => {
-            this.eventBus.emit('SET_COLOR', color.hexString);
-        });
+    public hide(): void {
+        this._overlay?.remove();
+        this._overlay = null;
+        document.getElementById('np-modal-styles')?.remove();
     }
 
-    public mount(parent: HTMLElement) {
-        parent.appendChild(this.element);
-    }
+    private _render(): void {
+        const overlay = document.createElement('div');
+        overlay.id = 'np-overlay';
 
-    private static injectStyles() {
-        if (this.stylesInjected) return;
-        this.stylesInjected = true;
+        const hasWork = this._hasExistingWork();
+
+        overlay.innerHTML = `
+            <div class="np-card">
+                <div class="np-header">
+                    <span class="np-title">Nuevo proyecto</span>
+                    <button class="np-close" id="np-close-btn" title="Cancelar">
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                            <path d="M2 2L14 14M14 2L2 14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                </div>
+
+                ${hasWork ? `
+                <div class="np-warning">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                        <path d="M7 1L13 12H1L7 1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                        <line x1="7" y1="5" x2="7" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        <circle cx="7" cy="10" r="0.75" fill="currentColor"/>
+                    </svg>
+                    El proyecto actual se perderá
+                </div>
+                ` : ''}
+
+                <div class="np-sub">Elige el formato del lienzo</div>
+
+                <div class="np-presets" id="np-presets">
+                    ${CANVAS_PRESETS.map(preset => `
+                        <button class="np-preset ${preset.id === 'square' ? 'np-preset--active' : ''}"
+                                data-id="${preset.id}">
+                            <div class="np-preview-wrap">
+                                <div class="np-preview"
+                                     style="width:${preset.previewW}px;height:${preset.previewH}px">
+                                </div>
+                            </div>
+                            <span class="np-preset-label">${preset.label}</span>
+                            <span class="np-preset-sub">${preset.sublabel}</span>
+                        </button>
+                    `).join('')}
+                </div>
+
+                <div class="np-actions">
+                    <button class="np-btn np-btn--cancel" id="np-cancel-btn">Cancelar</button>
+                    <button class="np-btn np-btn--confirm" id="np-confirm-btn">
+                        Crear proyecto
+                    </button>
+                </div>
+            </div>
+        `;
 
         const style = document.createElement('style');
+        style.id = 'np-modal-styles';
         style.textContent = `
-      .panel {
-        position: absolute;
-        background: var(--surface-panel);
-        border: 1px solid var(--surface-panel-border);
-        border-radius: var(--panel-radius);
-        padding: var(--panel-pad);
-        box-shadow: var(--panel-shadow);
-        display: none;
-        flex-direction: column;
-        gap: 10px;
-        pointer-events: all;
-        animation: panel-in var(--t-slow) both;
-      }
-      @keyframes panel-in {
-        from { opacity: 0; transform: translateY(-5px) scale(.97); }
-        to { opacity: 1; transform: none; }
-      }
-      .panel.visible {
-        display: flex;
-      }
-      .panel-hdr {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        padding-bottom: 8px;
-        border-bottom: 1px solid var(--surface-panel-border);
-        flex-shrink: 0;
-      }
-      .panel-title {
-        font-size: var(--text-xs);
-        font-weight: 600;
-        color: var(--text-secondary);
-        text-transform: uppercase;
-        letter-spacing: .8px;
-      }
-      .panel-close {
-        width: 20px;
-        height: 20px;
-        border-radius: 4px;
-        border: none;
-        background: transparent;
-        color: var(--text-secondary);
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        transition: background var(--t-fast), color var(--t-fast);
-        outline: none;
-        flex-shrink: 0;
-      }
-      .panel-close:hover {
-        background: rgba(231,76,60,.14);
-        color: #E74C3C;
-      }
-      .sec-lbl {
-        font-size: 9px;
-        color: var(--text-disabled);
-        text-transform: uppercase;
-        letter-spacing: .8px;
-        display: block;
-        margin-top: 2px;
-      }
-      /* Posicionamiento Perfecto */
-      #panel-color {
-        top: 56px;
-        left: 60px; /* <--- FIX DE UX: Cae justo a la derecha de la BrushToolbar (que mide 48px) */
-        width: 236px;
-        z-index: var(--z-panel);
-      }
-      #iro-wrap {
-        display: flex;
-        justify-content: center;
-        padding: 4px 0 2px;
-      }
-    `;
+            #np-overlay {
+                position: fixed;
+                inset: 0;
+                background: rgba(0, 0, 0, 0.72);
+                backdrop-filter: blur(8px);
+                -webkit-backdrop-filter: blur(8px);
+                z-index: 999999;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .np-card {
+                background: #1c1c1e;
+                border: 1px solid rgba(255,255,255,0.1);
+                border-radius: 20px;
+                padding: 28px 32px 24px;
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
+                min-width: 380px;
+                max-width: 440px;
+                box-shadow: 0 32px 80px rgba(0,0,0,0.7);
+                animation: np-in 0.2s cubic-bezier(0.34, 1.2, 0.64, 1);
+            }
+            @keyframes np-in {
+                from { opacity: 0; transform: scale(0.95) translateY(8px); }
+                to   { opacity: 1; transform: none; }
+            }
+            .np-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }
+            .np-title {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 17px;
+                font-weight: 600;
+                color: #ffffff;
+                letter-spacing: -0.3px;
+            }
+            .np-close {
+                width: 30px; height: 30px;
+                border: none;
+                background: rgba(255,255,255,0.07);
+                border-radius: 8px;
+                color: rgba(255,255,255,0.5);
+                cursor: pointer;
+                display: flex; align-items: center; justify-content: center;
+                transition: background 0.15s, color 0.15s;
+            }
+            .np-close:hover { background: rgba(231,76,60,0.2); color: #e74c3c; }
+            .np-warning {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 10px 14px;
+                background: rgba(231,76,60,0.12);
+                border: 1px solid rgba(231,76,60,0.25);
+                border-radius: 10px;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 13px;
+                color: rgba(231,76,60,0.9);
+            }
+            .np-sub {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 13px;
+                color: rgba(255,255,255,0.4);
+            }
+            .np-presets {
+                display: flex;
+                gap: 12px;
+                align-items: flex-end;
+                justify-content: center;
+            }
+            .np-preset {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 10px;
+                padding: 16px 8px 14px;
+                background: rgba(255,255,255,0.04);
+                border: 1.5px solid rgba(255,255,255,0.1);
+                border-radius: 14px;
+                cursor: pointer;
+                transition: background 0.15s, border-color 0.15s, transform 0.15s;
+            }
+            .np-preset:hover {
+                background: rgba(255,255,255,0.08);
+                border-color: rgba(255,255,255,0.2);
+                transform: translateY(-1px);
+            }
+            .np-preset--active {
+                background: rgba(0, 102, 204, 0.15) !important;
+                border-color: #0066cc !important;
+            }
+            .np-preview-wrap {
+                height: 80px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .np-preview {
+                background: rgba(255,255,255,0.12);
+                border: 1.5px solid rgba(255,255,255,0.25);
+                border-radius: 4px;
+                transition: background 0.15s;
+            }
+            .np-preset--active .np-preview {
+                background: rgba(0, 102, 204, 0.25);
+                border-color: rgba(0, 102, 204, 0.6);
+            }
+            .np-preset-label {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 13px;
+                font-weight: 500;
+                color: rgba(255,255,255,0.85);
+            }
+            .np-preset-sub {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 11px;
+                color: rgba(255,255,255,0.35);
+                text-align: center;
+            }
+            .np-actions {
+                display: flex;
+                gap: 10px;
+                margin-top: 4px;
+            }
+            .np-btn {
+                flex: 1;
+                height: 42px;
+                border-radius: 12px;
+                border: none;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 14px;
+                font-weight: 500;
+                cursor: pointer;
+                transition: background 0.15s, transform 0.1s;
+            }
+            .np-btn:active { transform: scale(0.98); }
+            .np-btn--cancel {
+                background: rgba(255,255,255,0.07);
+                color: rgba(255,255,255,0.5);
+                border: 1px solid rgba(255,255,255,0.1);
+            }
+            .np-btn--cancel:hover {
+                background: rgba(255,255,255,0.11);
+                color: rgba(255,255,255,0.7);
+            }
+            .np-btn--confirm {
+                background: #0066cc;
+                color: #ffffff;
+            }
+            .np-btn--confirm:hover { background: #0077ee; }
+        `;
+
         document.head.appendChild(style);
+        document.body.appendChild(overlay);
+        this._overlay = overlay;
+
+        // ── Selección de preset ───────────────────────────────────────────
+        const presetsEl = document.getElementById('np-presets');
+        presetsEl?.addEventListener('click', (e) => {
+            const btn = (e.target as HTMLElement).closest('.np-preset') as HTMLElement;
+            if (!btn) return;
+
+            const id = btn.dataset.id;
+            const preset = CANVAS_PRESETS.find(p => p.id === id);
+            if (!preset) return;
+
+            this._selectedPreset = preset;
+
+            // Actualizar estado visual
+            presetsEl.querySelectorAll('.np-preset').forEach(b => {
+                b.classList.toggle('np-preset--active', (b as HTMLElement).dataset.id === id);
+            });
+        });
+
+        // ── Cerrar ────────────────────────────────────────────────────────
+        document.getElementById('np-close-btn')?.addEventListener('click', () => this.hide());
+        document.getElementById('np-cancel-btn')?.addEventListener('click', () => this.hide());
+
+        // Clic fuera del card también cierra
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) this.hide();
+        });
+
+        // ── Confirmar ─────────────────────────────────────────────────────
+        document.getElementById('np-confirm-btn')?.addEventListener('click', () => {
+            this.eventBus.emit('NEW_PROJECT', {
+                width: this._selectedPreset.width,
+                height: this._selectedPreset.height,
+            });
+            this.hide();
+        });
     }
 }
 
@@ -8912,7 +10130,7 @@ export class MenuPanel {
     private eventBus: EventBus;
     private static stylesInjected = false;
 
-    public isVisible = false; // Pública para que el PanelManager la lea
+    public isVisible = false;
 
     constructor(eventBus: EventBus) {
         MenuPanel.injectStyles();
@@ -8922,7 +10140,27 @@ export class MenuPanel {
         this.element.className = 'panel';
         this.element.id = 'panel-menu';
 
-        // Botón único: Borrar Todo (Rojo)
+        // Botón Nuevo Proyecto
+        const newProjectBtn = new IconButton({
+            icon: 'add',
+            title: 'Nuevo proyecto',
+            onClick: () => {
+                this.close();
+                this.eventBus.emit('SHOW_NEW_PROJECT');
+            }
+        });
+        newProjectBtn.mount(this.element);
+
+        // Separador
+        const sep = document.createElement('div');
+        sep.className = 'sep sep--h';
+        sep.style.width = '70%';
+        sep.style.height = '1px';
+        sep.style.alignSelf = 'center';
+        sep.style.margin = '2px 0';
+        this.element.appendChild(sep);
+
+        // Botón Borrar todo (rojo)
         const clearBtn = new IconButton({
             icon: 'trash',
             title: 'Borrar todo el lienzo',
@@ -8930,23 +10168,19 @@ export class MenuPanel {
             onClick: () => {
                 if (confirm('¿Seguro que deseas borrar todo el lienzo? Esta acción no se puede deshacer.')) {
                     this.eventBus.emit('CLEAR_ALL');
-                    this.close(); // Cerramos el panel tras limpiar
+                    this.close();
                 }
             }
         });
-
         clearBtn.mount(this.element);
+
         this.bindEvents();
     }
 
     private bindEvents() {
-        // Escucha el evento que emite la hamburguesa en el TopLeftBar
         this.eventBus.on('TOGGLE_MENU_PANEL', () => {
-            if (this.isVisible) {
-                this.close();
-            } else {
-                this.open();
-            }
+            if (this.isVisible) this.close();
+            else this.open();
         });
     }
 
@@ -8970,18 +10204,18 @@ export class MenuPanel {
 
         const style = document.createElement('style');
         style.textContent = `
-      #panel-menu {
-        /* Encaje de rompecabezas */
-        top: 64px; /* Justo debajo de la TopLeftBar */
-        left: 12px; /* Alineado a la izquierda como la BrushToolbar */
-        width: 48px; /* 36px del botón + 6px + 6px de padding */
-        padding: 6px;
-        
-        z-index: var(--z-panel);
-        align-items: center; /* Centra el botón rojo internamente */
-        border-radius: var(--bar-radius); /* Mismo radio curvo que las barras */
-      }
-    `;
+            #panel-menu {
+                top: 64px;
+                left: 12px;
+                width: 48px;
+                padding: 6px;
+                z-index: var(--z-panel);
+                align-items: center;
+                border-radius: var(--bar-radius);
+                flex-direction: column;
+                gap: 2px;
+            }
+        `;
         document.head.appendChild(style);
     }
 }
@@ -9655,12 +10889,17 @@ export interface AppEventMap {
     'GLOBAL_INTERRUPTION': void;
     'SYNC_LAYERS_CSS': void;
 
+    // SET_COLOR — mueve el cuadradito 7 y actualiza el motor. No garantiza historial.
     'SET_COLOR': string;
+
+    // APPLY_COLOR — el usuario eligió explícitamente. Siempre va al historial.
+    'APPLY_COLOR': string;
+
     'UPDATE_BRUSH_SIZE': number;
     'UPDATE_BRUSH_OPACITY': number;
     'REQUEST_TOOL_SWITCH': string;
+    'ACTIVE_TOOL_CHANGED': string;
 
-    // ── Acciones de la Barra Contextual (NUEVO) ───────────────────────────
     'TOGGLE_LASSO_MODE': 'partial' | 'total';
     'SELECTION_DELETE': void;
     'SELECTION_DUPLICATE': void;
@@ -9687,6 +10926,12 @@ export interface AppEventMap {
     'TOGGLE_COLOR_PANEL': void;
     'TOGGLE_LAYER_PANEL': void;
     'TOGGLE_MENU_PANEL': void;
+
+    // Abre el modal de nuevo proyecto
+    'SHOW_NEW_PROJECT': void;
+
+    // Nuevo proyecto — limpia todo y aplica el formato elegido
+    'NEW_PROJECT': { width: number; height: number };
 
     'LAYER_SELECT': number;
     'LAYER_VISIBILITY': { id: number; visible: boolean };
@@ -9726,6 +10971,7 @@ export class EventBus {
         if (callbacks) [...callbacks].forEach(cb => cb(payload));
     }
 }
+// SHOW_NEW_PROJECT ya incluido arriba
 
 ===== src/input/InputManager.ts =====
 
@@ -9835,26 +11081,6 @@ export class InputManager {
 ===== src/storage/StorageManager.ts =====
 
 // src/storage/StorageManager.ts
-//
-// CAMBIO vs versión anterior:
-//   saveEvent() ahora persiste eventos de control (UNDO, REDO) además de
-//   eventos de dibujo (STROKE, ERASE, FILL).
-//
-// POR QUÉ:
-//   Los eventos UNDO/REDO son necesarios para que computeTimelineState()
-//   reconstruya el estado correcto al recargar la página. Sin ellos,
-//   todos los STROKE/ERASE/FILL aparecen como activos — incluyendo los
-//   que el usuario había deshecho.
-//
-// TAMAÑO: un evento UNDO/REDO en IDB ocupa ~200 bytes (solo metadata JSON,
-//   sin ArrayBuffer). Es despreciable comparado con los trazos binarios.
-//
-// GUARD ACTUALIZADO:
-//   Antes: solo guardaba si (isDataEvent && hasPayload)
-//   Ahora: guarda si (isDataEvent && hasPayload) || isControlEvent
-//   Los eventos TRANSFORM, HIDE etc. ya se guardaban por el flujo normal
-//   (no son isDataEvent, no tienen el guard).
-
 import type { TimelineEvent } from '../history/HistoryManager';
 
 export class StorageManager {
@@ -9896,14 +11122,10 @@ export class StorageManager {
         const isDataEvent = event.type === 'STROKE' || event.type === 'ERASE' || event.type === 'FILL';
         const isControlEvent = event.type === 'UNDO' || event.type === 'REDO';
 
-        // Eventos de dibujo: requieren data binaria
         if (isDataEvent) {
             const hasPayload = event.data !== null || event.compressedData !== undefined;
             if (!hasPayload) return 0;
         }
-
-        // Eventos de control (UNDO/REDO): se persisten como metadata pura, sin data.
-        // Todos los demás (TRANSFORM, HIDE, etc.) pasan directamente.
 
         const dbEvent = { ...event };
         let savedBytes = 0;
@@ -9935,68 +11157,55 @@ export class StorageManager {
         return await new Response(stream.readable).arrayBuffer();
     }
 
+    // Un único cursor IDB recorre el store una sola vez y recoge
+    // solo los IDs que necesitamos — en lugar de N peticiones get() separadas.
+    // La interfaz pública no cambia: recibe string[] y devuelve Map<string, ArrayBuffer>.
     public async loadEventDataBatch(ids: string[]): Promise<Map<string, ArrayBuffer>> {
         await this.readyPromise;
         if (!this.db || ids.length === 0) return new Map();
 
-        return new Promise((resolve, reject) => {
+        const needed = new Set(ids);
+        const raw = new Map<string, ArrayBuffer>();
+        const toDecompress: Array<{ id: string; data: ArrayBuffer }> = [];
+
+        await new Promise<void>((resolve, reject) => {
             const tx = this.db!.transaction(this.storeName, 'readonly');
-            const store = tx.objectStore(this.storeName);
-            const results = new Map<string, ArrayBuffer | null>();
-            const eventsToDecompress: Array<{ id: string, data: ArrayBuffer }> = [];
+            const req = tx.objectStore(this.storeName).openCursor();
 
-            let pending = ids.length;
+            req.onsuccess = (e) => {
+                const cursor = (e.target as IDBRequest).result as IDBCursorWithValue;
+                if (!cursor) { resolve(); return; }
 
-            const checkDone = () => {
-                pending--;
-                if (pending === 0) {
-                    this.processBatchDecompression(results, eventsToDecompress)
-                        .then(resolve)
-                        .catch(reject);
+                const id = cursor.key as string;
+                if (needed.has(id)) {
+                    const ev = cursor.value as TimelineEvent;
+                    if (ev.isCompressed && ev.data) {
+                        toDecompress.push({ id, data: ev.data });
+                    } else if (ev.data) {
+                        raw.set(id, ev.data);
+                    }
+                    // Si ya recogimos todos los que necesitamos, no seguimos
+                    if (raw.size + toDecompress.length === needed.size) {
+                        resolve();
+                        return;
+                    }
                 }
+                cursor.continue();
             };
 
-            for (const id of ids) {
-                const request = store.get(id);
-                request.onsuccess = () => {
-                    const ev = request.result as TimelineEvent;
-                    if (ev) {
-                        if (ev.isCompressed && ev.data) {
-                            eventsToDecompress.push({ id, data: ev.data });
-                        } else if (ev.data) {
-                            results.set(id, ev.data);
-                        }
-                    }
-                    checkDone();
-                };
-                request.onerror = () => {
-                    console.error(`[Storage] Error getting ${id}`, request.error);
-                    checkDone();
-                };
-            }
+            req.onerror = () => reject(req.error);
         });
-    }
 
-    private async processBatchDecompression(
-        results: Map<string, ArrayBuffer | null>,
-        toDecompress: Array<{ id: string, data: ArrayBuffer }>
-    ): Promise<Map<string, ArrayBuffer>> {
-        await Promise.all(
-            toDecompress.map(async (item) => {
-                try {
-                    const decomp = await this.decompressData(item.data);
-                    results.set(item.id, decomp);
-                } catch (e) {
-                    console.error(`[Storage] Batch decompress err id ${item.id}`, e);
-                }
-            })
-        );
+        // Descompresión en paralelo de los que lo necesitan
+        await Promise.all(toDecompress.map(async (item) => {
+            try {
+                raw.set(item.id, await this.decompressData(item.data));
+            } catch (e) {
+                console.error(`[Storage] Batch decompress err id ${item.id}`, e);
+            }
+        }));
 
-        const finalMap = new Map<string, ArrayBuffer>();
-        for (const [id, buffer] of results.entries()) {
-            if (buffer) finalMap.set(id, buffer);
-        }
-        return finalMap;
+        return raw;
     }
 
     public async loadEventData(id: string): Promise<ArrayBuffer | null> {
@@ -10039,7 +11248,6 @@ export class StorageManager {
                 const events = request.result as TimelineEvent[];
                 events.sort((a, b) => a.timestamp - b.timestamp);
                 for (const ev of events) {
-                    // Solo nullear data de eventos de dibujo — los de control no tienen data
                     if (ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL') {
                         ev.data = null;
                     }
@@ -10116,7 +11324,7 @@ export class CacheManager {
     }
 
     private initDB() {
-        const req = indexedDB.open('DrawinationCacheDB', 2); // Subimos versión
+        const req = indexedDB.open('DrawinationCacheDB', 2);
         req.onupgradeneeded = (e) => {
             const db = (e.target as IDBOpenDBRequest).result;
             if (!db.objectStoreNames.contains('snapshots')) {
@@ -10129,8 +11337,6 @@ export class CacheManager {
         req.onsuccess = (e) => { this.db = (e.target as IDBOpenDBRequest).result; };
     }
 
-    // ── SOLUCIÓN MULTICAPA ──────────────────────────────────────────────
-    // Toma una foto de los 10 canvas simultáneamente
     public async bake(eventId: string, engine: CanvasEngine, isKeyframe: boolean = false): Promise<void> {
         const bitmaps = new Map<number, ImageBitmap>();
 
@@ -10198,7 +11404,6 @@ export class CacheManager {
     private persistToDB(eventId: string, bitmaps: Map<number, ImageBitmap>) {
         if (!this.db) return;
 
-        // Convertimos todos los bitmaps a blobs en paralelo
         Promise.all(Array.from(bitmaps.entries()).map(async ([index, bmp]) => {
             const offscreen = new OffscreenCanvas(this.canvasWidth, this.canvasHeight);
             const ctx = offscreen.getContext('2d')!;
@@ -10214,7 +11419,7 @@ export class CacheManager {
 
     public garbageCollect(validEventIds: string[]) {
         const validSet = new Set(validEventIds);
-        for (const [id, _] of this.memoryCache.entries()) {
+        for (const [id] of this.memoryCache.entries()) {
             if (!validSet.has(id)) this.memoryCache.delete(id);
         }
         if (this.db) {
@@ -10225,6 +11430,40 @@ export class CacheManager {
                 const cursor = (e.target as IDBRequest).result as IDBCursorWithValue;
                 if (cursor) {
                     if (!validSet.has(cursor.key as string)) cursor.delete();
+                    cursor.continue();
+                }
+            };
+        }
+    }
+
+    // Invalida snapshots a partir de un eventId específico.
+    // Los snapshots anteriores al evento desecho siguen siendo válidos
+    // para que el rebuild arranque desde el más cercano en lugar de desde cero.
+    public invalidateFrom(eventId: string, allEventIds: string[]): void {
+        const cutoffIndex = allEventIds.indexOf(eventId);
+        if (cutoffIndex === -1) {
+            // Evento no encontrado — safe fallback, no tocamos nada
+            return;
+        }
+
+        const validIds = new Set(allEventIds.slice(0, cutoffIndex));
+
+        // Limpiar memoria solo para snapshots posteriores al cutoff
+        for (const [id] of this.memoryCache.entries()) {
+            if (!validIds.has(id)) {
+                this.memoryCache.delete(id);
+            }
+        }
+
+        // Limpiar IDB solo para snapshots posteriores al cutoff
+        if (this.db) {
+            const tx = this.db.transaction('snapshots', 'readwrite');
+            const store = tx.objectStore('snapshots');
+            const req = store.openCursor();
+            req.onsuccess = (e) => {
+                const cursor = (e.target as IDBRequest).result as IDBCursorWithValue;
+                if (cursor) {
+                    if (!validIds.has(cursor.key as string)) cursor.delete();
                     cursor.continue();
                 }
             };
@@ -10953,10 +12192,11 @@ export class HistoryManager {
             bbox: eventToUndo.bbox, isSaved: false,
         });
 
-        // === FIX VITAL ===
-        // Borramos el caché en cada viaje en el tiempo.
-        // Previene el "Bug del Snapshot Rancio" que hacía desaparecer trazos al soltar la selección.
-        this.cacheManager.clearAll();
+        // Invalidamos solo snapshots posteriores al evento desecho.
+        // Los anteriores siguen válidos — el rebuild arranca desde el más cercano
+        // en lugar de repintar los 1100 trazos desde cero.
+        const allIds = this.timeline.map(e => e.id);
+        this.cacheManager.invalidateFrom(eventToUndo.id, allIds);
 
         return eventToUndo;
     }
@@ -10976,8 +12216,9 @@ export class HistoryManager {
             bbox: eventToRedo.bbox, isSaved: false,
         });
 
-        // === FIX VITAL ===
-        this.cacheManager.clearAll();
+        // Invalidamos solo snapshots posteriores al evento rehecho.
+        const allIds = this.timeline.map(e => e.id);
+        this.cacheManager.invalidateFrom(eventToRedo.id, allIds);
 
         return eventToRedo;
     }
@@ -11170,16 +12411,23 @@ export class HistoryManager {
             protectedIds.add(undone[i].id);
         }
 
+        // Recorremos hacia atrás y salimos en cuanto los N más recientes
+        // ya caben en RAM — no iteramos el timeline completo innecesariamente.
         let activeCount = 0;
         for (let i = this.timeline.length - 1; i >= 0; i--) {
             const ev = this.timeline[i];
-
             if (ev.data === null) continue;
             if (protectedIds.has(ev.id)) continue;
 
             activeCount++;
-            if (activeCount > this.MAX_RAM_EVENTS && ev.isSaved) {
-                (ev as any).data = null;
+            if (activeCount > this.MAX_RAM_EVENTS) {
+                if (ev.isSaved) {
+                    (ev as any).data = null;
+                }
+            } else if (activeCount === this.MAX_RAM_EVENTS) {
+                // Ya tenemos exactamente MAX_RAM_EVENTS con data en RAM.
+                // Todo lo que queda hacia atrás ya fue nulleado en iteraciones anteriores.
+                break;
             }
         }
     }
@@ -11196,6 +12444,816 @@ export class HistoryManager {
             this.worker.addEventListener('message', handler);
             this.worker.postMessage({ id: msgId, rawPoints, brushSize });
         });
+    }
+}
+
+===== src/history/TimelapseViewer.ts =====
+
+// src/history/TimelapseViewer.ts
+//
+// Overlay SPA fullscreen para reproducción del timelapse.
+//
+// CONTROLES:
+//   - Slider draggable con seek real (redibuja desde 0 hasta el frame pedido)
+//   - Botón pause/play
+//   - Botón cerrar (X) — vuelve al canvas intacto
+//   - Velocidad: 1x / 2x / 4x
+
+import type { CanvasEngine } from '../core/engine/CanvasEngine';
+import type { HistoryManager } from '../history/HistoryManager';
+import type { BrushEngine } from '../core/render/BrushEngine';
+import type { StorageManager } from '../storage/StorageManager';
+import type { TimelineEvent } from './TimelineTypes';
+import type { CanvasRebuilder } from '../core/render/CanvasRebuilder';
+import { CommandFactory } from './commands/CommandFactory';
+
+const MS_PER_STROKE_BASE = 40;
+const FADE_STEPS = 16;
+
+interface DrawItem {
+    kind: 'draw';
+    event: TimelineEvent;
+    data: ArrayBuffer;
+}
+interface TransformItem {
+    kind: 'transform';
+    targetIds: string[];
+    matrix: number[];
+}
+interface HideItem {
+    kind: 'hide';
+    targetIds: string[];
+}
+type PlaylistItem = DrawItem | TransformItem | HideItem;
+
+export class TimelapseViewer {
+    private engine: CanvasEngine;
+    private history: HistoryManager;
+    private activeBrush: BrushEngine;
+    private storage: StorageManager;
+    private rebuilder: CanvasRebuilder;
+
+    private _overlay: HTMLDivElement | null = null;
+    private _playing = false;
+    private _cancelled = false;
+    private _paused = false;
+    private _speed = 1;
+    private _seeking = false;
+
+    private _playlist: PlaylistItem[] = [];
+    private _drawCount = 0;
+    private _currentDraw = 0;
+
+    private _recCanvas: HTMLCanvasElement | null = null;
+    private _recCtx: CanvasRenderingContext2D | null = null;
+
+    private _resumeResolve: (() => void) | null = null;
+
+    constructor(
+        engine: CanvasEngine,
+        history: HistoryManager,
+        activeBrush: BrushEngine,
+        storage: StorageManager,
+        rebuilder: CanvasRebuilder,
+    ) {
+        this.engine = engine;
+        this.history = history;
+        this.activeBrush = activeBrush;
+        this.storage = storage;
+        this.rebuilder = rebuilder;
+    }
+
+    public isPlaying(): boolean {
+        return this._playing;
+    }
+
+    public async play(): Promise<void> {
+        if (this._playing) return;
+
+        const spine = this.history.getTimelineSpine();
+        if (spine.length === 0) {
+            alert('No hay trazos para reproducir.');
+            return;
+        }
+
+        this._playing = true;
+        this._cancelled = false;
+        this._paused = false;
+        this._speed = 1;
+        this._currentDraw = 0;
+        this._seeking = false;
+
+        const { playlist, drawCount } = await this._buildPlaylist(spine);
+        this._playlist = playlist;
+        this._drawCount = drawCount;
+
+        if (drawCount === 0) {
+            this._playing = false;
+            return;
+        }
+
+        this._showOverlay();
+
+        const W = this.engine.width;
+        const H = this.engine.height;
+        this._recCanvas = document.createElement('canvas');
+        this._recCanvas.width = W;
+        this._recCanvas.height = H;
+        this._recCtx = this._recCanvas.getContext('2d')!;
+
+        const canvasWrap = document.getElementById('tl-canvas-wrap');
+        if (canvasWrap) {
+            this._recCanvas.style.cssText = `
+                width: 100%;
+                height: 100%;
+                object-fit: contain;
+                border-radius: 4px;
+            `;
+            canvasWrap.appendChild(this._recCanvas);
+        }
+
+        this._recCtx.fillStyle = '#ffffff';
+        this._recCtx.fillRect(0, 0, W, H);
+
+        await this._reproduce();
+
+        if (!this._cancelled) {
+            await this._showFinalResult();
+        }
+
+        this._playing = false;
+        this._hideOverlay();
+        await this.rebuilder.rebuild(this.activeBrush);
+    }
+
+    // ── Seek: redibuja desde 0 hasta targetDrawIndex ──────────────────────
+    // Construye el estado completo del canvas en ese punto de la historia.
+    private async _seekTo(targetDrawIndex: number): Promise<void> {
+        if (!this._recCtx || !this._recCanvas) return;
+
+        const ctx = this._recCtx;
+        const W = this._recCanvas.width;
+        const H = this._recCanvas.height;
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, W, H);
+
+        const currentTransforms = new Map<string, DOMMatrix>();
+        const hiddenIds = new Set<string>();
+        let drawsSeen = 0;
+
+        for (const item of this._playlist) {
+            if (drawsSeen >= targetDrawIndex) break;
+
+            if (item.kind === 'draw') {
+                const cmd = CommandFactory.create(item.event, this.activeBrush);
+                const t = currentTransforms.get(item.event.id);
+                if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                if (!hiddenIds.has(item.event.id)) {
+                    ctx.save();
+                    cmd.execute(ctx);
+                    ctx.restore();
+                }
+                drawsSeen++;
+
+            } else if (item.kind === 'transform') {
+                const newMatrix = new DOMMatrix(item.matrix);
+                for (const id of item.targetIds) {
+                    const current = currentTransforms.get(id) ?? new DOMMatrix();
+                    currentTransforms.set(id, newMatrix.multiply(current));
+                }
+                // Aplicar transforms a lo ya dibujado
+                if (drawsSeen > 0) {
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(0, 0, W, H);
+                    let redrawnCount = 0;
+                    for (const pi of this._playlist) {
+                        if (redrawnCount >= drawsSeen) break;
+                        if (pi.kind !== 'draw') continue;
+                        if (hiddenIds.has(pi.event.id)) { redrawnCount++; continue; }
+                        const cmd = CommandFactory.create(pi.event, this.activeBrush);
+                        const t = currentTransforms.get(pi.event.id);
+                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                        ctx.save();
+                        cmd.execute(ctx);
+                        ctx.restore();
+                        redrawnCount++;
+                    }
+                }
+
+            } else if (item.kind === 'hide') {
+                for (const id of item.targetIds) hiddenIds.add(id);
+            }
+        }
+
+        this._currentDraw = targetDrawIndex;
+        this._updateSlider();
+    }
+
+    // ── Reproducción principal ────────────────────────────────────────────
+
+    private async _reproduce(): Promise<void> {
+        const ctx = this._recCtx!;
+        const W = this.engine.width;
+        const H = this.engine.height;
+
+        const currentTransforms = new Map<string, DOMMatrix>();
+        const hiddenIds = new Set<string>();
+        const processedDrawItems: DrawItem[] = [];
+
+        for (let i = 0; i < this._playlist.length; i++) {
+            if (this._cancelled) break;
+
+            // Si hay un seek pendiente, saltar al frame pedido
+            if (this._seeking) {
+                this._seeking = false;
+                // Reconstruir estado desde el seek
+                const targetDraw = this._currentDraw;
+                await this._seekTo(targetDraw);
+                // Reposicionar el índice del loop al frame correcto
+                i = this._findPlaylistIndexForDraw(targetDraw);
+                // Reconstruir currentTransforms/hiddenIds hasta ese punto
+                this._rebuildState(targetDraw, currentTransforms, hiddenIds, processedDrawItems);
+                continue;
+            }
+
+            await this._waitIfPaused();
+            if (this._cancelled) break;
+            if (this._seeking) { i--; continue; } // volver a procesar el seek
+
+            const item = this._playlist[i];
+            const msPerStroke = MS_PER_STROKE_BASE / this._speed;
+
+            if (item.kind === 'draw') {
+                const cmd = CommandFactory.create(item.event, this.activeBrush);
+                const t = currentTransforms.get(item.event.id);
+                if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+
+                if (!hiddenIds.has(item.event.id)) {
+                    ctx.save();
+                    cmd.execute(ctx);
+                    ctx.restore();
+                }
+
+                processedDrawItems.push(item);
+                this._currentDraw++;
+                this._updateSlider();
+                await this._sleep(msPerStroke);
+
+            } else if (item.kind === 'transform') {
+                const newMatrix = new DOMMatrix(item.matrix);
+                for (const id of item.targetIds) {
+                    const current = currentTransforms.get(id) ?? new DOMMatrix();
+                    currentTransforms.set(id, newMatrix.multiply(current));
+                }
+
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, W, H);
+                for (const di of processedDrawItems) {
+                    if (hiddenIds.has(di.event.id)) continue;
+                    const cmd = CommandFactory.create(di.event, this.activeBrush);
+                    const t = currentTransforms.get(di.event.id);
+                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                    ctx.save();
+                    cmd.execute(ctx);
+                    ctx.restore();
+                }
+
+                await this._sleep(msPerStroke * 3);
+
+            } else if (item.kind === 'hide') {
+                for (const id of item.targetIds) hiddenIds.add(id);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, W, H);
+                for (const di of processedDrawItems) {
+                    if (hiddenIds.has(di.event.id)) continue;
+                    const cmd = CommandFactory.create(di.event, this.activeBrush);
+                    const t = currentTransforms.get(di.event.id);
+                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                    ctx.save();
+                    cmd.execute(ctx);
+                    ctx.restore();
+                }
+
+                await this._sleep(msPerStroke * 2);
+            }
+        }
+    }
+
+    // Encuentra el índice en la playlist que corresponde a N trazos de dibujo
+    private _findPlaylistIndexForDraw(targetDraw: number): number {
+        let drawsSeen = 0;
+        for (let i = 0; i < this._playlist.length; i++) {
+            if (this._playlist[i].kind === 'draw') {
+                if (drawsSeen >= targetDraw) return i;
+                drawsSeen++;
+            }
+        }
+        return this._playlist.length;
+    }
+
+    // Reconstruye los mapas de estado hasta N trazos
+    private _rebuildState(
+        targetDraw: number,
+        transforms: Map<string, DOMMatrix>,
+        hiddenIds: Set<string>,
+        processedItems: DrawItem[]
+    ): void {
+        transforms.clear();
+        hiddenIds.clear();
+        processedItems.length = 0;
+        let drawsSeen = 0;
+
+        for (const item of this._playlist) {
+            if (drawsSeen >= targetDraw) break;
+            if (item.kind === 'draw') {
+                processedItems.push(item);
+                drawsSeen++;
+            } else if (item.kind === 'transform') {
+                const newMatrix = new DOMMatrix(item.matrix);
+                for (const id of item.targetIds) {
+                    const current = transforms.get(id) ?? new DOMMatrix();
+                    transforms.set(id, newMatrix.multiply(current));
+                }
+            } else if (item.kind === 'hide') {
+                for (const id of item.targetIds) hiddenIds.add(id);
+            }
+        }
+    }
+
+    private async _showFinalResult(): Promise<void> {
+        const ctx = this._recCtx!;
+        const W = this.engine.width;
+        const H = this.engine.height;
+        const snap = this._captureFinalResult(W, H);
+
+        const alphaStep = 1 / FADE_STEPS;
+        for (let i = 1; i <= FADE_STEPS; i++) {
+            ctx.save();
+            ctx.globalAlpha = alphaStep * i;
+            ctx.drawImage(snap, 0, 0);
+            ctx.restore();
+            await this._sleep(500 / FADE_STEPS);
+        }
+
+        await this._sleep(1500);
+    }
+
+    // ── Overlay UI ────────────────────────────────────────────────────────
+
+    private _showOverlay(): void {
+        const overlay = document.createElement('div');
+        overlay.id = 'tl-overlay';
+
+        overlay.innerHTML = `
+            <div id="tl-header">
+                <span id="tl-title">Timelapse</span>
+                <button id="tl-close" title="Cerrar y volver al canvas">
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                        <path d="M2 2L16 16M16 2L2 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </button>
+            </div>
+            <div id="tl-canvas-wrap"></div>
+            <div id="tl-controls">
+                <button id="tl-playpause" title="Pause / Play">
+                    <svg id="tl-pause-icon" width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                        <rect x="4" y="3" width="4" height="14" rx="1"/>
+                        <rect x="12" y="3" width="4" height="14" rx="1"/>
+                    </svg>
+                    <svg id="tl-play-icon" width="20" height="20" viewBox="0 0 20 20" fill="currentColor" style="display:none">
+                        <path d="M5 3L17 10L5 17V3Z"/>
+                    </svg>
+                </button>
+                <div id="tl-slider-wrap">
+                    <div id="tl-slider-track">
+                        <div id="tl-slider-fill"></div>
+                        <div id="tl-slider-thumb"></div>
+                    </div>
+                    <div id="tl-time">
+                        <span id="tl-current">0</span>
+                        <span> / </span>
+                        <span id="tl-total">0</span>
+                        <span> trazos</span>
+                    </div>
+                </div>
+                <div id="tl-speed-wrap">
+                    <button class="tl-speed-btn tl-speed-active" data-speed="1">1×</button>
+                    <button class="tl-speed-btn" data-speed="2">2×</button>
+                    <button class="tl-speed-btn" data-speed="4">4×</button>
+                </div>
+            </div>
+        `;
+
+        const style = document.createElement('style');
+        style.id = 'tl-styles';
+        style.textContent = `
+            #tl-overlay {
+                position: fixed;
+                inset: 0;
+                background: #0a0a0a;
+                z-index: 999999;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                padding: 0;
+                user-select: none;
+            }
+            #tl-header {
+                width: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 16px 24px;
+                flex-shrink: 0;
+            }
+            #tl-title {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 14px;
+                font-weight: 500;
+                color: rgba(255,255,255,0.5);
+                letter-spacing: 0.5px;
+                text-transform: uppercase;
+            }
+            #tl-close {
+                width: 36px;
+                height: 36px;
+                border: none;
+                background: rgba(255,255,255,0.07);
+                border-radius: 8px;
+                color: rgba(255,255,255,0.5);
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                transition: background 0.15s, color 0.15s;
+            }
+            #tl-close:hover {
+                background: rgba(255,255,255,0.12);
+                color: #fff;
+            }
+            #tl-canvas-wrap {
+                flex: 1;
+                width: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 0 24px;
+                min-height: 0;
+            }
+            #tl-canvas-wrap canvas {
+                max-width: 100%;
+                max-height: 100%;
+                background: #fff;
+                border-radius: 4px;
+                box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 24px 64px rgba(0,0,0,0.6);
+            }
+            #tl-controls {
+                width: 100%;
+                max-width: 900px;
+                display: flex;
+                align-items: center;
+                gap: 16px;
+                padding: 20px 24px 28px;
+                flex-shrink: 0;
+            }
+            #tl-playpause {
+                width: 40px;
+                height: 40px;
+                border: none;
+                background: rgba(255,255,255,0.1);
+                border-radius: 50%;
+                color: #fff;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                flex-shrink: 0;
+                transition: background 0.15s;
+            }
+            #tl-playpause:hover { background: rgba(255,255,255,0.18); }
+            #tl-slider-wrap {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            #tl-slider-track {
+                position: relative;
+                height: 4px;
+                background: rgba(255,255,255,0.15);
+                border-radius: 2px;
+                cursor: pointer;
+                padding: 10px 0;
+                margin: -10px 0;
+            }
+            #tl-slider-fill {
+                position: absolute;
+                left: 0;
+                top: 10px;
+                height: 4px;
+                width: 0%;
+                background: #fff;
+                border-radius: 2px;
+                pointer-events: none;
+                transition: width 0.08s linear;
+            }
+            #tl-slider-thumb {
+                position: absolute;
+                top: 50%;
+                left: 0%;
+                width: 14px;
+                height: 14px;
+                background: #fff;
+                border-radius: 50%;
+                transform: translate(-50%, -50%);
+                pointer-events: none;
+                transition: left 0.08s linear, transform 0.1s;
+                box-shadow: 0 0 0 3px rgba(255,255,255,0.15);
+            }
+            #tl-slider-track:hover #tl-slider-fill { background: #0066cc; }
+            #tl-slider-track:hover #tl-slider-thumb {
+                background: #0066cc;
+                box-shadow: 0 0 0 4px rgba(0,102,204,0.3);
+                transform: translate(-50%, -50%) scale(1.2);
+            }
+            #tl-time {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 12px;
+                color: rgba(255,255,255,0.35);
+                font-variant-numeric: tabular-nums;
+            }
+            #tl-speed-wrap {
+                display: flex;
+                gap: 4px;
+                flex-shrink: 0;
+            }
+            .tl-speed-btn {
+                padding: 6px 10px;
+                border: 1px solid rgba(255,255,255,0.12);
+                background: transparent;
+                border-radius: 6px;
+                color: rgba(255,255,255,0.4);
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                font-size: 12px;
+                cursor: pointer;
+                transition: all 0.15s;
+            }
+            .tl-speed-btn:hover {
+                background: rgba(255,255,255,0.08);
+                color: rgba(255,255,255,0.7);
+            }
+            .tl-speed-active {
+                background: rgba(255,255,255,0.12) !important;
+                border-color: rgba(255,255,255,0.3) !important;
+                color: #fff !important;
+            }
+        `;
+
+        document.head.appendChild(style);
+        document.body.appendChild(overlay);
+        this._overlay = overlay;
+
+        const totalEl = document.getElementById('tl-total');
+        if (totalEl) totalEl.textContent = String(this._drawCount);
+
+        // Botón cerrar
+        document.getElementById('tl-close')?.addEventListener('click', () => {
+            this._cancelled = true;
+            this._resumeResolve?.();
+        });
+
+        // Botón pause/play
+        document.getElementById('tl-playpause')?.addEventListener('click', () => {
+            this._togglePause();
+        });
+
+        // Velocidad
+        document.querySelectorAll('.tl-speed-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const speed = parseFloat((btn as HTMLElement).dataset.speed || '1');
+                this._speed = speed;
+                document.querySelectorAll('.tl-speed-btn').forEach(b => b.classList.remove('tl-speed-active'));
+                btn.classList.add('tl-speed-active');
+                if (this._paused) this._togglePause();
+            });
+        });
+
+        // Slider — seek real con click y drag
+        this._bindSlider();
+    }
+
+    private _bindSlider(): void {
+        const track = document.getElementById('tl-slider-track');
+        if (!track) return;
+
+        const getTargetDraw = (clientX: number): number => {
+            const rect = track.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+            return Math.round(pct * this._drawCount);
+        };
+
+        const doSeek = (clientX: number) => {
+            const target = getTargetDraw(clientX);
+            this._currentDraw = target;
+            this._seeking = true;
+            // Actualizar slider visualmente de inmediato para feedback instantáneo
+            this._updateSlider();
+            // Si estaba pausado, mantenerlo pausado tras el seek
+            if (!this._paused) {
+                this._paused = true;
+                this._updatePauseIcon();
+            }
+            // Despertar el loop para que procese el seek
+            this._resumeResolve?.();
+        };
+
+        // Click
+        track.addEventListener('click', (e) => {
+            doSeek(e.clientX);
+        });
+
+        // Drag
+        let dragging = false;
+        track.addEventListener('mousedown', (e) => {
+            dragging = true;
+            doSeek(e.clientX);
+            e.preventDefault();
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            doSeek(e.clientX);
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (!dragging) return;
+            dragging = false;
+            // Al soltar el drag, reanudar reproducción
+            if (this._paused) {
+                this._paused = false;
+                this._updatePauseIcon();
+                this._resumeResolve?.();
+            }
+        });
+    }
+
+    private _togglePause(): void {
+        this._paused = !this._paused;
+        this._updatePauseIcon();
+        if (!this._paused) {
+            this._resumeResolve?.();
+        }
+    }
+
+    private _updatePauseIcon(): void {
+        const pauseIcon = document.getElementById('tl-pause-icon');
+        const playIcon = document.getElementById('tl-play-icon');
+        if (this._paused) {
+            if (pauseIcon) pauseIcon.style.display = 'none';
+            if (playIcon) playIcon.style.display = 'block';
+        } else {
+            if (pauseIcon) pauseIcon.style.display = 'block';
+            if (playIcon) playIcon.style.display = 'none';
+        }
+    }
+
+    private _waitIfPaused(): Promise<void> {
+        if (!this._paused) return Promise.resolve();
+        return new Promise((resolve) => {
+            this._resumeResolve = resolve;
+        });
+    }
+
+    private _updateSlider(): void {
+        const pct = this._drawCount > 0
+            ? (this._currentDraw / this._drawCount) * 100
+            : 0;
+
+        const fill = document.getElementById('tl-slider-fill');
+        const thumb = document.getElementById('tl-slider-thumb');
+        const current = document.getElementById('tl-current');
+
+        if (fill) fill.style.width = `${pct}%`;
+        if (thumb) thumb.style.left = `${pct}%`;
+        if (current) current.textContent = String(this._currentDraw);
+    }
+
+    private _hideOverlay(): void {
+        // Limpiar event listeners del drag
+        window.removeEventListener('mousemove', () => { });
+        window.removeEventListener('mouseup', () => { });
+
+        this._overlay?.remove();
+        this._overlay = null;
+        document.getElementById('tl-styles')?.remove();
+        this._recCanvas = null;
+        this._recCtx = null;
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    private _captureFinalResult(W: number, H: number): HTMLCanvasElement {
+        const snap = document.createElement('canvas');
+        snap.width = W;
+        snap.height = H;
+        const ctx = snap.getContext('2d')!;
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, W, H);
+
+        const { layersState, layerRoute } = this.history.getState();
+
+        for (let i = 0; i < 10; i++) {
+            const layerState = layersState.get(i);
+            if (!layerState?.visible) continue;
+            const routedIndex = layerRoute.get(i) ?? i;
+            if (routedIndex !== i) continue;
+            const srcCanvas = this.engine.getLayerCanvas(i);
+            ctx.save();
+            ctx.globalAlpha = layerState.opacity;
+            ctx.drawImage(srcCanvas, 0, 0);
+            ctx.restore();
+        }
+
+        return snap;
+    }
+
+    private async _buildPlaylist(spine: TimelineEvent[]): Promise<{ playlist: PlaylistItem[]; drawCount: number }> {
+        const playlist: PlaylistItem[] = [];
+        let drawCount = 0;
+
+        const drawingSpine = spine.filter(
+            ev => ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL'
+        );
+        const dataMap = await this._preloadAll(drawingSpine);
+
+        let i = 0;
+        while (i < spine.length) {
+            const ev = spine[i];
+
+            if (ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL') {
+                const data = dataMap.get(ev.id);
+                if (data) {
+                    playlist.push({ kind: 'draw', event: { ...ev, data }, data });
+                    drawCount++;
+                }
+                i++;
+
+            } else if (ev.type === 'TRANSFORM' && ev.targetIds && ev.transformMatrix) {
+                let currentMatrix = new DOMMatrix(ev.transformMatrix);
+                const sortedIds = ev.targetIds.slice().sort().join(',');
+
+                let j = i + 1;
+                while (
+                    j < spine.length &&
+                    spine[j].type === 'TRANSFORM' &&
+                    spine[j].targetIds!.slice().sort().join(',') === sortedIds
+                ) {
+                    const nextM = new DOMMatrix(spine[j].transformMatrix);
+                    currentMatrix = nextM.multiply(currentMatrix);
+                    j++;
+                }
+
+                playlist.push({
+                    kind: 'transform',
+                    targetIds: ev.targetIds,
+                    matrix: [currentMatrix.a, currentMatrix.b, currentMatrix.c, currentMatrix.d, currentMatrix.e, currentMatrix.f],
+                });
+                i = j;
+
+            } else if (ev.type === 'HIDE' && ev.targetIds) {
+                playlist.push({ kind: 'hide', targetIds: ev.targetIds });
+                i++;
+
+            } else {
+                i++;
+            }
+        }
+
+        return { playlist, drawCount };
+    }
+
+    private async _preloadAll(events: TimelineEvent[]): Promise<Map<string, ArrayBuffer>> {
+        const dataMap = new Map<string, ArrayBuffer>();
+        const idsNeeded: string[] = [];
+
+        for (const ev of events) {
+            if (ev.data) dataMap.set(ev.id, ev.data);
+            else idsNeeded.push(ev.id);
+        }
+
+        if (idsNeeded.length > 0) {
+            const batch = await this.storage.loadEventDataBatch(idsNeeded);
+            for (const [id, buf] of batch.entries()) dataMap.set(id, buf);
+        }
+
+        return dataMap;
+    }
+
+    private _sleep(ms: number): Promise<void> {
+        return new Promise(r => setTimeout(r, Math.max(0, ms)));
     }
 }
 

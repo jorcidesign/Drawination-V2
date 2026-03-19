@@ -12,41 +12,62 @@ export class CanvasEngine {
     public paintingCanvas: HTMLCanvasElement;
     public paintingContext: CanvasRenderingContext2D;
 
-    constructor(width: number = 700, height: number = 700) {
+    constructor(width: number = 1180, height: number = 1180) {
         this.width = width;
         this.height = height;
 
+        // El container es el "mundo" fijo — su tamaño lo pone el CSS (100vw/100vh).
+        // touch-action: none es CRÍTICO para tableta gráfica — sin esto el browser
+        // intercepta los PointerEvents antes de que lleguen al InputManager,
+        // causando que los trazos se corten al inicio del stroke.
         this.container = document.createElement('div');
         this.container.id = 'drawination-engine';
-        this.container.style.position = 'relative';
-        this.container.style.width = `${this.width}px`;
-        this.container.style.height = `${this.height}px`;
         this.container.style.touchAction = 'none';
         this.container.style.userSelect = 'none';
-        this.container.style.overflow = 'hidden';
 
+        // El transformContainer es el "papel" — su tamaño lo ponemos en px.
+        // El CSS solo aporta apariencia visual (sombra, fondo cuadriculado).
         this.transformContainer = document.createElement('div');
+        this._applyTransformContainerSize();
         this.transformContainer.style.position = 'absolute';
-        this.transformContainer.style.width = '100%';
-        this.transformContainer.style.height = '100%';
         this.transformContainer.style.transformOrigin = '0 0';
         this.container.appendChild(this.transformContainer);
 
-        // Crear las 10 capas físicas
         for (let i = 0; i < this.MAX_LAYERS; i++) {
-            this.addLayer(i);
+            this._addLayer(i);
         }
 
         this.paintingCanvas = document.createElement('canvas');
-        this.setupCanvasDimensions(this.paintingCanvas);
+        this._setupCanvasDimensions(this.paintingCanvas);
         this.paintingCanvas.style.zIndex = '10000';
         this.paintingCanvas.style.pointerEvents = 'none';
         this.paintingContext = this.paintingCanvas.getContext('2d')!;
-
         this.transformContainer.appendChild(this.paintingCanvas);
     }
 
-    private setupCanvasDimensions(canvas: HTMLCanvasElement) {
+    // ── Resize del lienzo ─────────────────────────────────────────────────
+    public resize(newWidth: number, newHeight: number): void {
+        this.width = newWidth;
+        this.height = newHeight;
+
+        this._applyTransformContainerSize();
+
+        for (let i = 0; i < this.MAX_LAYERS; i++) {
+            const layer = this.layers[i];
+            layer.width = newWidth;
+            layer.height = newHeight;
+        }
+
+        this.paintingCanvas.width = newWidth;
+        this.paintingCanvas.height = newHeight;
+    }
+
+    private _applyTransformContainerSize(): void {
+        this.transformContainer.style.width = `${this.width}px`;
+        this.transformContainer.style.height = `${this.height}px`;
+    }
+
+    private _setupCanvasDimensions(canvas: HTMLCanvasElement) {
         canvas.width = this.width;
         canvas.height = this.height;
         canvas.style.position = 'absolute';
@@ -54,13 +75,11 @@ export class CanvasEngine {
         canvas.style.left = '0';
     }
 
-    private addLayer(index: number) {
+    private _addLayer(index: number) {
         const layer = document.createElement('canvas');
         layer.className = `drawination-layer layer-${index}`;
-        this.setupCanvasDimensions(layer);
-
+        this._setupCanvasDimensions(layer);
         layer.style.zIndex = index.toString();
-
         this.layers.push(layer);
         this.transformContainer.appendChild(layer);
     }
@@ -87,17 +106,11 @@ export class CanvasEngine {
 
     public commitPaintingCanvas() {
         const activeContext = this.getActiveLayerContext();
-
-        // === BLINDAJE CONTRA CORRUPCIÓN DE OPACIDAD ===
         activeContext.save();
-        activeContext.globalAlpha = 1.0; // Transfiere el dibujo exactamente como se ve, sin atenuarlo
+        activeContext.globalAlpha = 1.0;
         activeContext.globalCompositeOperation = 'source-over';
-
         activeContext.drawImage(this.paintingCanvas, 0, 0);
-
-        activeContext.restore(); // Quitamos el candado
-        // ==============================================
-
+        activeContext.restore();
         this.clearPaintingCanvas();
     }
 

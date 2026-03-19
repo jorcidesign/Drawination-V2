@@ -7,7 +7,7 @@ export class MenuPanel {
     private eventBus: EventBus;
     private static stylesInjected = false;
 
-    public isVisible = false; // Pública para que el PanelManager la lea
+    public isVisible = false;
 
     constructor(eventBus: EventBus) {
         MenuPanel.injectStyles();
@@ -17,7 +17,27 @@ export class MenuPanel {
         this.element.className = 'panel';
         this.element.id = 'panel-menu';
 
-        // Botón único: Borrar Todo (Rojo)
+        // Botón Nuevo Proyecto
+        const newProjectBtn = new IconButton({
+            icon: 'add',
+            title: 'Nuevo proyecto',
+            onClick: () => {
+                this.close();
+                this.eventBus.emit('SHOW_NEW_PROJECT');
+            }
+        });
+        newProjectBtn.mount(this.element);
+
+        // Separador
+        const sep = document.createElement('div');
+        sep.className = 'sep sep--h';
+        sep.style.width = '70%';
+        sep.style.height = '1px';
+        sep.style.alignSelf = 'center';
+        sep.style.margin = '2px 0';
+        this.element.appendChild(sep);
+
+        // Botón Borrar todo (rojo)
         const clearBtn = new IconButton({
             icon: 'trash',
             title: 'Borrar todo el lienzo',
@@ -25,23 +45,19 @@ export class MenuPanel {
             onClick: () => {
                 if (confirm('¿Seguro que deseas borrar todo el lienzo? Esta acción no se puede deshacer.')) {
                     this.eventBus.emit('CLEAR_ALL');
-                    this.close(); // Cerramos el panel tras limpiar
+                    this.close();
                 }
             }
         });
-
         clearBtn.mount(this.element);
+
         this.bindEvents();
     }
 
     private bindEvents() {
-        // Escucha el evento que emite la hamburguesa en el TopLeftBar
         this.eventBus.on('TOGGLE_MENU_PANEL', () => {
-            if (this.isVisible) {
-                this.close();
-            } else {
-                this.open();
-            }
+            if (this.isVisible) this.close();
+            else this.open();
         });
     }
 
@@ -65,18 +81,18 @@ export class MenuPanel {
 
         const style = document.createElement('style');
         style.textContent = `
-      #panel-menu {
-        /* Encaje de rompecabezas */
-        top: 64px; /* Justo debajo de la TopLeftBar */
-        left: 12px; /* Alineado a la izquierda como la BrushToolbar */
-        width: 48px; /* 36px del botón + 6px + 6px de padding */
-        padding: 6px;
-        
-        z-index: var(--z-panel);
-        align-items: center; /* Centra el botón rojo internamente */
-        border-radius: var(--bar-radius); /* Mismo radio curvo que las barras */
-      }
-    `;
+            #panel-menu {
+                top: 64px;
+                left: 12px;
+                width: 48px;
+                padding: 6px;
+                z-index: var(--z-panel);
+                align-items: center;
+                border-radius: var(--bar-radius);
+                flex-direction: column;
+                gap: 2px;
+            }
+        `;
         document.head.appendChild(style);
     }
 }

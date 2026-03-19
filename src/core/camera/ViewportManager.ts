@@ -4,7 +4,7 @@ export class ViewportManager {
     public y: number = 0;
     public zoom: number = 1;
     public angle: number = 0;
-    public scaleX: number = 1; // <--- NUEVO: Control del Espejo (-1 o 1)
+    public scaleX: number = 1;
 
     private container: HTMLElement;
 
@@ -22,13 +22,10 @@ export class ViewportManager {
         this.applyTransform();
     }
 
-    // === MATRIZ ACTUALIZADA (Soporta Escala Negativa) ===
     public screenToCanvas(screenX: number, screenY: number) {
-        // 1. Quitamos traslación y escala (Considerando si está espejado)
         const sx = (screenX - this.x) / (this.zoom * this.scaleX);
         const sy = (screenY - this.y) / this.zoom;
 
-        // 2. Rotación inversa
         const rad = this.angle * Math.PI / 180;
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
@@ -75,15 +72,11 @@ export class ViewportManager {
         this.applyTransform();
     }
 
-    // === NUEVA FUNCIÓN: ESPEJO ===
     public flipHorizontal(pivotScreenX: number, pivotScreenY: number) {
-        // 1. Dónde está mirando el usuario ahora
         const canvasPt = this.screenToCanvas(pivotScreenX, pivotScreenY);
 
-        // 2. Volteamos
         this.scaleX *= -1;
 
-        // 3. Compensamos X e Y para que la pantalla no salga volando y pivotee en el centro
         const rad = this.angle * Math.PI / 180;
         const rx = canvasPt.x * Math.cos(rad) - canvasPt.y * Math.sin(rad);
         const ry = canvasPt.x * Math.sin(rad) + canvasPt.y * Math.cos(rad);
@@ -94,8 +87,23 @@ export class ViewportManager {
         this.applyTransform();
     }
 
-    private applyTransform() {
-        // CSS requiere escala X y escala Y separadas
+    // ── Reset completo del viewport ───────────────────────────────────────
+    // Centra el canvas de las dimensiones dadas en el contenedor de pantalla.
+    // Llama applyTransform() internamente — no se puede olvidar.
+    public reset(canvasWidth: number, canvasHeight: number): void {
+        const containerW = this.container.parentElement?.clientWidth ?? window.innerWidth;
+        const containerH = this.container.parentElement?.clientHeight ?? window.innerHeight;
+
+        this.zoom = 1;
+        this.angle = 0;
+        this.scaleX = 1;
+        this.x = Math.round((containerW - canvasWidth) / 2);
+        this.y = Math.round((containerH - canvasHeight) / 2);
+
+        this.applyTransform();
+    }
+
+    public applyTransform() {
         this.container.style.transform = `translate3d(${this.x}px, ${this.y}px, 0) scale(${this.zoom * this.scaleX}, ${this.zoom}) rotate(${this.angle}deg)`;
     }
 }
