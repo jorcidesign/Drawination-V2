@@ -1,17 +1,6 @@
 // src/core/camera/ViewportManager.ts
-//
-// RESIZE REACTIVO:
-//   Cuando la ventana cambia de tamaño, el comportamiento depende
-//   de si el usuario ha navegado manualmente o no:
-//
-//   - Sin navegación manual (posición neutral):
-//     Re-centra y recalcula zoom automáticamente con reset().
-//
-//   - Con navegación manual (el usuario movió/rotó/zoomeó):
-//     Ancla el punto del canvas que estaba en el centro de la
-//     pantalla anterior — ese mismo punto queda en el centro
-//     del nuevo espacio disponible. El canvas no salta.
-//     Mismo comportamiento que Google Maps, Figma, Miro.
+
+import type { EventBus } from '../../input/EventBus';
 
 export class ViewportManager {
     public x: number = 0;
@@ -21,41 +10,36 @@ export class ViewportManager {
     public scaleX: number = 1;
 
     private container: HTMLElement;
+    private eventBus: EventBus | null = null;
 
     private readonly MIN_ZOOM = 0.1;
     private readonly MAX_ZOOM = 30.0;
 
-    // Offsets de las barras de UI
     private readonly UI_TOP = 56;
     private readonly UI_LEFT = 60;
     private readonly UI_RIGHT = 0;
     private readonly UI_BOTTOM = 48;
     private readonly PADDING = 32;
 
-    // Flag: el usuario navegó manualmente al menos una vez
     private _userHasNavigated = false;
-
-    // Dimensiones del canvas actual — necesarias para el ancla de resize
     private _canvasWidth = 1180;
     private _canvasHeight = 1180;
-
-    // Handler del resize guardado para poder eliminarlo si fuera necesario
     private _resizeHandler: () => void;
 
     constructor(container: HTMLElement) {
         this.container = container;
         this.applyTransform();
 
-        // Debounce del resize — 60ms es suficiente para que el browser
-        // termine de actualizar window.innerWidth/Height sin disparar
-        // demasiados recálculos durante el arrastre del borde de ventana
         let resizeTimer: ReturnType<typeof setTimeout>;
         this._resizeHandler = () => {
             clearTimeout(resizeTimer);
             resizeTimer = setTimeout(() => this._onWindowResize(), 60);
         };
-
         window.addEventListener('resize', this._resizeHandler);
+    }
+
+    public setEventBus(bus: EventBus): void {
+        this.eventBus = bus;
     }
 
     // ── Navegación manual ─────────────────────────────────────────────────
@@ -65,26 +49,24 @@ export class ViewportManager {
         this.y += dy;
         this._userHasNavigated = true;
         this.applyTransform();
+        this._emitChanged();
     }
 
     public screenToCanvas(screenX: number, screenY: number) {
         const sx = (screenX - this.x) / (this.zoom * this.scaleX);
         const sy = (screenY - this.y) / this.zoom;
-
         const rad = this.angle * Math.PI / 180;
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
-
         return {
             x: sx * cos + sy * sin,
-            y: -sx * sin + sy * cos
+            y: -sx * sin + sy * cos,
         };
     }
 
     public zoomBy(scaleFactor: number, screenX: number, screenY: number) {
         const oldZoom = this.zoom;
         let newZoom = this.zoom * scaleFactor;
-
         newZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, newZoom));
         if (newZoom === oldZoom) return;
 
@@ -100,6 +82,20 @@ export class ViewportManager {
 
         this._userHasNavigated = true;
         this.applyTransform();
+        this._emitChanged();
+    }
+
+    // Zoom absoluto con centrado — usado por el menú de zoom de la UI.
+    // Setea el zoom deseado y luego calcula x/y para centrar en ese zoom.
+    // _centerXY() NUNCA toca this.zoom — esa es la regla fija.
+    public setZoom(targetZoom: number): void {
+        this.zoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM, targetZoom));
+        this.angle = 0;
+        this.scaleX = 1;
+        this._userHasNavigated = false;
+        this._centerXY(this._canvasWidth, this._canvasHeight);
+        this.applyTransform();
+        this._emitChanged();
     }
 
     public setAngle(newAngle: number, pivotScreenX: number, pivotScreenY: number) {
@@ -117,6 +113,14 @@ export class ViewportManager {
 
         this._userHasNavigated = true;
         this.applyTransform();
+        this._emitChanged();
+    }
+
+    // Ángulo absoluto con pivote en centro de pantalla — usado por el menú de rotación.
+    public setAngleAbsolute(degrees: number): void {
+        const pivotX = window.innerWidth / 2;
+        const pivotY = window.innerHeight / 2;
+        this.setAngle(degrees, pivotX, pivotY);
     }
 
     public flipHorizontal(pivotScreenX: number, pivotScreenY: number) {
@@ -133,45 +137,42 @@ export class ViewportManager {
 
         this._userHasNavigated = true;
         this.applyTransform();
+        this._emitChanged();
     }
 
-    // ── Reset y centrado inteligente ──────────────────────────────────────
-    // Centra el canvas en el espacio disponible, hace zoom-out si no cabe.
-    // Resetea el flag de navegación — la próxima vez que el usuario
-    // mueva algo volverá a ser "navegado".
+    // ── Reset completo (nuevo proyecto / arranque) ────────────────────────
+    // Calcula el zoom fit y centra. Resetea el flag de navegación.
     public reset(canvasWidth: number, canvasHeight: number): void {
         this._canvasWidth = canvasWidth;
         this._canvasHeight = canvasHeight;
         this._userHasNavigated = false;
+        this.angle = 0;
+        this.scaleX = 1;
 
-        this._centerCanvas(canvasWidth, canvasHeight);
+        // Calcular zoom fit aquí — reset sí calcula zoom, setZoom no
+        const availW = window.innerWidth - this.UI_LEFT - this.UI_RIGHT - this.PADDING * 2;
+        const availH = window.innerHeight - this.UI_TOP - this.UI_BOTTOM - this.PADDING * 2;
+        this.zoom = Math.min(1, availW / canvasWidth, availH / canvasHeight);
+
+        this._centerXY(canvasWidth, canvasHeight);
+        this.applyTransform();
+        this._emitChanged();
     }
 
-    // ── Handler interno de resize ─────────────────────────────────────────
+    // ── Resize reactivo ───────────────────────────────────────────────────
     private _onWindowResize(): void {
         if (!this._userHasNavigated) {
-            // Posición neutral — re-centrar con las dimensiones actuales
-            this._centerCanvas(this._canvasWidth, this._canvasHeight);
+            // Posición neutral — recalcular zoom fit y re-centrar
+            this.reset(this._canvasWidth, this._canvasHeight);
             return;
         }
 
-        // Posición de trabajo — anclar el punto del canvas que estaba
-        // en el centro de la pantalla antes del resize.
-        //
-        // El punto central de pantalla es simplemente (innerW/2, innerH/2).
-        // Como el resize ya ocurrió cuando llegamos aquí, usamos las
-        // dimensiones nuevas directamente — el punto canvas que calcula
-        // screenToCanvas() es invariante al tamaño de ventana porque
-        // solo depende de this.x/y/zoom/angle que NO cambiaron todavía.
+        // Posición de trabajo — anclar el punto central visible
         const newCenterX = window.innerWidth / 2;
         const newCenterY = window.innerHeight / 2;
 
-        // Punto del canvas que antes estaba en el centro de la pantalla
-        // (calculado con las matrices actuales, que aún no cambiaron)
         const anchorCanvas = this.screenToCanvas(newCenterX, newCenterY);
 
-        // Ahora re-posicionamos para que ese mismo punto quede
-        // en el centro del nuevo espacio de pantalla
         const rad = this.angle * Math.PI / 180;
         const rx = anchorCanvas.x * Math.cos(rad) - anchorCanvas.y * Math.sin(rad);
         const ry = anchorCanvas.x * Math.sin(rad) + anchorCanvas.y * Math.cos(rad);
@@ -180,31 +181,26 @@ export class ViewportManager {
         this.y = Math.round(newCenterY - ry * this.zoom);
 
         this.applyTransform();
+        this._emitChanged();
     }
 
-    // ── Cálculo de centrado ───────────────────────────────────────────────
-    private _centerCanvas(canvasWidth: number, canvasHeight: number): void {
-        const screenW = window.innerWidth;
-        const screenH = window.innerHeight;
-
-        const availW = screenW - this.UI_LEFT - this.UI_RIGHT - this.PADDING * 2;
-        const availH = screenH - this.UI_TOP - this.UI_BOTTOM - this.PADDING * 2;
-
-        const zoomFitW = availW / canvasWidth;
-        const zoomFitH = availH / canvasHeight;
-        const zoomFit = Math.min(zoomFitW, zoomFitH);
-
-        this.zoom = Math.min(1, zoomFit);
-        this.angle = 0;
-        this.scaleX = 1;
-
+    // ── Centrar x/y dado el zoom actual ──────────────────────────────────
+    // CONTRATO: nunca modifica this.zoom. Solo calcula x/y.
+    private _centerXY(canvasWidth: number, canvasHeight: number): void {
+        const availW = window.innerWidth - this.UI_LEFT - this.UI_RIGHT - this.PADDING * 2;
+        const availH = window.innerHeight - this.UI_TOP - this.UI_BOTTOM - this.PADDING * 2;
         const centerX = this.UI_LEFT + this.PADDING + availW / 2;
         const centerY = this.UI_TOP + this.PADDING + availH / 2;
 
         this.x = Math.round(centerX - (canvasWidth * this.zoom) / 2);
         this.y = Math.round(centerY - (canvasHeight * this.zoom) / 2);
+    }
 
-        this.applyTransform();
+    private _emitChanged(): void {
+        this.eventBus?.emit('VIEWPORT_CHANGED', {
+            zoom: this.zoom,
+            angle: this.angle,
+        });
     }
 
     public applyTransform() {
@@ -214,7 +210,6 @@ export class ViewportManager {
             `rotate(${this.angle}deg)`;
     }
 
-    // Limpiar el listener si el viewport se destruye
     public destroy(): void {
         window.removeEventListener('resize', this._resizeHandler);
     }

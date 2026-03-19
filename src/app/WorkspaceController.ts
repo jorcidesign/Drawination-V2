@@ -105,6 +105,10 @@ export class WorkspaceController {
 
     private bindBusEvents(): void {
 
+        // ── Undo / Redo desde la UI (botones BottomLeftBar) ───────────────
+        this.eventBus.on('REQUEST_UNDO', () => this.undoRedoController.applyUndo());
+        this.eventBus.on('REQUEST_REDO', () => this.undoRedoController.applyRedo());
+
         // ── Timelapse viewer ──────────────────────────────────────────────
         this.eventBus.on('PLAY_TIMELAPSE', async () => {
             if (this.timelapseViewer.isPlaying()) return;
@@ -124,10 +128,8 @@ export class WorkspaceController {
         });
 
         this.eventBus.on('NEW_PROJECT', async ({ width, height }) => {
-            // 1. Interrumpir herramientas activas
             this.eventBus.emit('GLOBAL_INTERRUPTION');
 
-            // 2. Limpiar historia, selección y canvas
             this.history.timeline = [];
             this.history.rebuildSpatialGrid();
             this.history['invalidateCache']?.();
@@ -135,33 +137,50 @@ export class WorkspaceController {
             this.engine.clearAllLayers();
             this.engine.clearPaintingCanvas();
 
-            // 3. Limpiar IDB y checkpoint
             await this.storage.clearAll?.();
             await this.checkpoint?.invalidate();
 
-            // 4. Aplicar nuevas dimensiones al engine (resize DOM + canvas elements)
             this.engine.resize(width, height);
 
-            // 5. Actualizar el contenedor visual del workspace (#canvas-area).
-            //    Este div envuelve al engine y define el tamaño del "papel"
-            //    visible (fondo blanco, sombra, etc.). Sin esto el wrapper
-            //    sigue siendo 1180×1180 aunque el canvas interno ya cambió.
             const canvasArea = document.getElementById('canvas-area');
             if (canvasArea) {
                 canvasArea.style.width = `${width}px`;
                 canvasArea.style.height = `${height}px`;
             }
 
-            // 6. Guardar en localStorage para próxima sesión
             this.saveCanvasSize(width, height);
-
-            // 7. Resetear viewport — centra el nuevo canvas en pantalla
-            //    viewport.reset() calcula x/y correctos y llama applyTransform()
-            //    internamente. Sin esto la transformación CSS no se actualiza
-            //    y el InputManager recibe coordenadas desfasadas.
             this.viewport.reset(width, height);
 
             console.info(`[WorkspaceController] ✅ Nuevo proyecto: ${width}×${height}`);
+        });
+
+        // ── Viewport — zoom desde menú UI ─────────────────────────────────
+        this.eventBus.on('VIEWPORT_ZOOM_SET', (targetZoom: number) => {
+            this.viewport.setZoom(targetZoom);
+        });
+
+        // ── Viewport — ángulo desde menú UI ───────────────────────────────
+        this.eventBus.on('VIEWPORT_ANGLE_SET', (degrees: number) => {
+            this.viewport.setAngleAbsolute(degrees);
+        });
+
+        // ── Viewport — reset zoom (botón 100% o "Ajustar pantalla") ───────
+        this.eventBus.on('RESET_ZOOM', () => {
+            this.viewport.reset(this.engine.width, this.engine.height);
+        });
+
+        // ── Viewport — reset rotación ─────────────────────────────────────
+        this.eventBus.on('RESET_ROTATION', () => {
+            const pivotX = window.innerWidth / 2;
+            const pivotY = window.innerHeight / 2;
+            this.viewport.setAngle(0, pivotX, pivotY);
+        });
+
+        // ── Viewport — flip horizontal ────────────────────────────────────
+        this.eventBus.on('FLIP_HORIZONTAL', () => {
+            const pivotX = window.innerWidth / 2;
+            const pivotY = window.innerHeight / 2;
+            this.viewport.flipHorizontal(pivotX, pivotY);
         });
 
         // ── Exportación ───────────────────────────────────────────────────
@@ -187,7 +206,6 @@ export class WorkspaceController {
             this.rebuilder.debugDrawPoints(this.activeBrush);
         });
 
-        // ── CLEAR_ALL (borrar todo sin cambiar formato) ───────────────────
         this.eventBus.on('CLEAR_ALL', async () => {
             this.eventBus.emit('GLOBAL_INTERRUPTION');
             this.history.timeline = [];
@@ -200,17 +218,9 @@ export class WorkspaceController {
             await this.checkpoint?.invalidate();
         });
 
-        this.eventBus.on('UPDATE_BRUSH_SIZE', (size) => {
-            this.activeBrush.updateCurrentSize(size);
-        });
-
-        this.eventBus.on('UPDATE_BRUSH_OPACITY', (opacity) => {
-            this.activeBrush.updateCurrentOpacity(opacity);
-        });
-
-        this.eventBus.on('SET_COLOR', (color) => {
-            this.activeBrush.setColor(color);
-        });
+        this.eventBus.on('UPDATE_BRUSH_SIZE', (size) => this.activeBrush.updateCurrentSize(size));
+        this.eventBus.on('UPDATE_BRUSH_OPACITY', (opacity) => this.activeBrush.updateCurrentOpacity(opacity));
+        this.eventBus.on('SET_COLOR', (color) => this.activeBrush.setColor(color));
 
         const applyAndSync = (profileObj: any) => {
             this.activeBrush.useProfile(profileObj);
@@ -219,7 +229,7 @@ export class WorkspaceController {
                 size: this.activeBrush.profile.baseSize,
                 opacity: this.activeBrush.profile.baseOpacity,
                 minSize: this.activeBrush.profile.minSize || 1,
-                maxSize: this.activeBrush.profile.maxSize || 100
+                maxSize: this.activeBrush.profile.maxSize || 100,
             });
         };
 
@@ -230,17 +240,5 @@ export class WorkspaceController {
         this.eventBus.on('SET_PROFILE_HARD_ROUND', () => applyAndSync(HardRoundProfile));
         this.eventBus.on('SET_PROFILE_AIRBRUSH', () => applyAndSync(AirbrushProfile));
         this.eventBus.on('SET_PROFILE_CHARCOAL', () => applyAndSync(CharcoalProfile));
-
-        this.eventBus.on('RESET_ROTATION', () => {
-            const w = this.engine.container.clientWidth;
-            const h = this.engine.container.clientHeight;
-            this.viewport.setAngle(0, w / 2, h / 2);
-        });
-
-        this.eventBus.on('FLIP_HORIZONTAL', () => {
-            const w = this.engine.container.clientWidth;
-            const h = this.engine.container.clientHeight;
-            this.viewport.flipHorizontal(w / 2, h / 2);
-        });
     }
 }

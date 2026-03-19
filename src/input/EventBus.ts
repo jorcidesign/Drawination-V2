@@ -12,10 +12,7 @@ export interface AppEventMap {
     'GLOBAL_INTERRUPTION': void;
     'SYNC_LAYERS_CSS': void;
 
-    // SET_COLOR — mueve el cuadradito 7 y actualiza el motor. No garantiza historial.
     'SET_COLOR': string;
-
-    // APPLY_COLOR — el usuario eligió explícitamente. Siempre va al historial.
     'APPLY_COLOR': string;
 
     'UPDATE_BRUSH_SIZE': number;
@@ -50,10 +47,7 @@ export interface AppEventMap {
     'TOGGLE_LAYER_PANEL': void;
     'TOGGLE_MENU_PANEL': void;
 
-    // Abre el modal de nuevo proyecto
     'SHOW_NEW_PROJECT': void;
-
-    // Nuevo proyecto — limpia todo y aplica el formato elegido
     'NEW_PROJECT': { width: number; height: number };
 
     'LAYER_SELECT': number;
@@ -70,8 +64,15 @@ export interface AppEventMap {
 
     'REQUEST_UNDO': void;
     'REQUEST_REDO': void;
-    'RESET_ZOOM': void;
+
+    // Viewport — estado actual (emitido por ViewportManager en cada cambio)
     'VIEWPORT_CHANGED': { zoom: number; angle: number };
+
+    // Viewport — comandos desde la UI (BottomLeftBar)
+    'VIEWPORT_ZOOM_SET': number;   // zoom absoluto, centra el canvas
+    'VIEWPORT_ANGLE_SET': number;  // ángulo absoluto en grados, sin centrar
+
+    'RESET_ZOOM': void;
 }
 
 export class EventBus {
@@ -94,4 +95,3 @@ export class EventBus {
         if (callbacks) [...callbacks].forEach(cb => cb(payload));
     }
 }
-// SHOW_NEW_PROJECT ya incluido arriba

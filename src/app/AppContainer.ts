@@ -79,11 +79,11 @@ export class AppContainer {
 
         this.viewport = new ViewportManager(this.engine.transformContainer);
 
-        // Centrar el canvas correctamente al arrancar.
-        // Se llama aquí en el constructor para que el primer frame
-        // ya tenga la posición correcta, sin esperar a start().
-        // Usamos requestAnimationFrame para asegurarnos de que el DOM
-        // ya tiene dimensiones reales (window.innerWidth/Height correctos).
+        // Conectar EventBus al viewport para que pueda emitir VIEWPORT_CHANGED
+        this.viewport.setEventBus(this.eventBus);
+
+        // Centrar al arrancar — rAF garantiza que window.innerWidth/Height
+        // tienen valores reales del DOM en este punto
         requestAnimationFrame(() => {
             this.viewport.reset(width, height);
         });
