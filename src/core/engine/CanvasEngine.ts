@@ -1,4 +1,6 @@
 // src/core/engine/CanvasEngine.ts
+export const DEFAULT_BACKGROUND_COLOR = '#ffffff';
+
 export class CanvasEngine {
     public container: HTMLDivElement;
     public transformContainer: HTMLDivElement;
@@ -16,26 +18,19 @@ export class CanvasEngine {
         this.width = width;
         this.height = height;
 
-        // El container es el "mundo" fijo — su tamaño lo pone el CSS (100vw/100vh).
-        // touch-action: none es CRÍTICO para tableta gráfica — sin esto el browser
-        // intercepta los PointerEvents antes de que lleguen al InputManager,
-        // causando que los trazos se corten al inicio del stroke.
         this.container = document.createElement('div');
         this.container.id = 'drawination-engine';
         this.container.style.touchAction = 'none';
         this.container.style.userSelect = 'none';
 
-        // El transformContainer es el "papel" — su tamaño lo ponemos en px.
-        // El CSS solo aporta apariencia visual (sombra, fondo cuadriculado).
         this.transformContainer = document.createElement('div');
-        this._applyTransformContainerSize();
         this.transformContainer.style.position = 'absolute';
         this.transformContainer.style.transformOrigin = '0 0';
+        this.transformContainer.style.backgroundColor = DEFAULT_BACKGROUND_COLOR;
+        this._applyTransformContainerSize();
         this.container.appendChild(this.transformContainer);
 
-        for (let i = 0; i < this.MAX_LAYERS; i++) {
-            this._addLayer(i);
-        }
+        for (let i = 0; i < this.MAX_LAYERS; i++) this._addLayer(i);
 
         this.paintingCanvas = document.createElement('canvas');
         this._setupCanvasDimensions(this.paintingCanvas);
@@ -45,19 +40,14 @@ export class CanvasEngine {
         this.transformContainer.appendChild(this.paintingCanvas);
     }
 
-    // ── Resize del lienzo ─────────────────────────────────────────────────
     public resize(newWidth: number, newHeight: number): void {
         this.width = newWidth;
         this.height = newHeight;
-
         this._applyTransformContainerSize();
-
         for (let i = 0; i < this.MAX_LAYERS; i++) {
-            const layer = this.layers[i];
-            layer.width = newWidth;
-            layer.height = newHeight;
+            this.layers[i].width = newWidth;
+            this.layers[i].height = newHeight;
         }
-
         this.paintingCanvas.width = newWidth;
         this.paintingCanvas.height = newHeight;
     }
@@ -85,13 +75,11 @@ export class CanvasEngine {
     }
 
     public getLayerContext(index: number): CanvasRenderingContext2D {
-        const safeIndex = Math.max(0, Math.min(this.MAX_LAYERS - 1, index));
-        return this.layers[safeIndex].getContext('2d')!;
+        return this.layers[Math.max(0, Math.min(this.MAX_LAYERS - 1, index))].getContext('2d')!;
     }
 
     public getLayerCanvas(index: number): HTMLCanvasElement {
-        const safeIndex = Math.max(0, Math.min(this.MAX_LAYERS - 1, index));
-        return this.layers[safeIndex];
+        return this.layers[Math.max(0, Math.min(this.MAX_LAYERS - 1, index))];
     }
 
     public getActiveLayerContext(): CanvasRenderingContext2D {
@@ -119,7 +107,6 @@ export class CanvasEngine {
     }
 
     public clearActiveLayer() {
-        const activeContext = this.getActiveLayerContext();
-        activeContext.clearRect(0, 0, this.width, this.height);
+        this.getActiveLayerContext().clearRect(0, 0, this.width, this.height);
     }
 }

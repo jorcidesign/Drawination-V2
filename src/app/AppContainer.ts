@@ -18,11 +18,13 @@ import { UndoRedoController } from '../history/UndoRedoController';
 import { WorkspaceController } from './WorkspaceController';
 import { LayerManager } from '../core/engine/LayerManager';
 import { NewProjectModal, CANVAS_PRESETS } from '../ui/panels/NewProjectModal';
-import { UIRoot } from '../ui/UIRoot';
 import '../ui/tokens/design-tokens.css';
 import '../ui/tokens/base.css';
 
 const CANVAS_SIZE_KEY = 'drawination_canvas_size';
+
+// Exportado para que el entry point pueda pasárselo a BrushToolbar.activateDefault()
+export const INITIAL_BRUSH_COLOR = '#2280cf';
 
 function getSavedCanvasSize(): { width: number; height: number } {
     try {
@@ -78,19 +80,15 @@ export class AppContainer {
         this.checkpoint = new CheckpointManager();
 
         this.viewport = new ViewportManager(this.engine.transformContainer);
-
-        // Conectar EventBus al viewport para que pueda emitir VIEWPORT_CHANGED
         this.viewport.setEventBus(this.eventBus);
 
-        // Centrar al arrancar — rAF garantiza que window.innerWidth/Height
-        // tienen valores reales del DOM en este punto
         requestAnimationFrame(() => {
             this.viewport.reset(width, height);
         });
 
         this.input = new InputManager(this.engine.container);
         this.activeBrush = new BrushEngine(PencilProfile);
-        this.activeBrush.color = '#2980b9';
+        this.activeBrush.color = INITIAL_BRUSH_COLOR;
 
         const workerUrl = new URL('../workers/CompressionWorker.ts', import.meta.url);
         const worker = new Worker(workerUrl, { type: 'module' });
@@ -171,6 +169,17 @@ export class AppContainer {
             this.newProjectModal,
             saveCanvasSize,
         );
+    }
+
+    // Llamar desde el entry point DESPUÉS de montar la UI
+    // para sincronizar la BrushToolbar con el estado inicial
+    public initUI(brushToolbar: { activateDefault: (toolId: string, color: string) => void }): void {
+        brushToolbar.activateDefault('pencil-hb', INITIAL_BRUSH_COLOR);
+
+        // Sincronizar cuadradito 7 y ColorPanel con el color inicial
+        requestAnimationFrame(() => {
+            this.eventBus.emit('SET_COLOR', INITIAL_BRUSH_COLOR);
+        });
     }
 
     public async start() {

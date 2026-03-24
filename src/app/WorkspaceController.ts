@@ -24,6 +24,7 @@ import { HardRoundProfile } from '../core/render/profiles/HardRoundProfile';
 import { AirbrushProfile } from '../core/render/profiles/AirbrushProfile';
 import { CharcoalProfile } from '../core/render/profiles/CharcoalProfile';
 import { ExportManager } from '../export/ExportManager';
+import { DEFAULT_BACKGROUND_COLOR } from '../history/computeTimelineState';
 
 export class WorkspaceController {
     private engine: CanvasEngine;
@@ -105,11 +106,40 @@ export class WorkspaceController {
 
     private bindBusEvents(): void {
 
-        // ── Undo / Redo desde la UI (botones BottomLeftBar) ───────────────
         this.eventBus.on('REQUEST_UNDO', () => this.undoRedoController.applyUndo());
         this.eventBus.on('REQUEST_REDO', () => this.undoRedoController.applyRedo());
 
-        // ── Timelapse viewer ──────────────────────────────────────────────
+        // ── Color de fondo ────────────────────────────────────────────────
+
+        // Preview visual mientras arrastra el slider — solo CSS, sin timeline
+        this.eventBus.on('BACKGROUND_COLOR_PREVIEW', (color: string) => {
+            this._applyBackgroundColor(color);
+        });
+
+        // Elección final del usuario — aplicar CSS y persistir en el timeline
+        this.eventBus.on('BACKGROUND_COLOR_CHANGED', async (color: string) => {
+            this._applyBackgroundColor(color);
+
+            const event = this.history.commitLayerAction('BACKGROUND_COLOR', 0, {
+                backgroundColor: color,
+            });
+            await this.storage.saveEvent(event);
+            event.isSaved = true;
+        });
+
+        // Al restaurar historia (undo/redo) re-aplicar el color del estado actual
+        this.eventBus.on('HISTORY_RESTORED', () => {
+            const { backgroundColor } = this.history.getState();
+            this._applyBackgroundColor(backgroundColor);
+        });
+
+        // Al arrancar con proyecto existente
+        this.eventBus.on('SYNC_LAYERS_CSS', () => {
+            const { backgroundColor } = this.history.getState();
+            this._applyBackgroundColor(backgroundColor);
+        });
+
+        // ── Timelapse ─────────────────────────────────────────────────────
         this.eventBus.on('PLAY_TIMELAPSE', async () => {
             if (this.timelapseViewer.isPlaying()) return;
             this.eventBus.emit('GLOBAL_INTERRUPTION');
@@ -123,83 +153,49 @@ export class WorkspaceController {
         });
 
         // ── Nuevo proyecto ────────────────────────────────────────────────
-        this.eventBus.on('SHOW_NEW_PROJECT', () => {
-            this.newProjectModal.show();
-        });
+        this.eventBus.on('SHOW_NEW_PROJECT', () => this.newProjectModal.show());
 
         this.eventBus.on('NEW_PROJECT', async ({ width, height }) => {
             this.eventBus.emit('GLOBAL_INTERRUPTION');
-
             this.history.timeline = [];
             this.history.rebuildSpatialGrid();
             this.history['invalidateCache']?.();
             this.selection.clear();
             this.engine.clearAllLayers();
             this.engine.clearPaintingCanvas();
-
             await this.storage.clearAll?.();
             await this.checkpoint?.invalidate();
-
             this.engine.resize(width, height);
-
             const canvasArea = document.getElementById('canvas-area');
             if (canvasArea) {
                 canvasArea.style.width = `${width}px`;
                 canvasArea.style.height = `${height}px`;
             }
-
             this.saveCanvasSize(width, height);
             this.viewport.reset(width, height);
-
+            this._applyBackgroundColor(DEFAULT_BACKGROUND_COLOR);
             console.info(`[WorkspaceController] ✅ Nuevo proyecto: ${width}×${height}`);
         });
 
-        // ── Viewport — zoom desde menú UI ─────────────────────────────────
-        this.eventBus.on('VIEWPORT_ZOOM_SET', (targetZoom: number) => {
-            this.viewport.setZoom(targetZoom);
-        });
-
-        // ── Viewport — ángulo desde menú UI ───────────────────────────────
-        this.eventBus.on('VIEWPORT_ANGLE_SET', (degrees: number) => {
-            this.viewport.setAngleAbsolute(degrees);
-        });
-
-        // ── Viewport — reset zoom (botón 100% o "Ajustar pantalla") ───────
-        this.eventBus.on('RESET_ZOOM', () => {
-            this.viewport.reset(this.engine.width, this.engine.height);
-        });
-
-        // ── Viewport — reset rotación ─────────────────────────────────────
+        // ── Viewport ──────────────────────────────────────────────────────
+        this.eventBus.on('VIEWPORT_ZOOM_SET', (zoom) => this.viewport.setZoom(zoom));
+        this.eventBus.on('VIEWPORT_ANGLE_SET', (degrees) => this.viewport.setAngleAbsolute(degrees));
+        this.eventBus.on('RESET_ZOOM', () => this.viewport.reset(this.engine.width, this.engine.height));
         this.eventBus.on('RESET_ROTATION', () => {
-            const pivotX = window.innerWidth / 2;
-            const pivotY = window.innerHeight / 2;
-            this.viewport.setAngle(0, pivotX, pivotY);
+            this.viewport.setAngle(0, window.innerWidth / 2, window.innerHeight / 2);
         });
-
-        // ── Viewport — flip horizontal ────────────────────────────────────
         this.eventBus.on('FLIP_HORIZONTAL', () => {
-            const pivotX = window.innerWidth / 2;
-            const pivotY = window.innerHeight / 2;
-            this.viewport.flipHorizontal(pivotX, pivotY);
+            this.viewport.flipHorizontal(window.innerWidth / 2, window.innerHeight / 2);
         });
 
         // ── Exportación ───────────────────────────────────────────────────
         this.eventBus.on('DOWNLOAD_PNG', async () => {
-            try {
-                await this.exportManager.exportPNG();
-            } catch (e) {
-                console.error('[ExportManager] Error exportando PNG:', e);
-                alert('Error al exportar la imagen. Intenta de nuevo.');
-            }
+            try { await this.exportManager.exportPNG(); }
+            catch { alert('Error al exportar la imagen. Intenta de nuevo.'); }
         });
-
         this.eventBus.on('DOWNLOAD_VIDEO', async () => {
-            try {
-                await this.exportManager.exportVideo();
-            } catch (e) {
-                console.error('[ExportManager] Error exportando video:', e);
-                alert('Error al exportar el video. Intenta de nuevo.');
-            }
+            try { await this.exportManager.exportVideo(); }
+            catch { alert('Error al exportar el video. Intenta de nuevo.'); }
         });
 
         this.eventBus.on('DEBUG_DRAW_POINTS', () => {
@@ -216,6 +212,7 @@ export class WorkspaceController {
             this.engine.clearPaintingCanvas();
             await this.storage.clearAll?.();
             await this.checkpoint?.invalidate();
+            this._applyBackgroundColor(DEFAULT_BACKGROUND_COLOR);
         });
 
         this.eventBus.on('UPDATE_BRUSH_SIZE', (size) => this.activeBrush.updateCurrentSize(size));
@@ -240,5 +237,10 @@ export class WorkspaceController {
         this.eventBus.on('SET_PROFILE_HARD_ROUND', () => applyAndSync(HardRoundProfile));
         this.eventBus.on('SET_PROFILE_AIRBRUSH', () => applyAndSync(AirbrushProfile));
         this.eventBus.on('SET_PROFILE_CHARCOAL', () => applyAndSync(CharcoalProfile));
+    }
+
+    // CSS puro — cero impacto en el motor de pinceles ni en las capas
+    private _applyBackgroundColor(color: string): void {
+        this.engine.transformContainer.style.backgroundColor = color;
     }
 }

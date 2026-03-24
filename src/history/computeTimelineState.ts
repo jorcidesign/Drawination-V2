@@ -3,6 +3,7 @@ import type { TimelineEvent, TimelineState, LayerState } from './TimelineTypes';
 import { isTransformEvent, isHideEvent } from './TimelineTypes';
 
 const MAX_LAYERS = 10;
+export const DEFAULT_BACKGROUND_COLOR = '#FAFAFA'; // blanco mate por defecto
 
 function buildDefaultLayerState(index: number): LayerState {
     return {
@@ -35,6 +36,7 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
     const layerRoute = new Map<number, number>();
 
     let derivedActiveLayerIndex = 0;
+    let backgroundColor = DEFAULT_BACKGROUND_COLOR;
 
     for (let i = 0; i < MAX_LAYERS; i++) {
         layersState.set(i, buildDefaultLayerState(i));
@@ -54,12 +56,7 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
                     const newMatrix = new DOMMatrix(ev.transformMatrix);
                     for (const id of ev.targetIds) {
                         const current = transforms.get(id) ?? new DOMMatrix();
-
-                        // === FIX MATEMÁTICO VITAL ===
-                        // Orden correcto: M_Nueva * M_Actual
-                        // Garantiza que la escala se aplique DESPUÉS del movimiento anterior
-                        const combined = newMatrix.multiply(current);
-                        transforms.set(id, combined);
+                        transforms.set(id, newMatrix.multiply(current));
                     }
                 }
                 break;
@@ -70,10 +67,16 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
                 }
                 break;
 
-            case 'LAYER_SELECT': {
+            // ── Color de fondo ────────────────────────────────────────────
+            case 'BACKGROUND_COLOR':
+                if (ev.backgroundColor) {
+                    backgroundColor = ev.backgroundColor;
+                }
+                break;
+
+            case 'LAYER_SELECT':
                 derivedActiveLayerIndex = ev.layerIndex;
                 break;
-            }
 
             case 'DUPLICATE_GROUP':
                 break;
@@ -111,44 +114,31 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
 
             case 'LAYER_OPACITY': {
                 const layer = layersState.get(ev.layerIndex) ?? buildDefaultLayerState(ev.layerIndex);
-                layersState.set(ev.layerIndex, {
-                    ...existing(layer),
-                    opacity: ev.layerOpacity ?? layer.opacity,
-                });
+                layersState.set(ev.layerIndex, { ...layer, opacity: ev.layerOpacity ?? layer.opacity });
                 break;
             }
 
             case 'LAYER_VISIBILITY': {
                 const layer = layersState.get(ev.layerIndex) ?? buildDefaultLayerState(ev.layerIndex);
-                layersState.set(ev.layerIndex, {
-                    ...existing(layer),
-                    visible: ev.visible ?? layer.visible,
-                });
+                layersState.set(ev.layerIndex, { ...layer, visible: ev.visible ?? layer.visible });
                 break;
             }
 
             case 'LAYER_LOCK': {
                 const layer = layersState.get(ev.layerIndex) ?? buildDefaultLayerState(ev.layerIndex);
-                layersState.set(ev.layerIndex, {
-                    ...existing(layer),
-                    locked: ev.locked ?? layer.locked,
-                });
+                layersState.set(ev.layerIndex, { ...layer, locked: ev.locked ?? layer.locked });
                 break;
             }
 
             case 'LAYER_MERGE_DOWN': {
                 const source = ev.layerIndex;
                 const target = source - 1;
-
                 if (target >= 0) {
                     const finalDest = layerRoute.get(target) ?? target;
                     for (const [key, value] of layerRoute.entries()) {
-                        if (value === source) {
-                            layerRoute.set(key, finalDest);
-                        }
+                        if (value === source) layerRoute.set(key, finalDest);
                     }
                     layerRoute.set(source, finalDest);
-
                     const layer = layersState.get(source) ?? buildDefaultLayerState(source);
                     layersState.set(source, { ...layer, visible: false });
                 }
@@ -169,7 +159,9 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
         }
     }
 
-    return { spine, active, transforms, hiddenIds, layersState, layerRoute, derivedActiveLayerIndex, undone };
+    return {
+        spine, active, transforms, hiddenIds,
+        layersState, layerRoute, derivedActiveLayerIndex,
+        undone, backgroundColor,
+    };
 }
-
-function existing<T>(val: T): T { return val; }

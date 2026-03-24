@@ -1,6 +1,5 @@
 /* src/ui/tokens/base.css */
 
-/* Reset estricto */
 *,
 *::before,
 *::after {
@@ -10,7 +9,6 @@
     -webkit-tap-highlight-color: transparent;
 }
 
-/* Configuración de App Nativa */
 html,
 body {
     width: 100%;
@@ -23,7 +21,6 @@ body {
     user-select: none;
 }
 
-/* Scrollbars minimalistas */
 ::-webkit-scrollbar {
     width: 3px;
 }
@@ -33,7 +30,6 @@ body {
     border-radius: 2px;
 }
 
-/* ── UI Overlay Root ─────────────────────────────────────── */
 #ui-root {
     position: fixed;
     inset: 0;
@@ -47,12 +43,11 @@ body {
 
 /* ════════════════ WORKSPACE ════════════════ */
 
-/* El contenedor del HTML no interfiere */
 #drawination-workspace {
     display: contents;
 }
 
-/* El engine ocupa toda la pantalla — es el "mundo infinito" oscuro */
+/* El engine ocupa toda la pantalla — fondo oscuro de la app */
 #drawination-engine {
     position: fixed !important;
     inset: 0 !important;
@@ -62,15 +57,12 @@ body {
     overflow: hidden !important;
 }
 
-/* El transformContainer es el "papel blanco".
-   Sus dimensiones (width/height) las setea CanvasEngine en px via style inline.
-   El CSS solo aporta la apariencia visual — nunca el tamaño. */
+/* El transformContainer es el "papel".
+   El color de fondo lo setea CanvasEngine en el constructor via style inline,
+   y WorkspaceController lo actualiza cuando cambia el color del proyecto.
+   El CSS NO toca background aquí — JS tiene control total. */
 #drawination-engine>div {
-    /* SIN width ni height aquí — los pone el CanvasEngine en style inline */
-    background-color: #ffffff !important;
     box-shadow: 0 0 0 1px rgba(255, 255, 255, .07), 0 32px 80px rgba(0, 0, 0, .8) !important;
-    background-image: repeating-conic-gradient(#f8f8f8 0% 25%, #ececec 0% 50%) !important;
-    background-size: 20px 20px !important;
 }
 
 /* Las capas físicas llenan el transformContainer */

@@ -7,31 +7,24 @@ export interface AppEventMap {
     'CLEAR_ALL': void;
     'RESET_ROTATION': void;
     'FLIP_HORIZONTAL': void;
-
     'SYNC_UI_SLIDERS': { size: number; opacity: number; minSize?: number; maxSize?: number };
     'GLOBAL_INTERRUPTION': void;
     'SYNC_LAYERS_CSS': void;
-
     'SET_COLOR': string;
     'APPLY_COLOR': string;
-
     'UPDATE_BRUSH_SIZE': number;
     'UPDATE_BRUSH_OPACITY': number;
     'REQUEST_TOOL_SWITCH': string;
     'ACTIVE_TOOL_CHANGED': string;
-
     'TOGGLE_LASSO_MODE': 'partial' | 'total';
     'SELECTION_DELETE': void;
     'SELECTION_DUPLICATE': void;
     'SELECTION_FLIP_H': void;
     'SELECTION_FLIP_V': void;
-
     'HISTORY_RESTORED': { event: TimelineEvent; action: 'UNDO' | 'REDO' };
     'REQUEST_TRANSFORM_HANDLE_REFRESH': { targetIds: string[] };
-
     'HIDE_UNDONE': { targetIds: string[] };
     'HIDE_REDONE': { targetIds: string[] };
-
     'SET_TOOL_ERASER': void;
     'SET_TOOL_PENCIL': void;
     'SET_TOOL_VECTOR_ERASER': void;
@@ -42,14 +35,19 @@ export interface AppEventMap {
     'SET_PROFILE_HARD_ROUND': void;
     'SET_PROFILE_AIRBRUSH': void;
     'SET_PROFILE_CHARCOAL': void;
-
     'TOGGLE_COLOR_PANEL': void;
+    'TOGGLE_COLOR_PANEL_FOR_BG': void;
     'TOGGLE_LAYER_PANEL': void;
     'TOGGLE_MENU_PANEL': void;
-
     'SHOW_NEW_PROJECT': void;
     'NEW_PROJECT': { width: number; height: number };
 
+    // Preview visual del fondo mientras arrastra el slider — NO va al timeline
+    'BACKGROUND_COLOR_PREVIEW': string;
+    // Elección final del color de fondo — VA al timeline via commitLayerAction
+    'BACKGROUND_COLOR_CHANGED': string;
+
+    'BACKGROUND_TOOL_ACTIVE': boolean;
     'LAYER_SELECT': number;
     'LAYER_VISIBILITY': { id: number; visible: boolean };
     'LAYER_OPACITY': { id: number; opacity: number };
@@ -58,20 +56,13 @@ export interface AppEventMap {
     'LAYER_ACTION_DUPLICATE': number;
     'LAYER_ACTION_MERGE': number;
     'LAYER_ACTION_DELETE': number;
-
     'DOWNLOAD_PNG': void;
     'DOWNLOAD_VIDEO': void;
-
     'REQUEST_UNDO': void;
     'REQUEST_REDO': void;
-
-    // Viewport — estado actual (emitido por ViewportManager en cada cambio)
     'VIEWPORT_CHANGED': { zoom: number; angle: number };
-
-    // Viewport — comandos desde la UI (BottomLeftBar)
-    'VIEWPORT_ZOOM_SET': number;   // zoom absoluto, centra el canvas
-    'VIEWPORT_ANGLE_SET': number;  // ángulo absoluto en grados, sin centrar
-
+    'VIEWPORT_ZOOM_SET': number;
+    'VIEWPORT_ANGLE_SET': number;
     'RESET_ZOOM': void;
 }
 
