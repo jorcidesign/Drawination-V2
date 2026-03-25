@@ -6,5 +6,6 @@ import './interaction/ZoomTool';
 import './interaction/RotateTool';
 import './interaction/MoveTool';
 import './interaction/LassoTool';
-import './interaction/transform/TransformHandleTool'; // <--- NUEVA HERRAMIENTA AÑADIDA
-import './draw/VectorEraserTool'; // <--- NUEVA HERRAMIENTA AÑADIDA
+import './interaction/transform/TransformHandleTool';
+import './draw/VectorEraserTool';
+import './interaction/BackgroundTool'; // <--- AÑADIDO

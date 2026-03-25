@@ -2,39 +2,48 @@
 import type { ITool, ToolContext } from './ITool';
 import { ToolRegistry } from './ToolRegistry';
 import type { ShortcutManager } from '../../input/ShortcutManager';
+import type { EventBus } from '../../input/EventBus';
 
 export class ToolManager {
     private tools: Map<string, ITool> = new Map();
     private _activeTool: ITool | null = null;
     private defaultToolId: string = '';
     private previousToolId: string = '';
+    private eventBus: EventBus | null = null; // Guardamos referencia al bus
 
     public bootstrap(ctx: ToolContext, shortcuts: ShortcutManager) {
+        this.eventBus = ctx.eventBus;
         const configs = ToolRegistry.getAll();
 
         for (const config of configs) {
             const tool = config.factory(ctx);
             this.registerTool(tool);
 
+            // === FIX: Los atajos ahora envían una solicitud al sistema global ===
             if (config.downShortcut) {
                 shortcuts.bindDown(config.downShortcut, (e) => {
                     if (!e.repeat) {
-                        this.switchTool(tool.id);
-                        if (config.isSticky) this.setDefaultTool(tool.id);
+                        ctx.eventBus.emit('REQUEST_TOOL_SWITCH', tool.id);
                     }
                 });
             }
             if (config.upShortcut) {
-                shortcuts.bindUp(config.upShortcut, () => this.revertTool());
+                shortcuts.bindUp(config.upShortcut, () => {
+                    ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.defaultToolId);
+                });
             }
         }
 
         ctx.eventBus.on('REQUEST_TOOL_SWITCH', (toolId: string) => {
             this.switchTool(toolId);
-            this.setDefaultTool(toolId);
+
+            // Evaluamos si la herramienta es permanente (sticky) para hacerla por defecto
+            const toolConfig = configs.find(c => c.id === toolId);
+            if (!toolConfig || toolConfig.isSticky !== false) {
+                this.defaultToolId = toolId;
+            }
         });
 
-        // === ESTRATEGIA DE INTERRUPCIÓN GLOBAL ===
         ctx.eventBus.on('GLOBAL_INTERRUPTION', () => {
             this.switchTool(this.defaultToolId, 'system_interruption');
         });
@@ -49,7 +58,6 @@ export class ToolManager {
         this.switchTool(toolId);
     }
 
-    // === FIX: Recibe un reason opcional para pasarlo al onDeactivate ===
     public switchTool(toolId: string, reason?: string) {
         if (this._activeTool && this._activeTool.isBusy() && toolId === this._activeTool.id) return;
 
@@ -58,12 +66,14 @@ export class ToolManager {
 
         if (this._activeTool) {
             this.previousToolId = this._activeTool.id;
-            // Le decimos a la herramienta por qué se va (ej: "pencil", "eraser", o "system_interruption")
             this._activeTool.onDeactivate(reason || toolId);
         }
 
         this._activeTool = newTool;
         this._activeTool.onActivate();
+
+        // === FIX: Emitimos la confirmación del cambio a TODA LA UI ===
+        this.eventBus?.emit('ACTIVE_TOOL_CHANGED', toolId);
     }
 
     public switchToolSilent(toolId: string) {

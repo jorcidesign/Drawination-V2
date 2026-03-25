@@ -13,14 +13,19 @@ function expToLinear(val: number, min: number, max: number, power: number = 3): 
     return Math.pow((val - min) / (max - min), 1 / power);
 }
 
+// === FIX: Agrupamos la configuración tanto por Profile ID como por Tool ID ===
 const TOOL_SLIDER_CONFIG: Record<string, { size: boolean; opacity: boolean }> = {
+    // Perfiles (Pinceles)
     'pencil-hb': { size: true, opacity: true },
     'ink-pen': { size: true, opacity: true },
+    'stylized-brush': { size: true, opacity: true },
     'oil-brush': { size: true, opacity: true },
     'hard-round': { size: true, opacity: true },
     'airbrush': { size: true, opacity: true },
     'charcoal': { size: true, opacity: true },
     'solid-fill': { size: false, opacity: true },
+
+    // Herramientas (Tool IDs puros)
     'eraser': { size: true, opacity: true },
     'vector-eraser': { size: false, opacity: false },
     'lasso': { size: false, opacity: false },
@@ -29,6 +34,7 @@ const TOOL_SLIDER_CONFIG: Record<string, { size: boolean; opacity: boolean }> = 
     'zoom': { size: false, opacity: false },
     'rotate': { size: false, opacity: false },
     'move': { size: false, opacity: false },
+    'background': { size: false, opacity: false },
 };
 
 export class TopCenterBar {
@@ -104,25 +110,31 @@ export class TopCenterBar {
 
     private bindEvents() {
         this.eventBus.on('SYNC_UI_SLIDERS', (payload) => {
-            const { size, opacity, minSize, maxSize } = payload;
+            const { size, opacity, minSize, maxSize, profileId } = payload;
             if (minSize !== undefined) this.currentMinSize = minSize;
             if (maxSize !== undefined) this.currentMaxSize = maxSize;
             const t = expToLinear(size, this.currentMinSize, this.currentMaxSize, 3);
             this.sizeSlider.setValue(Math.round(t * 1000), `Tamaño: ${Math.round(size * 10) / 10}px`);
             this.opacitySlider.setValue(Math.round(opacity * 100), `Opacidad: ${Math.round(opacity * 100)}%`);
+
+            // Si vino un profileId, lo usamos para bloquear/desbloquear
+            if (profileId) {
+                this._applySliderConfig(profileId);
+            }
         });
 
+        // Escuchamos el evento real de cambio de herramienta
         this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId: string) => {
-            this._applySliderConfig(toolId);
-        });
-
-        this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId: string) => {
-            this._applySliderConfig(toolId);
+            // El lápiz configura sus sliders por medio del SYNC_UI_SLIDERS (con el profileId),
+            // pero el resto de herramientas genéricas (lazo, pan, background, etc) se configuran aquí mismo.
+            if (toolId !== 'pencil') {
+                this._applySliderConfig(toolId);
+            }
         });
     }
 
-    private _applySliderConfig(toolId: string): void {
-        const config = TOOL_SLIDER_CONFIG[toolId];
+    private _applySliderConfig(id: string): void {
+        const config = TOOL_SLIDER_CONFIG[id];
         if (!config) return;
         this._setSliderEnabled(this.sizeWrap, this.sep1, config.size);
         this._setSliderEnabled(this.opacityWrap, this.sep2, config.opacity);
@@ -142,7 +154,6 @@ export class TopCenterBar {
             const dropper = new (window as any).EyeDropper();
             const result = await dropper.open();
             if (result?.sRGBHex) {
-                // Eyedropper = elección explícita del usuario → va al historial
                 this.eventBus.emit('APPLY_COLOR', result.sRGBHex);
                 this.eventBus.emit('SET_COLOR', result.sRGBHex);
             }

@@ -23,6 +23,7 @@ import { PaintProfile } from '../core/render/profiles/PaintProfile';
 import { HardRoundProfile } from '../core/render/profiles/HardRoundProfile';
 import { AirbrushProfile } from '../core/render/profiles/AirbrushProfile';
 import { CharcoalProfile } from '../core/render/profiles/CharcoalProfile';
+import { StylizedProfile } from '../core/render/profiles/StylizedProfile';
 import { ExportManager } from '../export/ExportManager';
 import { DEFAULT_BACKGROUND_COLOR } from '../history/computeTimelineState';
 
@@ -70,7 +71,7 @@ export class WorkspaceController {
     private bindInputEvents(): void {
         this.input.onPointerDown = (data) => {
             const toolId = this.toolManager.activeTool.id;
-            if (toolId !== 'pan' && toolId !== 'zoom' && toolId !== 'rotate' && toolId !== 'lasso' && toolId !== 'transform-handle') {
+            if (toolId !== 'pan' && toolId !== 'zoom' && toolId !== 'rotate' && toolId !== 'lasso' && toolId !== 'transform-handle' && toolId !== 'background') {
                 const state = this.history.getState();
                 const isLocked = state.layersState.get(state.derivedActiveLayerIndex)?.locked;
                 if (isLocked) {
@@ -191,10 +192,12 @@ export class WorkspaceController {
                 opacity: this.activeBrush.profile.baseOpacity,
                 minSize: this.activeBrush.profile.minSize || 1,
                 maxSize: this.activeBrush.profile.maxSize || 100,
+                profileId: this.activeBrush.profile.id // <--- FIX: Enviamos el ID a la UI
             });
         };
 
         this.eventBus.on('SET_PROFILE_INK', () => applyAndSync(InkProfile));
+        this.eventBus.on('SET_PROFILE_STYLIZED', () => applyAndSync(StylizedProfile));
         this.eventBus.on('SET_PROFILE_PENCIL', () => applyAndSync(PencilProfile));
         this.eventBus.on('SET_PROFILE_FILL', () => applyAndSync(FillProfile));
         this.eventBus.on('SET_PROFILE_PAINT', () => applyAndSync(PaintProfile));
@@ -334,7 +337,6 @@ export class WorkspaceController {
         this.eventBus.emit('SYNC_LAYERS_CSS');
     }
 
-    // === FIX: Agrupamos todos los eventos generados con un groupId ===
     private async _handleLayerDuplicate(layerIndex: number): Promise<void> {
         const state = this.history.getState();
         const sourceState = state.layersState.get(layerIndex);

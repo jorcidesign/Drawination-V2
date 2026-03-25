@@ -33,7 +33,8 @@ export class EraserTool implements ITool {
             size: this.ctx.activeBrush.profile.baseSize,
             opacity: this.ctx.activeBrush.profile.baseOpacity,
             minSize: this.ctx.activeBrush.profile.minSize || 1,
-            maxSize: this.ctx.activeBrush.profile.maxSize || 100
+            maxSize: this.ctx.activeBrush.profile.maxSize || 100,
+            profileId: 'eraser' // <--- FIX: Indicamos a la UI que es la goma
         });
     }
 

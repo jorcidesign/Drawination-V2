@@ -40,7 +40,6 @@ export class TopLeftBar {
         const paletteRow = document.createElement('div');
         paletteRow.className = 'palette-row';
 
-        // Paleta rápida — elección explícita → APPLY_COLOR + SET_COLOR
         this.quickColors.forEach(c => {
             const swatch = new ColorSwatch({
                 color: c.hex,
@@ -53,7 +52,6 @@ export class TopLeftBar {
             swatch.mount(paletteRow);
         });
 
-        // Cuadradito 7 — abre el panel de color
         this.activeColorSwatch = new ColorSwatch({
             color: this.currentColor,
             title: 'Color activo — abrir paleta',
@@ -89,19 +87,18 @@ export class TopLeftBar {
     }
 
     private bindEvents() {
-        // Cuadradito 7 responde a SET_COLOR — siempre, venga de donde venga
         this.eventBus.on('SET_COLOR', (color) => {
             this.currentColor = color;
             this.activeColorSwatch.setColor(color);
         });
 
-        // También actualizar en APPLY_COLOR por si acaso
         this.eventBus.on('APPLY_COLOR', (color) => {
             this.currentColor = color;
             this.activeColorSwatch.setColor(color);
         });
 
-        this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId) => {
+        // === FIX: Escuchamos la fuente oficial de verdad ===
+        this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId) => {
             this.lassoBtn.setActive(toolId === 'lasso');
         });
     }

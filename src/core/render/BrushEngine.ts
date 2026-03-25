@@ -11,6 +11,7 @@ import { HardRoundRenderer } from './renderers/HardRoundRenderer';
 import { InkRenderer } from './renderers/InkRenderer';
 import { AirbrushRenderer } from './renderers/AirbrushRenderer';
 import { CharcoalRenderer } from './renderers/CharcoalRenderer';
+import { StylizedRenderer } from './renderers/StylizedRenderer';
 
 export class BrushEngine {
     public color: string = '#2c3e50';
@@ -42,6 +43,7 @@ export class BrushEngine {
         this.renderers.set('ink', new InkRenderer());
         this.renderers.set('airbrush', new AirbrushRenderer());
         this.renderers.set('charcoal', new CharcoalRenderer());
+        this.renderers.set('stylized', new StylizedRenderer());
 
         this.getRenderer().updateTip?.(this.profile, this.color);
     }

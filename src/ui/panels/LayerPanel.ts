@@ -221,7 +221,6 @@ export class LayerPanel {
 
         const newBottomToTop = [...newVisualOrder].reverse();
 
-        // === FIX: Mantener la longitud exacta de 10 elementos ===
         const uncreated = this.lastPayload!.layerOrder.filter(id => !this.lastPayload!.createdLayers.includes(id));
         const fullOrder = [...uncreated, ...newBottomToTop];
 
@@ -247,6 +246,9 @@ export class LayerPanel {
     this.bgWrapper?.classList.add('layer-item--bg-active');
     this.eventBus.emit('BACKGROUND_TOOL_ACTIVE', true);
     this.eventBus.emit('TOGGLE_COLOR_PANEL_FOR_BG');
+
+    // === FIX: Deselecciona visual y lógicamente cualquier otra herramienta ===
+    this.eventBus.emit('REQUEST_TOOL_SWITCH', 'background');
   }
 
   private _deactivateBgTool(): void {
@@ -276,6 +278,7 @@ export class LayerPanel {
         this.element.classList.remove('visible');
         this._deactivateBgTool();
       }
+      this.eventBus.emit('LAYER_PANEL_STATE_CHANGED', this.isVisible);
     });
 
     this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId) => { if (toolId !== 'background') this._deactivateBgTool(); });

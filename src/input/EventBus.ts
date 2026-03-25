@@ -5,7 +5,7 @@ export interface LayersStatePayload {
     createdLayers: number[];
     layersState: Map<number, LayerState>;
     activeLayerIndex: number;
-    layerOrder: number[]; // Nuevo: Inyectamos el orden visual real
+    layerOrder: number[];
 }
 
 export interface AppEventMap {
@@ -14,7 +14,8 @@ export interface AppEventMap {
     'CLEAR_ALL': void;
     'RESET_ROTATION': void;
     'FLIP_HORIZONTAL': void;
-    'SYNC_UI_SLIDERS': { size: number; opacity: number; minSize?: number; maxSize?: number };
+    // === FIX: Agregamos profileId ===
+    'SYNC_UI_SLIDERS': { size: number; opacity: number; minSize?: number; maxSize?: number; profileId?: string };
     'GLOBAL_INTERRUPTION': void;
     'SYNC_LAYERS_CSS': void;
     'LAYERS_STATE_CHANGED': LayersStatePayload;
@@ -43,9 +44,11 @@ export interface AppEventMap {
     'SET_PROFILE_HARD_ROUND': void;
     'SET_PROFILE_AIRBRUSH': void;
     'SET_PROFILE_CHARCOAL': void;
+    'SET_PROFILE_STYLIZED': void;
     'TOGGLE_COLOR_PANEL': void;
     'TOGGLE_COLOR_PANEL_FOR_BG': void;
     'TOGGLE_LAYER_PANEL': void;
+    'LAYER_PANEL_STATE_CHANGED': boolean;
     'TOGGLE_MENU_PANEL': void;
     'SHOW_NEW_PROJECT': void;
     'NEW_PROJECT': { width: number; height: number };
@@ -53,12 +56,11 @@ export interface AppEventMap {
     'BACKGROUND_COLOR_CHANGED': string;
     'BACKGROUND_TOOL_ACTIVE': boolean;
 
-    // Acciones de capa
     'LAYER_ACTION_CREATE': void;
     'LAYER_ACTION_SELECT': number;
     'LAYER_ACTION_TOGGLE_VISIBILITY': number;
     'LAYER_ACTION_DELETE': number;
-    'LAYER_ACTION_REORDER': number[]; // Ahora recibe un array con el nuevo orden
+    'LAYER_ACTION_REORDER': number[];
     'LAYER_ACTION_OPACITY': { layerIndex: number; opacity: number };
     'LAYER_ACTION_LOCK': number;
     'LAYER_ACTION_DUPLICATE': number;

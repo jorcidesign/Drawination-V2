@@ -8,7 +8,6 @@ export class TopRightBar {
     private static stylesInjected = false;
 
     private layersBtn: IconButton;
-    private isLayerPanelOpen = false;
 
     constructor(eventBus: EventBus) {
         TopRightBar.injectStyles();
@@ -22,10 +21,7 @@ export class TopRightBar {
             icon: 'layers',
             title: 'Capas',
             onClick: () => {
-                // Toggleamos el estado local visualmente de forma rápida
-                this.isLayerPanelOpen = !this.isLayerPanelOpen;
-                this.layersBtn.setActive(this.isLayerPanelOpen);
-                // Emitimos para que el PanelManager abra/cierre el panel real
+                // Solo emitimos la intención, la UI reaccionará al evento de confirmación
                 this.eventBus.emit('TOGGLE_LAYER_PANEL');
             }
         });
@@ -57,10 +53,19 @@ export class TopRightBar {
         const playTimelapseBtn = new IconButton({
             icon: 'play',
             title: 'Reproducir Timelapse',
-            variant: 'accent', // Usamos la variante con el color azul de la paleta
+            variant: 'accent',
             onClick: () => this.eventBus.emit('PLAY_TIMELAPSE')
         });
         playTimelapseBtn.mount(this.element);
+
+        this.bindEvents();
+    }
+
+    private bindEvents() {
+        // === FIX: Escuchamos la "fuente única de verdad" del panel ===
+        this.eventBus.on('LAYER_PANEL_STATE_CHANGED', (isOpen) => {
+            this.layersBtn.setActive(isOpen);
+        });
     }
 
     private createSeparator(): HTMLDivElement {

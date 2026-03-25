@@ -3,8 +3,6 @@ import { IconButton } from '../atoms/IconButton';
 import type { EventBus } from '../../input/EventBus';
 import type { Icons } from '../atoms/Icons';
 
-// Color inicial del lápiz y color que heredan los demás pinceles
-// la primera vez que se usan
 const DEFAULT_BRUSH_COLOR = '#2280cf';
 
 interface ToolDef {
@@ -22,18 +20,14 @@ export class BrushToolbar {
 
     private buttons: Map<string, IconButton> = new Map();
     private activeToolId: string = '';
-
     private currentGlobalColor: string = DEFAULT_BRUSH_COLOR;
-
-    // null = nunca usado → ícono en gris de la UI (sin style.color)
-    // string = color guardado → ícono en ese color
     private toolColors: Map<string, string | null> = new Map();
-
     private _settingColorInternally = false;
 
     private readonly drawingTools: ToolDef[] = [
         { id: 'pencil-hb', icon: 'pencil', title: 'Lápiz (B)', eventToEmit: 'SET_PROFILE_PENCIL', isBrush: true },
         { id: 'ink-pen', icon: 'ink', title: 'Pluma de Tinta', eventToEmit: 'SET_PROFILE_INK', isBrush: true },
+        { id: 'stylized-brush', icon: 'stylized', title: 'Pincel Estilizado', eventToEmit: 'SET_PROFILE_STYLIZED', isBrush: true }, // <--- AÑADIDO AQUÍ
         { id: 'oil-brush', icon: 'oil', title: 'Pincel Óleo', eventToEmit: 'SET_PROFILE_PAINT', isBrush: true },
         { id: 'hard-round', icon: 'hardRound', title: 'Hard Round', eventToEmit: 'SET_PROFILE_HARD_ROUND', isBrush: true },
         { id: 'airbrush', icon: 'airbrush', title: 'Aerógrafo', eventToEmit: 'SET_PROFILE_AIRBRUSH', isBrush: true },
@@ -49,6 +43,7 @@ export class BrushToolbar {
     private readonly profileEventToToolId: Record<string, string> = {
         'SET_PROFILE_PENCIL': 'pencil-hb',
         'SET_PROFILE_INK': 'ink-pen',
+        'SET_PROFILE_STYLIZED': 'stylized-brush', // <--- AÑADIDO AQUÍ
         'SET_PROFILE_PAINT': 'oil-brush',
         'SET_PROFILE_HARD_ROUND': 'hard-round',
         'SET_PROFILE_AIRBRUSH': 'airbrush',
@@ -73,7 +68,6 @@ export class BrushToolbar {
 
         this.eraserTools.forEach(def => this.createToolButton(def));
 
-        // Todos los pinceles arrancan sin color (null = gris de la UI)
         for (const def of this.drawingTools) {
             this.toolColors.set(def.id, null);
         }
@@ -92,8 +86,6 @@ export class BrushToolbar {
         btn.mount(this.element);
     }
 
-    // Llamado desde AppContainer al arrancar para activar el lápiz
-    // con el color correcto sin emitir eventos prematuros
     public activateDefault(toolId: string, color: string): void {
         this.currentGlobalColor = color;
         this.toolColors.set(toolId, color);
@@ -105,11 +97,9 @@ export class BrushToolbar {
         }
 
         this.activeToolId = toolId;
-        // No emitimos ACTIVE_TOOL_CHANGED aquí — el sistema todavía no está listo
     }
 
     private bindEvents() {
-
         this.eventBus.on('SET_COLOR', (color: string) => {
             if (this._settingColorInternally) return;
 
@@ -129,21 +119,36 @@ export class BrushToolbar {
             });
         }
 
-        this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId: string) => {
-            const isOurButton = this.buttons.has(toolId);
-            if (!isOurButton) {
+        // === FIX: Escuchamos la FUENTE DE LA VERDAD para actualizar la UI ===
+        this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId: string) => {
+            // 1. Es un perfil/herramienta de esta barra (ej: Borrador)
+            if (this.buttons.has(toolId)) {
+                this._activateTool(toolId);
+            }
+            // 2. El motor activó el Lápiz general (atajo de teclado 'b')
+            else if (toolId === 'pencil') {
+                const isCurrentlyABrush = this.drawingTools.some(d => d.id === this.activeToolId);
+                if (!isCurrentlyABrush) {
+                    // Restauramos el último pincel guardado
+                    const lastBrush = Array.from(this.toolColors.keys()).find(k => this.toolColors.get(k) !== null) || 'pencil-hb';
+                    const def = this._findDefById(lastBrush);
+                    if (def) this.eventBus.emit(def.eventToEmit);
+                } else {
+                    this._activateTool(this.activeToolId);
+                }
+            }
+            // 3. Es una herramienta externa (Lazo, Move, Zoom, etc)
+            else {
+                // Apagamos esta barra visualmente, pero conservamos la memoria del pincel
                 const prevBtn = this.buttons.get(this.activeToolId);
                 if (prevBtn) prevBtn.setActive(false);
-                this.activeToolId = toolId;
-                this.eventBus.emit('ACTIVE_TOOL_CHANGED', toolId);
             }
         });
     }
 
     private _activateTool(toolId: string): void {
-        // Quitar activo del anterior — sin tocar su color
         const prevBtn = this.buttons.get(this.activeToolId);
-        if (prevBtn) prevBtn.setActive(false);
+        if (prevBtn && this.activeToolId !== toolId) prevBtn.setActive(false);
 
         const btn = this.buttons.get(toolId);
         const def = this._findDefById(toolId);
@@ -155,13 +160,10 @@ export class BrushToolbar {
                 const savedColor = this.toolColors.get(toolId);
 
                 if (savedColor === null || savedColor === undefined) {
-                    // Primera vez que se usa — heredar el color global actual
                     const firstColor = this.currentGlobalColor;
                     this.toolColors.set(toolId, firstColor);
                     btn.element.style.color = firstColor;
-                    // El color global ya es el correcto, no hace falta emitir SET_COLOR
                 } else {
-                    // Ya tiene color guardado — restaurarlo
                     btn.element.style.color = savedColor;
 
                     if (savedColor !== this.currentGlobalColor) {
@@ -175,7 +177,6 @@ export class BrushToolbar {
         }
 
         this.activeToolId = toolId;
-        this.eventBus.emit('ACTIVE_TOOL_CHANGED', toolId);
     }
 
     private _findDefById(id: string): ToolDef | undefined {

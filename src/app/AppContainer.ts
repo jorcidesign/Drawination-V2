@@ -23,7 +23,6 @@ import '../ui/tokens/base.css';
 
 const CANVAS_SIZE_KEY = 'drawination_canvas_size';
 
-// Exportado para que el entry point pueda pasárselo a BrushToolbar.activateDefault()
 export const INITIAL_BRUSH_COLOR = '#2280cf';
 
 function getSavedCanvasSize(): { width: number; height: number } {
@@ -169,17 +168,6 @@ export class AppContainer {
             this.newProjectModal,
             saveCanvasSize,
         );
-    }
-
-    // Llamar desde el entry point DESPUÉS de montar la UI
-    // para sincronizar la BrushToolbar con el estado inicial
-    public initUI(brushToolbar: { activateDefault: (toolId: string, color: string) => void }): void {
-        brushToolbar.activateDefault('pencil-hb', INITIAL_BRUSH_COLOR);
-
-        // Sincronizar cuadradito 7 y ColorPanel con el color inicial
-        requestAnimationFrame(() => {
-            this.eventBus.emit('SET_COLOR', INITIAL_BRUSH_COLOR);
-        });
     }
 
     public async start() {

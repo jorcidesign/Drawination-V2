@@ -18,7 +18,6 @@ export class PencilTool implements ITool {
     constructor(ctx: ToolContext) {
         this.ctx = ctx;
 
-        // Si desde la UI piden el Lápiz explícitamente, le decimos al ToolManager que nos active
         this.ctx.eventBus.on('SET_TOOL_PENCIL', () => {
             this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
         });
@@ -29,14 +28,14 @@ export class PencilTool implements ITool {
     public onActivate() {
         this.ctx.engine.container.style.cursor = 'crosshair';
 
-        // === FIX: Cargamos el perfil cachead o usando la nueva arquitectura ===
         this.ctx.activeBrush.useProfile(this.ctx.activeBrush.lastDrawingProfile);
 
         this.ctx.eventBus.emit('SYNC_UI_SLIDERS', {
             size: this.ctx.activeBrush.profile.baseSize,
             opacity: this.ctx.activeBrush.profile.baseOpacity,
             minSize: this.ctx.activeBrush.profile.minSize || 1,
-            maxSize: this.ctx.activeBrush.profile.maxSize || 100
+            maxSize: this.ctx.activeBrush.profile.maxSize || 100,
+            profileId: this.ctx.activeBrush.profile.id // <--- FIX: Envía el profileId
         });
     }
 
