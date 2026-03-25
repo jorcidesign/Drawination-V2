@@ -17,17 +17,12 @@ export class LassoTool implements ITool {
     private ctx: ToolContext;
     private mode: 'idle' | 'drawing' = 'idle';
     private polygon: BasePoint[] = [];
-
-    // === NUEVO: Control de modo de selección ===
     private selectionMode: 'partial' | 'total' = 'partial';
 
     constructor(ctx: ToolContext) {
         this.ctx = ctx;
-
-        // La UI podrá alternar esto con un solo botón
         this.ctx.eventBus.on('TOGGLE_LASSO_MODE', (mode) => {
             this.selectionMode = mode;
-            if (import.meta.env.DEV) console.log(`🔲 Lazo Modo: ${mode}`);
         });
     }
 
@@ -41,8 +36,6 @@ export class LassoTool implements ITool {
     }
 
     public onDeactivate() {
-        // === FIX: Solo limpiamos la UI del lazo. NO tocamos this.ctx.selection.clear()
-        // porque esa selección se la estamos pasando como testigo al TransformHandleTool.
         this.mode = 'idle';
         this.polygon = [];
         this.ctx.engine.clearPaintingCanvas();
@@ -52,7 +45,6 @@ export class LassoTool implements ITool {
         this.mode = 'drawing';
         this.polygon = [];
         this.ctx.selection.clear();
-
         const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
         this.polygon.push({ x: canvasPos.x, y: canvasPos.y, pressure: 1 });
         this.ctx.engine.clearPaintingCanvas();
@@ -71,7 +63,6 @@ export class LassoTool implements ITool {
         this.ctx.engine.clearPaintingCanvas();
 
         await this.findSelectedStrokes();
-
         DiagnosticsService.logSelection(this.ctx.selection.selectedIds.size);
 
         if (this.ctx.selection.hasSelection()) {
@@ -107,44 +98,43 @@ export class LassoTool implements ITool {
         }
 
         const candidates = this.ctx.history.spatialGrid.query({ minX, minY, maxX, maxY });
-        const { active, transforms, hiddenIds, derivedActiveLayerIndex } = this.ctx.history.getState();
+        const state = this.ctx.history.getState();
         const foundIds = new Set<string>();
 
-        for (const eventId of candidates) {
-            if (hiddenIds.has(eventId)) continue;
+        // 🛡️ EL ESCUDO: Si la capa está bloqueada, el Lazo no selecciona nada en ella.
+        if (state.layersState.get(state.derivedActiveLayerIndex)?.locked) {
+            console.info("🔒 Capa bloqueada. Selección con lazo ignorada.");
+            return;
+        }
 
-            const event = active.find(ev => ev.id === eventId);
+        for (const eventId of candidates) {
+            if (state.hiddenIds.has(eventId)) continue;
+            const event = state.active.find(ev => ev.id === eventId);
             if (!event || (event.type !== 'STROKE' && event.type !== 'ERASE')) continue;
 
-            if (event.layerIndex !== derivedActiveLayerIndex) continue;
+            // Solo seleccionamos los trazos que pertenecen a la capa activa real o redirigida
+            const routedLayer = state.layerRoute.get(event.layerIndex) ?? event.layerIndex;
+            if (routedLayer !== state.derivedActiveLayerIndex) continue;
 
             if (!event.data) event.data = await this.ctx.storage.loadEventData(eventId);
             if (!event.data) continue;
 
-            const t = transforms.get(eventId) ?? new DOMMatrix();
+            const t = state.transforms.get(eventId) ?? new DOMMatrix();
             const pts = BinarySerializer.decode(event.data);
 
-            // === LÓGICA MATEMÁTICA: PARCIAL VS TOTAL ===
             let hit = false;
-
             if (this.selectionMode === 'partial') {
                 for (const pt of pts) {
                     const tx = pt.x * t.a + pt.y * t.c + t.e;
                     const ty = pt.x * t.b + pt.y * t.d + t.f;
-                    if (Geometry.isPointInPolygon(tx, ty, this.polygon)) {
-                        hit = true;
-                        break;
-                    }
+                    if (Geometry.isPointInPolygon(tx, ty, this.polygon)) { hit = true; break; }
                 }
             } else {
-                hit = pts.length > 0; // Asumimos true hasta que un punto falle
+                hit = pts.length > 0;
                 for (const pt of pts) {
                     const tx = pt.x * t.a + pt.y * t.c + t.e;
                     const ty = pt.x * t.b + pt.y * t.d + t.f;
-                    if (!Geometry.isPointInPolygon(tx, ty, this.polygon)) {
-                        hit = false;
-                        break;
-                    }
+                    if (!Geometry.isPointInPolygon(tx, ty, this.polygon)) { hit = false; break; }
                 }
             }
 
@@ -158,9 +148,4 @@ export class LassoTool implements ITool {
     }
 }
 
-ToolRegistry.register({
-    id: 'lasso',
-    factory: (ctx) => new LassoTool(ctx),
-    downShortcut: 'l',
-    isSticky: true
-});
+ToolRegistry.register({ id: 'lasso', factory: (ctx) => new LassoTool(ctx), downShortcut: 'l', isSticky: true });

@@ -1,6 +1,7 @@
 // src/ui/panels/LayerPanel.ts
+import { Icons } from '../atoms/Icons';
 import { LayerItem } from '../molecules/LayerItem';
-import type { EventBus } from '../../input/EventBus';
+import type { EventBus, LayersStatePayload } from '../../input/EventBus';
 import { DEFAULT_BACKGROUND_COLOR } from '../../history/computeTimelineState';
 import Sortable from 'sortablejs';
 
@@ -11,15 +12,6 @@ const BACKGROUND_PRESETS = [
   { color: '#986e4c', name: 'Papel marrón' },
   { color: '#20242b', name: 'Plano oscuro' },
 ];
-
-interface LayerStateUI {
-  id: number;
-  name: string;
-  visible: boolean;
-  opacity: number;
-  active: boolean;
-  expanded: boolean;
-}
 
 export class LayerPanel {
   public element: HTMLDivElement;
@@ -38,9 +30,10 @@ export class LayerPanel {
   private bgAccordionWrap: HTMLDivElement | null = null;
   private bgChevron: HTMLDivElement | null = null;
 
-  private layers: LayerStateUI[] = [
-    { id: 0, name: 'Capa 1', visible: true, opacity: 1, active: true, expanded: false }
-  ];
+  private lastPayload: LayersStatePayload | null = null;
+  private sortableInstance: Sortable | null = null;
+
+  private expandedLayerIndex: number | null = null;
 
   constructor(eventBus: EventBus) {
     LayerPanel.injectStyles();
@@ -61,12 +54,12 @@ export class LayerPanel {
     const addBtn = document.createElement('button');
     addBtn.className = 'panel-add';
     addBtn.title = 'Nueva capa';
-    addBtn.innerHTML = `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="6" y1="1" x2="6" y2="11"/><line x1="1" y1="6" x2="11" y2="6"/></svg>`;
-    addBtn.onclick = () => this.addLayer();
+    addBtn.innerHTML = Icons.add;
+    addBtn.onclick = () => this.eventBus.emit('LAYER_ACTION_CREATE');
 
     const closeBtn = document.createElement('button');
     closeBtn.className = 'panel-close';
-    closeBtn.innerHTML = `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="1" y1="1" x2="11" y2="11"/><line x1="11" y1="1" x2="1" y2="11"/></svg>`;
+    closeBtn.innerHTML = Icons.close;
     closeBtn.onclick = () => this.eventBus.emit('TOGGLE_LAYER_PANEL');
 
     actionsWrap.appendChild(addBtn);
@@ -80,7 +73,6 @@ export class LayerPanel {
 
     this.element.appendChild(this._buildBgLayer());
     this.bindEvents();
-    this.renderLayers();
   }
 
   private _buildBgLayer(): HTMLDivElement {
@@ -134,7 +126,6 @@ export class LayerPanel {
       if (preset.color === '#ffffff') swatch.style.outline = '1px solid rgba(0,0,0,0.12)';
       swatch.onclick = (e) => {
         e.stopPropagation();
-        // Los swatches son elección explícita → van al timeline directamente
         this._applyBackground(preset.color);
       };
       swatchRow.appendChild(swatch);
@@ -152,12 +143,97 @@ export class LayerPanel {
     return wrapper;
   }
 
+  private _renderLayers(payload: LayersStatePayload): void {
+    this.lastPayload = payload;
+
+    if (this.sortableInstance) {
+      this.sortableInstance.destroy();
+      this.sortableInstance = null;
+    }
+
+    this.listContainer.innerHTML = '';
+
+    const { createdLayers, layersState, activeLayerIndex, layerOrder } = payload;
+
+    const reversedLayers = [...layerOrder]
+      .filter(id => createdLayers.includes(id))
+      .reverse();
+
+    for (const layerIndex of reversedLayers) {
+      const state = layersState.get(layerIndex)!;
+      const isActive = layerIndex === activeLayerIndex;
+      const isExpanded = isActive && this.expandedLayerIndex === layerIndex;
+
+      const item = new LayerItem({
+        layerIndex,
+        state,
+        isActive,
+        isExpanded,
+        onSelect: (idx) => {
+          if (idx === activeLayerIndex) {
+            this.expandedLayerIndex = this.expandedLayerIndex === idx ? null : idx;
+            this._renderLayers(this.lastPayload!);
+          } else {
+            this.expandedLayerIndex = null;
+            this.eventBus.emit('LAYER_ACTION_SELECT', idx);
+          }
+        },
+        onToggleVisibility: (idx) => this.eventBus.emit('LAYER_ACTION_TOGGLE_VISIBILITY', idx),
+        onToggleLock: (idx) => this.eventBus.emit('LAYER_ACTION_LOCK', idx),
+        onDuplicate: (idx) => this.eventBus.emit('LAYER_ACTION_DUPLICATE', idx),
+        onMergeDown: (idx) => this.eventBus.emit('LAYER_ACTION_MERGE', idx),
+        onDelete: (idx) => this.eventBus.emit('LAYER_ACTION_DELETE', idx),
+        onOpacityChange: (idx, opacity) => this.eventBus.emit('LAYER_ACTION_OPACITY', { layerIndex: idx, opacity }),
+      });
+
+      this.listContainer.appendChild(item.element);
+    }
+
+    if (this.isVisible) this._initSortable();
+  }
+
+  private _initSortable(): void {
+    if (this.sortableInstance) {
+      this.sortableInstance.destroy();
+      this.sortableInstance = null;
+    }
+
+    this.sortableInstance = Sortable.create(this.listContainer, {
+      handle: '.layer-handle',
+      animation: 150,
+      ghostClass: 'layer-ghost',
+      onStart: () => {
+        this.listContainer.classList.add('is-dragging');
+        this.expandedLayerIndex = null;
+      },
+      onEnd: (evt) => {
+        this.listContainer.classList.remove('is-dragging');
+        if (evt.newIndex === evt.oldIndex) return;
+
+        const items = Array.from(
+          this.listContainer.querySelectorAll('.layer-item-wrapper[data-layer-index]')
+        );
+        const newVisualOrder = items
+          .map(el => parseInt((el as HTMLElement).dataset.layerIndex ?? '-1', 10))
+          .filter(idx => idx >= 0);
+
+        if (newVisualOrder.length === 0) return;
+
+        const newBottomToTop = [...newVisualOrder].reverse();
+
+        // === FIX: Mantener la longitud exacta de 10 elementos ===
+        const uncreated = this.lastPayload!.layerOrder.filter(id => !this.lastPayload!.createdLayers.includes(id));
+        const fullOrder = [...uncreated, ...newBottomToTop];
+
+        this.eventBus.emit('LAYER_ACTION_REORDER', fullOrder);
+      },
+    });
+  }
+
   private _updateDot(color: string): void {
     if (!this.bgPreviewDot) return;
     this.bgPreviewDot.style.backgroundColor = color;
-    this.bgPreviewDot.style.outline = color.toLowerCase() === '#ffffff'
-      ? '1px solid rgba(0,0,0,0.12)'
-      : 'none';
+    this.bgPreviewDot.style.outline = color.toLowerCase() === '#ffffff' ? '1px solid rgba(0,0,0,0.12)' : 'none';
   }
 
   private _setAccordion(open: boolean): void {
@@ -169,7 +245,6 @@ export class LayerPanel {
   private _activateBgTool(): void {
     this.bgToolActive = true;
     this.bgWrapper?.classList.add('layer-item--bg-active');
-    this.eventBus.emit('REQUEST_TOOL_SWITCH', 'background' as any);
     this.eventBus.emit('BACKGROUND_TOOL_ACTIVE', true);
     this.eventBus.emit('TOGGLE_COLOR_PANEL_FOR_BG');
   }
@@ -182,134 +257,37 @@ export class LayerPanel {
     this.eventBus.emit('BACKGROUND_TOOL_ACTIVE', false);
   }
 
-  // Aplicar color al fondo Y persistir en el timeline
-  // Solo se llama en elecciones explícitas del usuario (swatches o APPLY_COLOR)
   private _applyBackground(color: string): void {
     this.currentBgColor = color;
     this._updateDot(color);
-    // Sincronizar cuadradito 7
     this.eventBus.emit('SET_COLOR', color);
-    // Persistir en el timeline — va al historial
     this.eventBus.emit('BACKGROUND_COLOR_CHANGED', color);
   }
 
-  private bindEvents() {
+  private bindEvents(): void {
+    this.eventBus.on('LAYERS_STATE_CHANGED', (payload) => { this._renderLayers(payload); });
+
     this.eventBus.on('TOGGLE_LAYER_PANEL', () => {
       this.isVisible = !this.isVisible;
       if (this.isVisible) {
         this.element.classList.add('visible');
-        this.initSortable();
+        if (this.lastPayload) this._renderLayers(this.lastPayload);
       } else {
         this.element.classList.remove('visible');
         this._deactivateBgTool();
       }
     });
 
-    this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId: string) => {
-      if (toolId !== 'background') this._deactivateBgTool();
-    });
-
-    this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId: string) => {
-      if (toolId !== 'background') this._deactivateBgTool();
-    });
-
-    // APPLY_COLOR = elección explícita del usuario (soltar el slider de iro.js)
-    // → va al timeline
-    this.eventBus.on('APPLY_COLOR', (color: string) => {
-      if (this.bgToolActive) {
-        this._applyBackground(color);
-      }
-    });
-
-    // SET_COLOR = preview visual mientras arrastra el slider
-    // → SOLO actualizar el dot y el fondo visualmente, NO persistir en el timeline
-    this.eventBus.on('SET_COLOR', (color: string) => {
+    this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId) => { if (toolId !== 'background') this._deactivateBgTool(); });
+    this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId) => { if (toolId !== 'background') this._deactivateBgTool(); });
+    this.eventBus.on('APPLY_COLOR', (color) => { if (this.bgToolActive) this._applyBackground(color); });
+    this.eventBus.on('SET_COLOR', (color) => {
       if (this.bgToolActive) {
         this._updateDot(color);
-        // Preview visual del fondo en tiempo real (sin commitLayerAction)
-        // WorkspaceController escucha BACKGROUND_COLOR_CHANGED para persistir,
-        // aquí solo actualizamos el CSS directamente via un evento especial de preview
         this.eventBus.emit('BACKGROUND_COLOR_PREVIEW', color);
       }
     });
-
-    // Sincronizar dot cuando el fondo cambia desde fuera (undo/redo)
-    this.eventBus.on('BACKGROUND_COLOR_CHANGED', (color: string) => {
-      this.currentBgColor = color;
-      this._updateDot(color);
-    });
-  }
-
-  private renderLayers() {
-    this.listContainer.innerHTML = '';
-    const reversedLayers = [...this.layers].reverse();
-
-    reversedLayers.forEach(layer => {
-      const item = new LayerItem({
-        ...layer,
-        isActive: layer.active,
-        isExpanded: layer.expanded,
-        onSelect: (id) => {
-          const clickedLayer = this.layers.find(l => l.id === id);
-          if (clickedLayer) {
-            if (clickedLayer.active) {
-              clickedLayer.expanded = !clickedLayer.expanded;
-            } else {
-              this.layers.forEach(l => { l.active = l.id === id; l.expanded = false; });
-            }
-            this.renderLayers();
-          }
-        },
-        onToggleVis: (id) => {
-          const l = this.layers.find(x => x.id === id);
-          if (l) l.visible = !l.visible;
-          this.renderLayers();
-        },
-        onOpacityChange: (id, op) => {
-          const l = this.layers.find(x => x.id === id);
-          if (l) l.opacity = op;
-        },
-        onLock: (id) => this.eventBus.emit('LAYER_ACTION_LOCK', id),
-        onDuplicate: (id) => this.eventBus.emit('LAYER_ACTION_DUPLICATE', id),
-        onMergeDown: (id) => this.eventBus.emit('LAYER_ACTION_MERGE', id),
-        onDelete: (id) => {
-          if (confirm('¿Eliminar esta capa?')) {
-            this.eventBus.emit('LAYER_ACTION_DELETE', id);
-            this.layers = this.layers.filter(l => l.id !== id);
-            if (this.layers.length > 0 && layer.active) {
-              this.layers[0].active = true;
-              this.layers[0].expanded = false;
-            }
-            this.renderLayers();
-          }
-        }
-      });
-      item.mount(this.listContainer);
-    });
-  }
-
-  private addLayer() {
-    if (this.layers.length >= 10) return;
-    const newId = Math.max(...this.layers.map(l => l.id), -1) + 1;
-    this.layers.forEach(l => { l.active = false; l.expanded = false; });
-    this.layers.push({ id: newId, name: `Capa ${newId + 1}`, visible: true, opacity: 1, active: true, expanded: false });
-    this.renderLayers();
-  }
-
-  private initSortable() {
-    if ((this.listContainer as any)._sortable) return;
-    (this.listContainer as any)._sortable = Sortable.create(this.listContainer, {
-      handle: '.layer-handle', animation: 120, ghostClass: 'layer-ghost',
-      onStart: () => this.listContainer.classList.add('is-dragging'),
-      onEnd: () => {
-        this.listContainer.classList.remove('is-dragging');
-        const domItems = Array.from(this.listContainer.querySelectorAll('.layer-item-wrapper'));
-        const newOrder = [...domItems.map(el => parseInt((el as HTMLElement).dataset.id || '-1', 10))].reverse();
-        const updated: LayerStateUI[] = [];
-        newOrder.forEach(id => { const l = this.layers.find(x => x.id === id); if (l) updated.push(l); });
-        this.layers = updated;
-      }
-    });
+    this.eventBus.on('BACKGROUND_COLOR_CHANGED', (color) => { this.currentBgColor = color; this._updateDot(color); });
   }
 
   public mount(parent: HTMLElement) { parent.appendChild(this.element); }
@@ -317,47 +295,88 @@ export class LayerPanel {
   private static injectStyles() {
     if (this.stylesInjected) return;
     this.stylesInjected = true;
+
     const style = document.createElement('style');
     style.textContent = `
-            #panel-layers { top:56px;right:12px;width:220px;z-index:var(--z-panel);max-height:calc(100vh - 80px); }
-            .layer-list { display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:calc(100vh - 280px);padding-right:4px; }
-            .layer-item-wrapper { display:flex;flex-direction:column;border-radius:7px;transition:background var(--t-fast);border:1px solid transparent;background:transparent; }
-            .layer-item-wrapper:hover { background:var(--surface-hover); }
-            .layer-item-wrapper.active { background:var(--surface-active);border-color:rgba(1,109,232,.22); }
-            .layer-main { display:flex;align-items:center;gap:6px;padding:5px 7px;cursor:pointer;min-height:44px; }
-            .layer-actions-wrapper { display:grid;grid-template-rows:0fr;transition:grid-template-rows 200ms cubic-bezier(0.4,0,0.2,1); }
-            .layer-item-wrapper.expanded .layer-actions-wrapper { grid-template-rows:1fr; }
-            .layer-actions-overflow { overflow:hidden; }
-            .layer-actions-inner { display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:0 8px 6px 8px; }
-            .layer-list.is-dragging .layer-actions-wrapper { grid-template-rows:0fr !important; }
-            .layer-item--bg { margin-top:6px;border-top:1px solid var(--surface-panel-border);border-radius:0 0 7px 7px; }
-            .layer-item--bg .layer-main { min-height:40px; }
-            .layer-item--bg:hover { background:var(--surface-hover); }
-            .layer-item--bg-active { background:var(--surface-active) !important;border-color:rgba(1,109,232,.22) !important;position:relative; }
-            .layer-item--bg-active::before { content:'';position:absolute;left:0;top:20%;bottom:20%;width:2px;border-radius:0 1px 1px 0;background:var(--accent-bright,#0066cc);opacity:0.8; }
-            .layer-bg-icon { width:20px;height:20px;color:var(--text-disabled);display:flex;align-items:center;justify-content:center;margin-left:14px;flex-shrink:0; }
-            .layer-bg-icon svg { width:13px;height:13px; }
-            .bg-color-dot { width:14px;height:14px;border-radius:50%;flex-shrink:0;box-shadow:0 0 0 1px rgba(0,0,0,0.15);margin-left:auto;transition:background-color 0.15s; }
-            .bg-chevron { color:var(--text-disabled);display:flex;align-items:center;flex-shrink:0;transition:transform 0.2s;margin-left:4px; }
-            .bg-chevron--open { transform:rotate(180deg); }
-            .bg-accordion-wrap { display:grid;grid-template-rows:0fr;transition:grid-template-rows 200ms cubic-bezier(0.4,0,0.2,1); }
-            .bg-accordion-wrap.bg-accordion-open { grid-template-rows:1fr; }
-            .bg-accordion-overflow { overflow:hidden; }
-            .bg-swatch-row { display:flex;gap:5px;padding:6px 12px 10px; }
-            .bg-swatch { width:24px;height:24px;border-radius:5px;border:none;cursor:pointer;flex-shrink:0;transition:transform 0.12s,box-shadow 0.12s;outline:none; }
-            .bg-swatch:hover { transform:scale(1.18);box-shadow:0 2px 8px rgba(0,0,0,0.4); }
-            .layer-handle { cursor:grab;color:var(--text-disabled);display:flex;align-items:center;padding:2px;border-radius:3px;flex-shrink:0; }
-            .layer-handle svg { width:11px;height:11px; }
-            .layer-handle:hover { color:var(--text-secondary); }
-            .layer-eye { width:20px;height:20px;border:none;background:transparent;color:var(--text-secondary);cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:3px;flex-shrink:0;outline:none; }
-            .layer-eye svg { width:12px;height:12px; }
-            .layer-eye:hover { background:var(--surface-hover);color:var(--text-primary); }
-            .layer-thumb { width:34px;height:34px;border-radius:4px;flex-shrink:0;background:repeating-conic-gradient(#2a2a2a 0% 25%,#1a1a1a 0% 50%) 0 0/8px 8px; }
-            .layer-name { font-size:var(--text-sm);color:var(--text-primary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
-            .layer-op { -webkit-appearance:none;width:40px;height:2px;background:var(--col-graphite);border-radius:1px;outline:none;cursor:pointer;flex-shrink:0; }
-            .layer-op::-webkit-slider-thumb { -webkit-appearance:none;width:10px;height:10px;background:#fff;border-radius:50%;cursor:pointer; }
-            .layer-ghost { opacity:0.4;background:var(--surface-pressed); }
-        `;
+      #panel-layers { top: 56px; right: 12px; width: 230px; z-index: var(--z-panel); max-height: calc(100vh - 80px); }
+      .layer-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: calc(100vh - 280px); padding-right: 4px; }
+      .layer-item-wrapper { display: flex; flex-direction: column; border-radius: 7px; transition: background var(--t-fast); border: 1px solid transparent; background: transparent; }
+      .layer-item-wrapper:hover { background: var(--surface-hover); }
+      .layer-item-wrapper.active { background: var(--surface-active); border-color: rgba(1,109,232,.22); }
+
+      .layer-main { display: flex; align-items: center; gap: 6px; padding: 5px 7px; cursor: pointer; min-height: 44px; }
+      .layer-handle { cursor: grab; color: var(--text-disabled); display: flex; align-items: center; padding: 2px; border-radius: 3px; flex-shrink: 0; }
+      .layer-handle svg { width: 14px; height: 14px; }
+      .layer-handle:hover { color: var(--text-secondary); }
+
+      .layer-eye, .layer-lock {
+        width: 20px; height: 20px; border: none; background: transparent;
+        color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center;
+        border-radius: 3px; flex-shrink: 0; outline: none; transition: background var(--t-fast);
+      }
+      .layer-eye svg, .layer-lock svg { width: 14px; height: 14px; }
+      .layer-eye:hover, .layer-lock:hover { background: var(--surface-hover); color: var(--text-primary); }
+      .layer-lock.is-locked { color: var(--text-primary); background: rgba(0,0,0,0.05); }
+
+      .layer-thumb { width: 34px; height: 34px; border-radius: 4px; flex-shrink: 0; background: repeating-conic-gradient(#2a2a2a 0% 25%, #1a1a1a 0% 50%) 0 0/8px 8px; }
+      .layer-name { font-size: var(--text-sm); color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+      .layer-actions-wrapper { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 200ms cubic-bezier(0.4,0,0.2,1); }
+      .layer-actions-wrapper.expanded { grid-template-rows: 1fr; border-top: 1px solid rgba(0,0,0,0.05); margin-top: 2px;}
+      .layer-list.is-dragging .layer-actions-wrapper { grid-template-rows: 0fr !important; }
+      .layer-actions-overflow { overflow: hidden; }
+      .layer-actions-inner { display: flex; flex-direction: column; gap: 8px; padding: 8px; }
+
+      .layer-action-btns { display: flex; gap: 4px; justify-content: flex-end; }
+      .layer-btn {
+        width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+        border-radius: 6px; border: none; background: rgba(0,0,0,0.03);
+        color: var(--text-secondary); cursor: pointer; transition: background var(--t-fast); flex-shrink: 0;
+      }
+      .layer-btn svg { width: 15px; height: 15px; }
+      .layer-btn:hover:not(:disabled) { background: rgba(0,0,0,0.06); color: var(--text-primary); }
+      .layer-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+      .layer-btn--danger:hover:not(:disabled) { background: rgba(231,76,60,0.1); color: #e74c3c; }
+
+      .layer-op-wrap {
+        display: flex; flex-direction: row-reverse; align-items: center; gap: 8px;
+        background: rgba(0,0,0,0.03); padding: 5px 8px; border-radius: 6px;
+      }
+      .layer-op-label {
+        font-size: 11px; color: var(--text-secondary);
+        font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0;
+      }
+      .layer-op-slider {
+        -webkit-appearance: none; flex: 1; height: 2px;
+        background: var(--col-graphite); border-radius: 1px; outline: none; cursor: pointer;
+      }
+      .layer-op-slider::-webkit-slider-thumb {
+        -webkit-appearance: none; width: 12px; height: 12px;
+        background: #fff; border-radius: 50%; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+      }
+
+      .layer-ghost { opacity: 0.4; background: var(--surface-pressed); }
+      .panel-add { width: 24px; height: 24px; border: none; background: transparent; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 4px; outline: none; transition: background var(--t-fast), color var(--t-fast); }
+      .panel-add svg { width: 16px; height: 16px; }
+      .panel-add:hover { background: var(--surface-hover); color: var(--text-primary); }
+
+      .layer-item--bg { margin-top: 6px; border-top: 1px solid var(--surface-panel-border); border-radius: 0 0 7px 7px; }
+      .layer-item--bg .layer-main { min-height: 40px; }
+      .layer-item--bg:hover { background: var(--surface-hover); }
+      .layer-item--bg-active { background: var(--surface-active) !important; border-color: rgba(1,109,232,.22) !important; position: relative; }
+      .layer-item--bg-active::before { content: ''; position: absolute; left: 0; top: 20%; bottom: 20%; width: 2px; border-radius: 0 1px 1px 0; background: var(--accent-bright, #0066cc); opacity: 0.8; }
+      .layer-bg-icon { width: 20px; height: 20px; color: var(--text-disabled); display: flex; align-items: center; justify-content: center; margin-left: 14px; flex-shrink: 0; }
+      .layer-bg-icon svg { width: 13px; height: 13px; }
+      .bg-color-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0,0,0,0.15); margin-left: auto; transition: background-color 0.15s; }
+      .bg-chevron { color: var(--text-disabled); display: flex; align-items: center; flex-shrink: 0; transition: transform 0.2s; margin-left: 4px; }
+      .bg-chevron--open { transform: rotate(180deg); }
+      .bg-accordion-wrap { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 200ms cubic-bezier(0.4,0,0.2,1); }
+      .bg-accordion-wrap.bg-accordion-open { grid-template-rows: 1fr; }
+      .bg-accordion-overflow { overflow: hidden; }
+      .bg-swatch-row { display: flex; gap: 5px; padding: 6px 12px 10px; }
+      .bg-swatch { width: 24px; height: 24px; border-radius: 5px; border: none; cursor: pointer; flex-shrink: 0; transition: transform 0.12s, box-shadow 0.12s; outline: none; }
+      .bg-swatch:hover { transform: scale(1.18); box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+    `;
     document.head.appendChild(style);
   }
 }

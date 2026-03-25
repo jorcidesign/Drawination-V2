@@ -1,4 +1,8 @@
 // src/history/TimelapseViewer.ts
+// FIX: _layerCreated, _layerVisible, _layerOrder now initialized from
+// computeTimelineState() instead of hardcoded Set([0]).
+// This ensures layers created before the timelapse are correctly shown from frame 0.
+
 import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { HistoryManager } from '../history/HistoryManager';
 import type { BrushEngine } from '../core/render/BrushEngine';
@@ -10,12 +14,17 @@ import { DEFAULT_BACKGROUND_COLOR } from './computeTimelineState';
 
 const MS_PER_STROKE_BASE = 40;
 const FADE_STEPS = 16;
+const MAX_LAYERS = 10;
 
 interface DrawItem { kind: 'draw'; event: TimelineEvent; data: ArrayBuffer }
 interface TransformItem { kind: 'transform'; targetIds: string[]; matrix: number[] }
 interface HideItem { kind: 'hide'; targetIds: string[] }
 interface BgItem { kind: 'bg'; color: string }
-type PlaylistItem = DrawItem | TransformItem | HideItem | BgItem;
+interface LayerVisibilityItem { kind: 'layer-visibility'; layerIndex: number; visible: boolean }
+interface LayerCreateItem { kind: 'layer-create'; layerIndex: number }
+interface LayerDeleteItem { kind: 'layer-delete'; layerIndex: number }
+interface LayerReorderItem { kind: 'layer-reorder'; layerOrder: number[] }
+type PlaylistItem = DrawItem | TransformItem | HideItem | BgItem | LayerVisibilityItem | LayerCreateItem | LayerDeleteItem | LayerReorderItem;
 
 export class TimelapseViewer {
     private engine: CanvasEngine;
@@ -37,6 +46,11 @@ export class TimelapseViewer {
 
     private _recCanvas: HTMLCanvasElement | null = null;
     private _recCtx: CanvasRenderingContext2D | null = null;
+
+    private _layerCanvases: Map<number, HTMLCanvasElement> = new Map();
+    private _layerVisible: Map<number, boolean> = new Map();
+    private _layerCreated: Set<number> = new Set([0]);
+    private _layerOrder: number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
     private _resumeResolve: (() => void) | null = null;
 
@@ -73,6 +87,7 @@ export class TimelapseViewer {
 
         const W = this.engine.width;
         const H = this.engine.height;
+
         this._recCanvas = document.createElement('canvas');
         this._recCanvas.width = W;
         this._recCanvas.height = H;
@@ -84,10 +99,34 @@ export class TimelapseViewer {
             canvasWrap.appendChild(this._recCanvas);
         }
 
-        // Arrancar con el color de fondo actual del proyecto
-        const initialBg = this.history.getState().backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
+        // FIX: Initialize layer state from the actual current timeline state,
+        // not from a hardcoded Set([0]).
+        const currentState = this.history.getState();
+        this._layerCreated = new Set(currentState.createdLayers);
+        this._layerOrder = [...currentState.layerOrder];
+        this._layerVisible = new Map();
+
+        this._layerCanvases.clear();
+        for (let i = 0; i < MAX_LAYERS; i++) {
+            const c = document.createElement('canvas');
+            c.width = W; c.height = H;
+            this._layerCanvases.set(i, c);
+            // Use visibility from current state, default true for untracked layers
+            this._layerVisible.set(i, currentState.layersState.get(i)?.visible ?? true);
+        }
+
+        // Initial background
+        const initialBg = currentState.backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
         this._recCtx.fillStyle = initialBg;
         this._recCtx.fillRect(0, 0, W, H);
+
+        // Reset layer state to replay from the beginning
+        // (the playlist will replay all LAYER_CREATE/LAYER_VISIBILITY events)
+        this._layerCreated = new Set([0]);
+        this._layerOrder = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        for (let i = 0; i < MAX_LAYERS; i++) {
+            this._layerVisible.set(i, true);
+        }
 
         await this._reproduce();
 
@@ -98,163 +137,88 @@ export class TimelapseViewer {
         await this.rebuilder.rebuild(this.activeBrush);
     }
 
+    // ── Layer composition ─────────────────────────────────────────────────
+
+    private _composeLayers(bgColor: string): void {
+        const ctx = this._recCtx!;
+        const W = this._recCanvas!.width;
+        const H = this._recCanvas!.height;
+
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(0, 0, W, H);
+
+        for (const layerIndex of this._layerOrder) {
+            if (!this._layerCreated.has(layerIndex) || !this._layerVisible.get(layerIndex)) continue;
+
+            const layerCanvas = this._layerCanvases.get(layerIndex);
+            if (layerCanvas) {
+                ctx.save();
+                ctx.drawImage(layerCanvas, 0, 0);
+                ctx.restore();
+            }
+        }
+    }
+
     // ── Seek ──────────────────────────────────────────────────────────────
 
     private async _seekTo(targetDrawIndex: number): Promise<void> {
-        if (!this._recCtx || !this._recCanvas) return;
+        const W = this._recCanvas!.width;
+        const H = this._recCanvas!.height;
 
-        const ctx = this._recCtx;
-        const W = this._recCanvas.width;
-        const H = this._recCanvas.height;
+        this._layerCreated = new Set([0]);
+        this._layerVisible.clear();
+        this._layerOrder = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
-        // Recalcular el color de fondo hasta ese punto
+        for (let i = 0; i < MAX_LAYERS; i++) {
+            this._layerVisible.set(i, true);
+            const layerCtx = this._layerCanvases.get(i)?.getContext('2d')!;
+            if (layerCtx) layerCtx.clearRect(0, 0, W, H);
+        }
+
         let bgColor = DEFAULT_BACKGROUND_COLOR;
         const currentTransforms = new Map<string, DOMMatrix>();
         const hiddenIds = new Set<string>();
         let drawsSeen = 0;
-
-        ctx.fillStyle = bgColor;
-        ctx.fillRect(0, 0, W, H);
 
         for (const item of this._playlist) {
             if (drawsSeen >= targetDrawIndex) break;
 
             if (item.kind === 'bg') {
                 bgColor = item.color;
-
+            } else if (item.kind === 'layer-visibility') {
+                this._layerVisible.set(item.layerIndex, item.visible);
+            } else if (item.kind === 'layer-create') {
+                this._layerCreated.add(item.layerIndex);
+            } else if (item.kind === 'layer-delete') {
+                this._layerCreated.delete(item.layerIndex);
+            } else if (item.kind === 'layer-reorder') {
+                const uncreated = this._layerOrder.filter(id => !this._layerCreated.has(id));
+                this._layerOrder = [...uncreated, ...item.layerOrder];
             } else if (item.kind === 'draw') {
-                const cmd = CommandFactory.create(item.event, this.activeBrush);
-                const t = currentTransforms.get(item.event.id);
-                if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                if (!hiddenIds.has(item.event.id)) {
-                    ctx.save(); cmd.execute(ctx); ctx.restore();
+                const layerCtx = this._layerCanvases.get(item.event.layerIndex ?? 0)?.getContext('2d');
+                if (layerCtx && !hiddenIds.has(item.event.id)) {
+                    const cmd = CommandFactory.create(item.event, this.activeBrush);
+                    const t = currentTransforms.get(item.event.id);
+                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                    layerCtx.save();
+                    cmd.execute(layerCtx);
+                    layerCtx.restore();
                 }
                 drawsSeen++;
-
             } else if (item.kind === 'transform') {
                 const newMatrix = new DOMMatrix(item.matrix);
                 for (const id of item.targetIds) {
                     const current = currentTransforms.get(id) ?? new DOMMatrix();
                     currentTransforms.set(id, newMatrix.multiply(current));
                 }
-                if (drawsSeen > 0) {
-                    ctx.fillStyle = bgColor;
-                    ctx.fillRect(0, 0, W, H);
-                    let count = 0;
-                    for (const pi of this._playlist) {
-                        if (count >= drawsSeen) break;
-                        if (pi.kind !== 'draw') continue;
-                        if (hiddenIds.has(pi.event.id)) { count++; continue; }
-                        const cmd = CommandFactory.create(pi.event, this.activeBrush);
-                        const t = currentTransforms.get(pi.event.id);
-                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                        ctx.save(); cmd.execute(ctx); ctx.restore();
-                        count++;
-                    }
-                }
-
             } else if (item.kind === 'hide') {
                 for (const id of item.targetIds) hiddenIds.add(id);
             }
         }
 
+        this._composeLayers(bgColor);
         this._currentDraw = targetDrawIndex;
         this._updateSlider();
-    }
-
-    // ── Reproducción principal ────────────────────────────────────────────
-
-    private async _reproduce(): Promise<void> {
-        const ctx = this._recCtx!;
-        const W = this.engine.width;
-        const H = this.engine.height;
-
-        const currentTransforms = new Map<string, DOMMatrix>();
-        const hiddenIds = new Set<string>();
-        const processedDrawItems: DrawItem[] = [];
-        let currentBg = this.history.getState().backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
-
-        for (let i = 0; i < this._playlist.length; i++) {
-            if (this._cancelled) break;
-
-            if (this._seeking) {
-                this._seeking = false;
-                const targetDraw = this._currentDraw;
-                await this._seekTo(targetDraw);
-                i = this._findPlaylistIndexForDraw(targetDraw);
-                this._rebuildState(targetDraw, currentTransforms, hiddenIds, processedDrawItems);
-                // Recalcular currentBg hasta targetDraw
-                currentBg = DEFAULT_BACKGROUND_COLOR;
-                for (const pi of this._playlist.slice(0, i)) {
-                    if (pi.kind === 'bg') currentBg = pi.color;
-                }
-                continue;
-            }
-
-            await this._waitIfPaused();
-            if (this._cancelled) break;
-            if (this._seeking) { i--; continue; }
-
-            const item = this._playlist[i];
-            const msPerStroke = MS_PER_STROKE_BASE / this._speed;
-
-            if (item.kind === 'bg') {
-                currentBg = item.color;
-                // Redibujar con el nuevo fondo
-                ctx.fillStyle = currentBg;
-                ctx.fillRect(0, 0, W, H);
-                for (const di of processedDrawItems) {
-                    if (hiddenIds.has(di.event.id)) continue;
-                    const cmd = CommandFactory.create(di.event, this.activeBrush);
-                    const t = currentTransforms.get(di.event.id);
-                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                    ctx.save(); cmd.execute(ctx); ctx.restore();
-                }
-                await this._sleep(msPerStroke * 2);
-
-            } else if (item.kind === 'draw') {
-                const cmd = CommandFactory.create(item.event, this.activeBrush);
-                const t = currentTransforms.get(item.event.id);
-                if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                if (!hiddenIds.has(item.event.id)) {
-                    ctx.save(); cmd.execute(ctx); ctx.restore();
-                }
-                processedDrawItems.push(item);
-                this._currentDraw++;
-                this._updateSlider();
-                await this._sleep(msPerStroke);
-
-            } else if (item.kind === 'transform') {
-                const newMatrix = new DOMMatrix(item.matrix);
-                for (const id of item.targetIds) {
-                    const current = currentTransforms.get(id) ?? new DOMMatrix();
-                    currentTransforms.set(id, newMatrix.multiply(current));
-                }
-                ctx.fillStyle = currentBg;
-                ctx.fillRect(0, 0, W, H);
-                for (const di of processedDrawItems) {
-                    if (hiddenIds.has(di.event.id)) continue;
-                    const cmd = CommandFactory.create(di.event, this.activeBrush);
-                    const t = currentTransforms.get(di.event.id);
-                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                    ctx.save(); cmd.execute(ctx); ctx.restore();
-                }
-                await this._sleep(msPerStroke * 3);
-
-            } else if (item.kind === 'hide') {
-                for (const id of item.targetIds) hiddenIds.add(id);
-                ctx.fillStyle = currentBg;
-                ctx.fillRect(0, 0, W, H);
-                for (const di of processedDrawItems) {
-                    if (hiddenIds.has(di.event.id)) continue;
-                    const cmd = CommandFactory.create(di.event, this.activeBrush);
-                    const t = currentTransforms.get(di.event.id);
-                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                    ctx.save(); cmd.execute(ctx); ctx.restore();
-                }
-                await this._sleep(msPerStroke * 2);
-            }
-        }
     }
 
     private _findPlaylistIndexForDraw(targetDraw: number): number {
@@ -268,48 +232,198 @@ export class TimelapseViewer {
         return this._playlist.length;
     }
 
-    private _rebuildState(targetDraw: number, transforms: Map<string, DOMMatrix>, hiddenIds: Set<string>, processedItems: DrawItem[]): void {
-        transforms.clear(); hiddenIds.clear(); processedItems.length = 0;
-        let drawsSeen = 0;
-        for (const item of this._playlist) {
-            if (drawsSeen >= targetDraw) break;
-            if (item.kind === 'draw') { processedItems.push(item); drawsSeen++; }
-            else if (item.kind === 'transform') {
+    // ── Main reproduction loop ────────────────────────────────────────────
+
+    private async _reproduce(): Promise<void> {
+        const W = this.engine.width;
+        const H = this.engine.height;
+
+        const currentTransforms = new Map<string, DOMMatrix>();
+        const hiddenIds = new Set<string>();
+        let currentBg = this.history.getState().backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
+
+        for (let i = 0; i < this._playlist.length; i++) {
+            if (this._cancelled) break;
+
+            if (this._seeking) {
+                this._seeking = false;
+                const targetDraw = this._currentDraw;
+                await this._seekTo(targetDraw);
+                i = this._findPlaylistIndexForDraw(targetDraw);
+
+                currentTransforms.clear();
+                hiddenIds.clear();
+                currentBg = DEFAULT_BACKGROUND_COLOR;
+
+                let drawsSeen = 0;
+                for (const pi of this._playlist.slice(0, i)) {
+                    if (pi.kind === 'bg') currentBg = pi.color;
+                    else if (pi.kind === 'draw') drawsSeen++;
+                    else if (pi.kind === 'transform') {
+                        const m = new DOMMatrix(pi.matrix);
+                        for (const id of pi.targetIds) {
+                            currentTransforms.set(id, m.multiply(currentTransforms.get(id) ?? new DOMMatrix()));
+                        }
+                    } else if (pi.kind === 'hide') {
+                        for (const id of pi.targetIds) hiddenIds.add(id);
+                    }
+                }
+                continue;
+            }
+
+            await this._waitIfPaused();
+            if (this._cancelled) break;
+            if (this._seeking) { i--; continue; }
+
+            const item = this._playlist[i];
+            const msPerStroke = MS_PER_STROKE_BASE / this._speed;
+
+            if (item.kind === 'bg') {
+                currentBg = item.color;
+                this._composeLayers(currentBg);
+                await this._sleep(msPerStroke * 2);
+
+            } else if (item.kind === 'layer-visibility') {
+                this._layerVisible.set(item.layerIndex, item.visible);
+                this._composeLayers(currentBg);
+                await this._sleep(msPerStroke);
+
+            } else if (item.kind === 'layer-create') {
+                this._layerCreated.add(item.layerIndex);
+                this._composeLayers(currentBg);
+                await this._sleep(msPerStroke);
+
+            } else if (item.kind === 'layer-delete') {
+                this._layerCreated.delete(item.layerIndex);
+                this._composeLayers(currentBg);
+                await this._sleep(msPerStroke);
+
+            } else if (item.kind === 'layer-reorder') {
+                const uncreated = this._layerOrder.filter(id => !this._layerCreated.has(id));
+                this._layerOrder = [...uncreated, ...item.layerOrder];
+                this._composeLayers(currentBg);
+                await this._sleep(msPerStroke);
+
+            } else if (item.kind === 'draw') {
+                const layerIdx = item.event.layerIndex ?? 0;
+                const layerCanvas = this._layerCanvases.get(layerIdx);
+                const layerCtx = layerCanvas?.getContext('2d');
+
+                if (layerCtx && !hiddenIds.has(item.event.id)) {
+                    const cmd = CommandFactory.create(item.event, this.activeBrush);
+                    const t = currentTransforms.get(item.event.id);
+                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+
+                    layerCtx.save();
+                    cmd.execute(layerCtx);
+                    layerCtx.restore();
+                }
+
+                this._composeLayers(currentBg);
+                this._currentDraw++;
+                this._updateSlider();
+                await this._sleep(msPerStroke);
+
+            } else if (item.kind === 'transform') {
                 const newMatrix = new DOMMatrix(item.matrix);
                 for (const id of item.targetIds) {
-                    const current = transforms.get(id) ?? new DOMMatrix();
-                    transforms.set(id, newMatrix.multiply(current));
+                    const current = currentTransforms.get(id) ?? new DOMMatrix();
+                    currentTransforms.set(id, newMatrix.multiply(current));
                 }
+
+                for (let li = 0; li < MAX_LAYERS; li++) {
+                    const lc = this._layerCanvases.get(li);
+                    if (lc) lc.getContext('2d')!.clearRect(0, 0, W, H);
+                }
+
+                let drawsSeen = 0;
+                for (const pi of this._playlist.slice(0, i + 1)) {
+                    if (pi.kind !== 'draw') continue;
+                    if (hiddenIds.has(pi.event.id)) { drawsSeen++; continue; }
+                    if (drawsSeen >= this._currentDraw) break;
+
+                    const li = pi.event.layerIndex ?? 0;
+                    const lc = this._layerCanvases.get(li);
+                    const lctx = lc?.getContext('2d');
+                    if (lctx) {
+                        const cmd = CommandFactory.create(pi.event, this.activeBrush);
+                        const t = currentTransforms.get(pi.event.id);
+                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                        lctx.save();
+                        cmd.execute(lctx);
+                        lctx.restore();
+                    }
+                    drawsSeen++;
+                }
+
+                this._composeLayers(currentBg);
+                await this._sleep(msPerStroke * 3);
+
             } else if (item.kind === 'hide') {
                 for (const id of item.targetIds) hiddenIds.add(id);
+
+                for (let li = 0; li < MAX_LAYERS; li++) {
+                    const lc = this._layerCanvases.get(li);
+                    if (lc) lc.getContext('2d')!.clearRect(0, 0, W, H);
+                }
+
+                let drawsSeen = 0;
+                for (const pi of this._playlist.slice(0, i + 1)) {
+                    if (pi.kind !== 'draw') continue;
+                    if (drawsSeen >= this._currentDraw) break;
+                    if (hiddenIds.has(pi.event.id)) { drawsSeen++; continue; }
+
+                    const li = pi.event.layerIndex ?? 0;
+                    const lc = this._layerCanvases.get(li);
+                    const lctx = lc?.getContext('2d');
+                    if (lctx) {
+                        const cmd = CommandFactory.create(pi.event, this.activeBrush);
+                        const t = currentTransforms.get(pi.event.id);
+                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                        lctx.save();
+                        cmd.execute(lctx);
+                        lctx.restore();
+                    }
+                    drawsSeen++;
+                }
+
+                this._composeLayers(currentBg);
+                await this._sleep(msPerStroke * 2);
             }
         }
     }
 
+    // ── Final result fade ─────────────────────────────────────────────────
+
     private async _showFinalResult(): Promise<void> {
-        const ctx = this._recCtx!;
         const W = this.engine.width;
         const H = this.engine.height;
-        const { backgroundColor, layersState, layerRoute } = this.history.getState();
-        const bgColor = backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
+        const { backgroundColor, layersState, layerOrder } = this.history.getState();
 
-        // Capturar el resultado final con el fondo correcto
         const snap = document.createElement('canvas');
-        snap.width = W; snap.height = H;
+        snap.width = W;
+        snap.height = H;
         const sCtx = snap.getContext('2d')!;
-        sCtx.fillStyle = bgColor;
+
+        sCtx.fillStyle = backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
         sCtx.fillRect(0, 0, W, H);
-        for (let i = 0; i < 10; i++) {
+
+        for (const i of layerOrder) {
             const layerState = layersState.get(i);
             if (!layerState?.visible) continue;
-            if ((layerRoute.get(i) ?? i) !== i) continue;
-            const srcCanvas = this.engine.getLayerCanvas(i);
-            sCtx.save(); sCtx.globalAlpha = layerState.opacity; sCtx.drawImage(srcCanvas, 0, 0); sCtx.restore();
+
+            sCtx.save();
+            sCtx.globalAlpha = layerState.opacity;
+            sCtx.drawImage(this.engine.getLayerCanvas(i), 0, 0);
+            sCtx.restore();
         }
 
         const alphaStep = 1 / FADE_STEPS;
-        for (let i = 1; i <= FADE_STEPS; i++) {
-            ctx.save(); ctx.globalAlpha = alphaStep * i; ctx.drawImage(snap, 0, 0); ctx.restore();
+        for (let j = 1; j <= FADE_STEPS; j++) {
+            this._recCtx!.save();
+            this._recCtx!.globalAlpha = alphaStep * j;
+            this._recCtx!.drawImage(snap, 0, 0);
+            this._recCtx!.restore();
             await this._sleep(500 / FADE_STEPS);
         }
         await this._sleep(1500);
@@ -469,9 +583,10 @@ export class TimelapseViewer {
         document.getElementById('tl-styles')?.remove();
         this._recCanvas = null;
         this._recCtx = null;
+        this._layerCanvases.clear();
     }
 
-    // ── Playlist ──────────────────────────────────────────────────────────
+    // ── Playlist builder ──────────────────────────────────────────────────
 
     private async _buildPlaylist(spine: TimelineEvent[]): Promise<{ playlist: PlaylistItem[]; drawCount: number }> {
         const playlist: PlaylistItem[] = [];
@@ -493,6 +608,22 @@ export class TimelapseViewer {
                 playlist.push({ kind: 'bg', color: ev.backgroundColor });
                 i++;
 
+            } else if (ev.type === 'LAYER_VISIBILITY') {
+                playlist.push({ kind: 'layer-visibility', layerIndex: ev.layerIndex, visible: ev.visible ?? true });
+                i++;
+
+            } else if (ev.type === 'LAYER_CREATE') {
+                playlist.push({ kind: 'layer-create', layerIndex: ev.layerIndex });
+                i++;
+
+            } else if (ev.type === 'LAYER_DELETE') {
+                playlist.push({ kind: 'layer-delete', layerIndex: ev.layerIndex });
+                i++;
+
+            } else if (ev.type === 'LAYER_REORDER' && ev.layerOrder) {
+                playlist.push({ kind: 'layer-reorder', layerOrder: ev.layerOrder });
+                i++;
+
             } else if (ev.type === 'TRANSFORM' && ev.targetIds && ev.transformMatrix) {
                 let currentMatrix = new DOMMatrix(ev.transformMatrix);
                 const sortedIds = ev.targetIds.slice().sort().join(',');
@@ -501,12 +632,17 @@ export class TimelapseViewer {
                     currentMatrix = new DOMMatrix(spine[j].transformMatrix).multiply(currentMatrix);
                     j++;
                 }
-                playlist.push({ kind: 'transform', targetIds: ev.targetIds, matrix: [currentMatrix.a, currentMatrix.b, currentMatrix.c, currentMatrix.d, currentMatrix.e, currentMatrix.f] });
+                playlist.push({
+                    kind: 'transform',
+                    targetIds: ev.targetIds,
+                    matrix: [currentMatrix.a, currentMatrix.b, currentMatrix.c, currentMatrix.d, currentMatrix.e, currentMatrix.f]
+                });
                 i = j;
 
             } else if (ev.type === 'HIDE' && ev.targetIds) {
                 playlist.push({ kind: 'hide', targetIds: ev.targetIds });
                 i++;
+
             } else {
                 i++;
             }
@@ -518,16 +654,21 @@ export class TimelapseViewer {
     private async _preloadAll(events: TimelineEvent[]): Promise<Map<string, ArrayBuffer>> {
         const dataMap = new Map<string, ArrayBuffer>();
         const idsNeeded: string[] = [];
+
         for (const ev of events) {
             if (ev.data) dataMap.set(ev.id, ev.data);
             else idsNeeded.push(ev.id);
         }
+
         if (idsNeeded.length > 0) {
             const batch = await this.storage.loadEventDataBatch(idsNeeded);
             for (const [id, buf] of batch.entries()) dataMap.set(id, buf);
         }
+
         return dataMap;
     }
 
-    private _sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, Math.max(0, ms))); }
+    private _sleep(ms: number): Promise<void> {
+        return new Promise(r => setTimeout(r, Math.max(0, ms)));
+    }
 }

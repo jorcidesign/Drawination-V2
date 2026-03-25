@@ -1,22 +1,19 @@
 // src/ui/molecules/LayerItem.ts
 import { Icons } from '../atoms/Icons';
-import { LayerThumbnail } from '../atoms/LayerThumbnail';
-import { IconButton } from '../atoms/IconButton';
+import type { LayerState } from '../../history/TimelineTypes';
 
 export interface LayerItemProps {
-    id: number;
-    name: string;
-    visible: boolean;
-    opacity: number;
+    layerIndex: number;
+    state: LayerState;
     isActive: boolean;
-    isExpanded: boolean; // <--- NUEVA PROPIEDAD
-    onSelect: (id: number) => void;
-    onToggleVis: (id: number) => void;
-    onOpacityChange: (id: number, opacity: number) => void;
-    onLock: (id: number) => void;
-    onDuplicate: (id: number) => void;
-    onMergeDown: (id: number) => void;
-    onDelete: (id: number) => void;
+    isExpanded: boolean;
+    onSelect: (index: number) => void;
+    onToggleVisibility: (index: number) => void;
+    onToggleLock: (index: number) => void;
+    onDuplicate: (index: number) => void;
+    onMergeDown: (index: number) => void;
+    onDelete: (index: number) => void;
+    onOpacityChange: (index: number, opacity: number) => void;
 }
 
 export class LayerItem {
@@ -24,17 +21,12 @@ export class LayerItem {
 
     constructor(props: LayerItemProps) {
         this.element = document.createElement('div');
-        // Añadimos la clase 'expanded' dinámicamente
         this.element.className = `layer-item-wrapper ${props.isActive ? 'active' : ''} ${props.isExpanded ? 'expanded' : ''}`;
-        this.element.dataset.id = props.id.toString();
+        this.element.dataset.layerIndex = String(props.layerIndex);
 
-        // ── FILA 1: Principal ──
+        // ── Row 1: Main ───────────────────────────────────────────────────
         const mainRow = document.createElement('div');
         mainRow.className = 'layer-main';
-        mainRow.addEventListener('click', (e) => {
-            if ((e.target as HTMLElement).closest('.layer-eye, .layer-op')) return;
-            props.onSelect(props.id);
-        });
 
         const handle = document.createElement('div');
         handle.className = 'layer-handle';
@@ -43,70 +35,104 @@ export class LayerItem {
 
         const eyeBtn = document.createElement('button');
         eyeBtn.className = 'layer-eye';
-        eyeBtn.innerHTML = props.visible ? Icons.eyeOn : Icons.eyeOff;
-        eyeBtn.onclick = (e) => {
-            e.stopPropagation();
-            props.onToggleVis(props.id);
-        };
+        eyeBtn.title = props.state.visible ? 'Ocultar capa' : 'Mostrar capa';
+        eyeBtn.innerHTML = props.state.visible ? Icons.eyeOn : `<div style="opacity: 0.35">${Icons.eyeOff}</div>`;
+        eyeBtn.onclick = (e) => { e.stopPropagation(); props.onToggleVisibility(props.layerIndex); };
         mainRow.appendChild(eyeBtn);
 
-        const thumb = new LayerThumbnail();
-        thumb.mount(mainRow);
+        const thumb = document.createElement('div');
+        thumb.className = 'layer-thumb';
+        mainRow.appendChild(thumb);
 
         const nameSpan = document.createElement('span');
         nameSpan.className = 'layer-name';
-        nameSpan.textContent = props.name;
+        nameSpan.textContent = props.state.name;
         mainRow.appendChild(nameSpan);
 
-        const opSlider = document.createElement('input');
-        opSlider.type = 'range';
-        opSlider.className = 'layer-op';
-        opSlider.min = '0';
-        opSlider.max = '100';
-        opSlider.value = Math.round(props.opacity * 100).toString();
-        opSlider.title = 'Opacidad';
-        opSlider.oninput = (e) => {
-            props.onOpacityChange(props.id, parseInt((e.target as HTMLInputElement).value) / 100);
-        };
-        opSlider.onclick = (e) => e.stopPropagation();
-        mainRow.appendChild(opSlider);
+        const lockBtn = document.createElement('button');
+        lockBtn.className = `layer-lock ${props.state.locked ? 'is-locked' : ''}`;
+        lockBtn.title = props.state.locked ? 'Desbloquear capa' : 'Bloquear capa';
+        lockBtn.innerHTML = Icons.lock;
+        lockBtn.onclick = (e) => { e.stopPropagation(); props.onToggleLock(props.layerIndex); };
+        mainRow.appendChild(lockBtn);
 
         this.element.appendChild(mainRow);
 
-        // ── FILA 2: Acciones (Acordeón Animado) ──
+        mainRow.addEventListener('click', (e) => {
+            if ((e.target as HTMLElement).closest('.layer-eye, .layer-lock')) return;
+            props.onSelect(props.layerIndex);
+        });
+
+        // ── Row 2: Accordion ──────────────────────────────────────────────
         const actionsWrapper = document.createElement('div');
-        actionsWrapper.className = 'layer-actions-wrapper'; // Controla el alto (0 a 1fr)
+        actionsWrapper.className = `layer-actions-wrapper ${props.isExpanded ? 'expanded' : ''}`;
 
         const actionsOverflow = document.createElement('div');
-        actionsOverflow.className = 'layer-actions-overflow'; // Oculta el contenido al colapsar
+        actionsOverflow.className = 'layer-actions-overflow';
 
         const actionsInner = document.createElement('div');
-        actionsInner.className = 'layer-actions-inner'; // Contiene los botones reales y sus márgenes
+        actionsInner.className = 'layer-actions-inner';
 
-        const lockBtn = new IconButton({ icon: 'lock', title: 'Bloquear', variant: 'sm', onClick: () => props.onLock(props.id) });
-        const dupBtn = new IconButton({ icon: 'duplicate', title: 'Duplicar', variant: 'sm', onClick: () => props.onDuplicate(props.id) });
-        const mergeBtn = new IconButton({ icon: 'mergeDown', title: 'Fusionar', variant: 'sm', onClick: () => props.onMergeDown(props.id) });
-        const delBtn = new IconButton({ icon: 'trash', title: 'Eliminar', variant: 'danger', onClick: () => props.onDelete(props.id) });
+        // Icon-only action buttons — text removed, title attribute for tooltip
+        const btnRow = document.createElement('div');
+        btnRow.className = 'layer-action-btns';
 
-        lockBtn.mount(actionsInner);
-        dupBtn.mount(actionsInner);
-        mergeBtn.mount(actionsInner);
+        const dupBtn = document.createElement('button');
+        dupBtn.className = 'layer-btn';
+        dupBtn.title = 'Duplicar capa';
+        dupBtn.innerHTML = Icons.duplicate;
+        dupBtn.onclick = () => props.onDuplicate(props.layerIndex);
 
-        const sep = document.createElement('div');
-        sep.style.width = '1px';
-        sep.style.height = '14px';
-        sep.style.background = 'var(--surface-bar-border)';
-        sep.style.margin = '0 4px';
-        actionsInner.appendChild(sep);
+        const mergeBtn = document.createElement('button');
+        mergeBtn.className = 'layer-btn';
+        mergeBtn.title = 'Fusionar hacia abajo';
+        mergeBtn.innerHTML = Icons.mergeDown;
+        if (props.state.locked) mergeBtn.disabled = true;
+        mergeBtn.onclick = () => props.onMergeDown(props.layerIndex);
 
-        delBtn.mount(actionsInner);
+        const delBtn = document.createElement('button');
+        delBtn.className = 'layer-btn layer-btn--danger';
+        delBtn.title = 'Eliminar capa';
+        delBtn.innerHTML = Icons.trash;
+        if (props.state.locked) delBtn.disabled = true;
+        delBtn.onclick = () => props.onDelete(props.layerIndex);
+
+        btnRow.appendChild(dupBtn);
+        btnRow.appendChild(mergeBtn);
+        btnRow.appendChild(delBtn);
+        actionsInner.appendChild(btnRow);
+
+        // Opacity slider — label on the RIGHT, slider fills remaining space
+        const opWrap = document.createElement('div');
+        opWrap.className = 'layer-op-wrap';
+
+        const opLabel = document.createElement('span');
+        opLabel.className = 'layer-op-label';
+        opLabel.textContent = `${Math.round(props.state.opacity * 100)}%`;
+
+        const opSlider = document.createElement('input');
+        opSlider.type = 'range';
+        opSlider.className = 'layer-op-slider';
+        opSlider.min = '0';
+        opSlider.max = '100';
+        opSlider.value = String(Math.round(props.state.opacity * 100));
+
+        opSlider.oninput = (e) => {
+            const val = parseInt((e.target as HTMLInputElement).value);
+            opLabel.textContent = `${val}%`;
+        };
+        opSlider.onchange = (e) => {
+            const val = parseInt((e.target as HTMLInputElement).value);
+            props.onOpacityChange(props.layerIndex, val / 100);
+        };
+
+        // flex-direction: row-reverse in CSS puts label on right, slider on left
+        opWrap.appendChild(opSlider);
+        opWrap.appendChild(opLabel);
+        actionsInner.appendChild(opWrap);
 
         actionsOverflow.appendChild(actionsInner);
         actionsWrapper.appendChild(actionsOverflow);
         this.element.appendChild(actionsWrapper);
     }
-
-    public mount(parent: HTMLElement) {
-        parent.appendChild(this.element);
-    }
-}
+}   

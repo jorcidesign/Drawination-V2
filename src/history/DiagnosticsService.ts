@@ -11,6 +11,7 @@ const EVENT_LABELS: Record<string, string> = {
     LAYER_REORDER: '↕️  Reorden capa', LAYER_OPACITY: '🔆 Opacidad capa',
     LAYER_VISIBILITY: '👁️  Visibilidad', LAYER_LOCK: '🔒 Bloqueo',
     LAYER_MERGE_DOWN: '⏬ Merge down', LAYER_SELECT: '🎯 Seleccionar capa',
+    LAYER_DUPLICATE: '📋 Duplicar capa',
     UNDO: '↩️  Undo', REDO: '↪️  Redo', FLIP_H: '🪞 Flip H',
 };
 
@@ -61,10 +62,10 @@ export class DiagnosticsService {
             case 'HIDE':
                 console.log(`%c${label} %c${layerStr}%c Ocultó ${event.targetIds?.length ?? 0} trazo(s)`, 'color:#fff;background:#8e44ad;padding:1px 4px;border-radius:3px;font-weight:bold', 'color:#f1c40f;font-weight:bold', 'color:#c8a');
                 break;
-            case 'DUPLICATE_GROUP': // <--- AÑADIDO PARA LA ACCIÓN DUPLICAR
+            case 'DUPLICATE_GROUP':
                 console.log(`%c${label} %c${layerStr}%c Duplicó ${event.sourceIds?.length ?? 0} trazo(s)`, 'color:#fff;background:#2ecc71;padding:1px 4px;border-radius:3px;font-weight:bold', 'color:#f1c40f;font-weight:bold', 'color:#fff');
                 break;
-            case 'LAYER_CREATE': case 'LAYER_DELETE': case 'LAYER_VISIBILITY': case 'LAYER_MERGE_DOWN': case 'LAYER_SELECT':
+            case 'LAYER_CREATE': case 'LAYER_DELETE': case 'LAYER_VISIBILITY': case 'LAYER_MERGE_DOWN': case 'LAYER_SELECT': case 'LAYER_DUPLICATE':
                 console.log(`%c${label} %c${layerStr}`, 'color:#fff;background:#27ae60;padding:1px 4px;border-radius:3px;font-weight:bold', 'color:#f1c40f;font-weight:bold');
                 break;
             default:
@@ -92,61 +93,91 @@ export class DiagnosticsService {
         console.log(`%c${icon} ${action}: %c${label}${layerStr}`, 'color:#f39c12;font-weight:bold', 'color:#aaa');
     }
 
-    // === FIX: Manejo flexible para 'actionType' que previene crasheos por tipos viejos (booleanos) o nuevos (strings) ===
-    public static logTransformState(reason: string, actionType: 'move' | 'scale' | 'rotate' | 'none' | boolean): void {
+    public static logTransformState(
+        reason: string,
+        actionType: 'move' | 'scale' | 'rotate' | 'none' | boolean
+    ): void {
         if (!import.meta.env.DEV) return;
 
         let actionText = '';
         let color = '';
 
-        if (reason === 'enter') {
-            actionText = '✅ Confirmado (Enter)';
-            color = '#2ecc71';
-        } else if (reason === 'escape') {
-            actionText = '❌ Abortado (Escape)';
-            color = '#e74c3c';
-        } else if (reason === 'click_outside') {
-            actionText = '🖱️ Confirmado (Click afuera)';
-            color = '#3498db';
-        } else if (reason === 'system_interruption') {
-            actionText = '⚠️ Interrupción Global (Capa / Timelapse / Clear)';
-            color = '#f39c12';
-        } else if (reason === 'delete' || reason === 'DELETE') {
-            actionText = '🗑️ Eliminado (UI o Suprimir)';
-            color = '#e74c3c';
-        } else if (reason === 'duplicate') { // <--- AÑADIDO
-            actionText = '📋 Duplicado (Desde UI)';
-            color = '#27ae60';
-        } else if (reason === 'flip_h' || reason === 'flip_v') { // <--- AÑADIDO
-            actionText = '🪞 Espejado (Desde UI)';
-            color = '#9b59b6';
-        } else if (reason === 'resurrect_undo') {
-            actionText = '⏪ Resucitado (Por Ctrl+Z)';
-            color = '#9b59b6';
-        } else if (reason === 'resurrect_redo') {
-            actionText = '⏩ Resucitado (Por Ctrl+Y)';
-            color = '#9b59b6';
-        } else {
-            const toolName = TOOL_LABELS[reason] ?? reason;
-            actionText = `⚠️ Interrumpido por herramienta [${toolName}]`;
-            color = '#f39c12';
+        switch (reason) {
+            case 'enter':
+                actionText = '✅ Confirmado (Enter)';
+                color = '#2ecc71';
+                break;
+            case 'escape':
+                actionText = '❌ Abortado (Escape)';
+                color = '#e74c3c';
+                break;
+            case 'click_outside':
+                actionText = '🖱️ Confirmado (Click afuera)';
+                color = '#3498db';
+                break;
+            case 'system_interruption':
+                actionText = '⚠️ Interrupción Global';
+                color = '#f39c12';
+                break;
+            case 'delete': case 'DELETE':
+                actionText = '🗑️ Eliminado';
+                color = '#e74c3c';
+                break;
+            case 'duplicate':
+                actionText = '📋 Duplicado';
+                color = '#27ae60';
+                break;
+            case 'flip_h': case 'flip_v':
+                actionText = '🪞 Espejado';
+                color = '#9b59b6';
+                break;
+
+            // ── Estados de la máquina de undo/redo ────────────────────────
+            case 'resurrect_undo':
+                actionText = '⏪ [FOCO] Abriendo handle pre-undo';
+                color = '#9b59b6';
+                break;
+            case 'resurrect_redo':
+                actionText = '⏩ [FOCO] Abriendo handle pre-redo';
+                color = '#9b59b6';
+                break;
+            case 'travel_undo':
+                actionText = '⏪ [VIAJE] Aplicando undo histórico (handle abierto)';
+                color = '#3498db';
+                break;
+            case 'travel_redo':
+                actionText = '⏩ [VIAJE] Aplicando redo histórico (handle abierto)';
+                color = '#3498db';
+                break;
+            case 'undo_exit':
+                actionText = '⏪ [SALIDA] Cerrando handle antes del undo';
+                color = '#e67e22';
+                break;
+            case 'redo_exit':
+                actionText = '⏩ [SALIDA] Cerrando handle antes del redo';
+                color = '#e67e22';
+                break;
+
+            default: {
+                const toolName = TOOL_LABELS[reason] ?? reason;
+                actionText = `⚠️ Interrumpido por [${toolName}]`;
+                color = '#f39c12';
+            }
         }
 
-        let moveText = 'sin alteraciones (Sin evento, no le afectará el Ctrl+Z).';
-        if (actionType === 'scale') moveText = 'se reescaló (Generó evento en historia, le afectará el Ctrl+Z).';
-        else if (actionType === 'rotate') moveText = 'se rotó (Generó evento en historia, le afectará el Ctrl+Z).';
-        else if (actionType === 'move' || actionType === true) moveText = 'se movió (Generó evento en historia, le afectará el Ctrl+Z).';
+        const noMoveText = ['duplicate', 'delete', 'DELETE', 'flip_h', 'flip_v',
+            'travel_undo', 'travel_redo', 'undo_exit', 'redo_exit'].includes(reason);
 
-        // Acciones instantáneas de la UI Contextual (Ya emiten su propio logEvent arriba, no necesitan texto de movimiento)
-        if (reason === 'duplicate' || reason === 'delete' || reason === 'DELETE' || reason.startsWith('flip')) {
+        if (noMoveText || reason.startsWith('resurrect')) {
             console.log(`%c⬛ Transform Handle: ${actionText}`, `color:${color}; font-weight:bold;`);
             return;
         }
 
-        if (reason.startsWith('resurrect')) {
-            console.log(`%c⬛ Transform Handle: ${actionText} — Retomando control.`, `color:${color}; font-weight:bold;`);
-        } else {
-            console.log(`%c⬛ Transform Handle: ${actionText} — ${moveText}`, `color:${color}; font-weight:bold;`);
-        }
+        let moveText = 'sin alteraciones';
+        if (actionType === 'scale') moveText = 'se reescaló (genera evento en historial)';
+        else if (actionType === 'rotate') moveText = 'se rotó (genera evento en historial)';
+        else if (actionType === 'move' || actionType === true) moveText = 'se movió (genera evento en historial)';
+
+        console.log(`%c⬛ Transform Handle: ${actionText} — ${moveText}`, `color:${color}; font-weight:bold;`);
     }
 }

@@ -1,20 +1,4 @@
 // src/tools/interaction/transform/TransformContextActions.ts
-//
-// Responsabilidad ÚNICA: ejecutar las acciones de la barra contextual
-// (DELETE, FLIP_H, FLIP_V, DUPLICATE) sobre la selección activa.
-//
-// Cada método es autocontenido: hace el commit en history, persiste en storage,
-// actualiza la bbox en selection, y llama al rebuilder.
-// El TransformHandleTool llama a estos métodos y reacciona al resultado.
-//
-// CONTRATOS:
-//   delete()     → oculta los trazos seleccionados, devuelve true
-//   flipH/flipV()→ aplica matriz de espejo, actualiza bbox, regenera sandbox
-//   duplicate()  → clona trazos con offset, selecciona los nuevos
-//
-// CALLBACK onSandboxNeedsRegen: el Tool lo conecta para que las acciones
-// puedan pedir regeneración del sandbox sin importar TransformSandbox directamente.
-
 import type { ToolContext } from '../../core/ITool';
 import type { BoundingBox } from '../../../core/math/BoundingBox';
 import type { TimelineEvent } from '../../../history/TimelineTypes';
@@ -24,15 +8,11 @@ import { TransformGestureHandler } from './TransformGestureHandler';
 export class TransformContextActions {
 
     private ctx: ToolContext;
-
-    /** Callback que el Tool registra para que las acciones pidan rebuild del sandbox. */
     public onSandboxNeedsRegen: (() => Promise<void>) | null = null;
 
     constructor(ctx: ToolContext) {
         this.ctx = ctx;
     }
-
-    // ── DELETE ────────────────────────────────────────────────────────────
 
     public async delete(): Promise<boolean> {
         if (!this.ctx.selection.hasSelection()) return false;
@@ -45,8 +25,6 @@ export class TransformContextActions {
         DiagnosticsService.logTransformState('delete', 'none');
         return true;
     }
-
-    // ── FLIP H / FLIP V ───────────────────────────────────────────────────
 
     public async flipH(): Promise<void> {
         await this._flip('H');
@@ -73,7 +51,6 @@ export class TransformContextActions {
         event.isSaved = true;
         this.ctx.history.enforceRamLimit();
 
-        // Actualizar bbox proyectada
         const newBbox = TransformGestureHandler.projectBbox(bbox, m);
         this.ctx.selection.setBbox(newBbox);
 
@@ -81,18 +58,15 @@ export class TransformContextActions {
         await this.onSandboxNeedsRegen?.();
     }
 
-    // ── DUPLICATE ─────────────────────────────────────────────────────────
-
-    /**
-     * Clona los trazos seleccionados con un offset de +20/+20.
-     * Devuelve los IDs nuevos para que el Tool reseleccione sobre ellos.
-     */
+    // === FIX: Agrupamos todos los eventos generados con un groupId ===
     public async duplicate(): Promise<string[]> {
         if (!this.ctx.selection.hasSelection()) return [];
 
         const targetIds = Array.from(this.ctx.selection.selectedIds);
         const { active, transforms } = this.ctx.history.getState();
         const newIds: string[] = [];
+
+        const groupId = crypto.randomUUID();
 
         for (const id of targetIds) {
             const ev = active.find(e => e.id === id);
@@ -108,6 +82,7 @@ export class TransformContextActions {
                 id: newId,
                 timestamp: Date.now(),
                 isSaved: false,
+                groupId
             };
             this.ctx.history.push(clone);
             await this.ctx.storage.saveEvent(clone);
@@ -121,15 +96,29 @@ export class TransformContextActions {
                 offsetMatrix.c, offsetMatrix.d,
                 offsetMatrix.e, offsetMatrix.f,
             ];
-            const transformEv = await this.ctx.history.commitTransform([newId], m);
+            const transformEv: TimelineEvent = {
+                id: crypto.randomUUID(), type: 'TRANSFORM',
+                toolId: 'transform-handle', profileId: 'system',
+                layerIndex: this.ctx.engine.activeLayerIndex,
+                color: '', size: 0, opacity: 1,
+                timestamp: Date.now(), data: null,
+                targetIds: [newId], transformMatrix: m,
+                isSaved: false,
+                groupId
+            };
+            this.ctx.history.push(transformEv);
             await this.ctx.storage.saveEvent(transformEv);
             transformEv.isSaved = true;
         }
 
-        this.ctx.history.commitLayerAction('DUPLICATE_GROUP' as any, this.ctx.engine.activeLayerIndex, {
+        const groupEv = this.ctx.history.commitLayerAction('DUPLICATE_GROUP' as any, this.ctx.engine.activeLayerIndex, {
             sourceIds: targetIds,
             newIds,
+            groupId
         });
+        await this.ctx.storage.saveEvent(groupEv);
+        groupEv.isSaved = true;
+
         this.ctx.history.rebuildSpatialGrid();
 
         return newIds;

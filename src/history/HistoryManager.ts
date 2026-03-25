@@ -83,6 +83,15 @@ export class HistoryManager {
         if (spine.length === 0) return null;
 
         const eventToUndo = spine[spine.length - 1];
+        const groupId = eventToUndo.groupId;
+
+        let undoCount = 1;
+        if (groupId) {
+            for (let i = spine.length - 2; i >= 0; i--) {
+                if (spine[i].groupId === groupId) undoCount++;
+                else break;
+            }
+        }
 
         this.push({
             id: crypto.randomUUID(), type: 'UNDO',
@@ -91,15 +100,22 @@ export class HistoryManager {
             color: '', size: 0, opacity: 1,
             timestamp: Date.now(), data: null,
             bbox: eventToUndo.bbox, isSaved: false,
+            undoCount
         });
 
-        // Invalidamos solo snapshots posteriores al evento desecho.
-        // Los anteriores siguen válidos — el rebuild arranca desde el más cercano
-        // en lugar de repintar los 1100 trazos desde cero.
+        const firstEventInGroup = spine[spine.length - undoCount];
         const allIds = this.timeline.map(e => e.id);
-        this.cacheManager.invalidateFrom(eventToUndo.id, allIds);
+        this.cacheManager.invalidateFrom(firstEventInGroup.id, allIds);
 
-        return eventToUndo;
+        // === FIX DE CACHÉ ENVENENADA ===
+        // Si deshicimos un evento que alteró un trazo (Transform, Hide, etc),
+        // borramos todas las fotos de caché para que el Rebuilder lo pinte
+        // desde cero en su posición original, evitando "saltos fantasma".
+        if (firstEventInGroup.type !== 'STROKE' && firstEventInGroup.type !== 'ERASE' && firstEventInGroup.type !== 'FILL') {
+            this.cacheManager.clearAll();
+        }
+
+        return firstEventInGroup;
     }
 
     public applyRedo(): TimelineEvent | null {
@@ -107,6 +123,15 @@ export class HistoryManager {
         if (undone.length === 0) return null;
 
         const eventToRedo = undone[undone.length - 1];
+        const groupId = eventToRedo.groupId;
+
+        let redoCount = 1;
+        if (groupId) {
+            for (let i = undone.length - 2; i >= 0; i--) {
+                if (undone[i].groupId === groupId) redoCount++;
+                else break;
+            }
+        }
 
         this.push({
             id: crypto.randomUUID(), type: 'REDO',
@@ -115,11 +140,17 @@ export class HistoryManager {
             color: '', size: 0, opacity: 1,
             timestamp: Date.now(), data: null,
             bbox: eventToRedo.bbox, isSaved: false,
+            undoCount: redoCount
         });
 
-        // Invalidamos solo snapshots posteriores al evento rehecho.
+        const firstEventToRedo = undone[undone.length - redoCount];
         const allIds = this.timeline.map(e => e.id);
-        this.cacheManager.invalidateFrom(eventToRedo.id, allIds);
+        this.cacheManager.invalidateFrom(firstEventToRedo.id, allIds);
+
+        // === FIX DE CACHÉ ENVENENADA ===
+        if (firstEventToRedo.type !== 'STROKE' && firstEventToRedo.type !== 'ERASE' && firstEventToRedo.type !== 'FILL') {
+            this.cacheManager.clearAll();
+        }
 
         return eventToRedo;
     }
@@ -236,10 +267,13 @@ export class HistoryManager {
 
     public rebuildSpatialGrid(): void {
         this.spatialGrid.clear();
-        const { active, transforms } = this.getState();
+        const { active, transforms, createdLayers, layerRoute } = this.getState();
 
         for (const event of active) {
             if (!event.bbox || (event.type !== 'STROKE' && event.type !== 'ERASE')) continue;
+
+            const routedLayer = layerRoute.get(event.layerIndex) ?? event.layerIndex;
+            if (!createdLayers.has(routedLayer)) continue;
 
             const t = transforms.get(event.id);
             if (t && (t.e !== 0 || t.f !== 0 || t.a !== 1 || t.b !== 0)) {
@@ -263,9 +297,15 @@ export class HistoryManager {
     }
 
     public getActiveCommands(brush: BrushEngine): ICommand[] {
-        const { active, transforms, hiddenIds } = this.getState();
+        const state = this.getState();
+        const { active, transforms, hiddenIds, createdLayers, layerRoute } = state;
+
         return active
-            .filter(ev => !hiddenIds.has(ev.id))
+            .filter(ev => {
+                if (hiddenIds.has(ev.id)) return false;
+                const routedLayer = layerRoute.get(ev.layerIndex) ?? ev.layerIndex;
+                return createdLayers.has(routedLayer);
+            })
             .map(ev => {
                 const cmd = CommandFactory.create(ev, brush);
                 const t = transforms.get(ev.id);
@@ -275,12 +315,16 @@ export class HistoryManager {
     }
 
     public getBboxForIds(ids: string[]): BoundingBox | null {
-        const { active, transforms } = this.getState();
+        const state = this.getState();
+        const { active, transforms, createdLayers, layerRoute } = state;
         let gMinX = Infinity, gMinY = Infinity, gMaxX = -Infinity, gMaxY = -Infinity;
 
         for (const id of ids) {
             const ev = active.find(e => e.id === id);
             if (!ev?.bbox) continue;
+
+            const routedLayer = layerRoute.get(ev.layerIndex) ?? ev.layerIndex;
+            if (!createdLayers.has(routedLayer)) continue;
 
             const t = transforms.get(id) ?? new DOMMatrix();
             const { minX, minY, maxX, maxY } = ev.bbox;
@@ -312,8 +356,6 @@ export class HistoryManager {
             protectedIds.add(undone[i].id);
         }
 
-        // Recorremos hacia atrás y salimos en cuanto los N más recientes
-        // ya caben en RAM — no iteramos el timeline completo innecesariamente.
         let activeCount = 0;
         for (let i = this.timeline.length - 1; i >= 0; i--) {
             const ev = this.timeline[i];
@@ -326,8 +368,6 @@ export class HistoryManager {
                     (ev as any).data = null;
                 }
             } else if (activeCount === this.MAX_RAM_EVENTS) {
-                // Ya tenemos exactamente MAX_RAM_EVENTS con data en RAM.
-                // Todo lo que queda hacia atrás ya fue nulleado en iteraciones anteriores.
                 break;
             }
         }

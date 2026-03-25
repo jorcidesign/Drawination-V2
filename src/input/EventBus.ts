@@ -1,5 +1,12 @@
 // src/input/EventBus.ts
-import type { TimelineEvent } from '../history/TimelineTypes';
+import type { TimelineEvent, LayerState } from '../history/TimelineTypes';
+
+export interface LayersStatePayload {
+    createdLayers: number[];
+    layersState: Map<number, LayerState>;
+    activeLayerIndex: number;
+    layerOrder: number[]; // Nuevo: Inyectamos el orden visual real
+}
 
 export interface AppEventMap {
     'PLAY_TIMELAPSE': void;
@@ -10,6 +17,7 @@ export interface AppEventMap {
     'SYNC_UI_SLIDERS': { size: number; opacity: number; minSize?: number; maxSize?: number };
     'GLOBAL_INTERRUPTION': void;
     'SYNC_LAYERS_CSS': void;
+    'LAYERS_STATE_CHANGED': LayersStatePayload;
     'SET_COLOR': string;
     'APPLY_COLOR': string;
     'UPDATE_BRUSH_SIZE': number;
@@ -41,21 +49,21 @@ export interface AppEventMap {
     'TOGGLE_MENU_PANEL': void;
     'SHOW_NEW_PROJECT': void;
     'NEW_PROJECT': { width: number; height: number };
-
-    // Preview visual del fondo mientras arrastra el slider — NO va al timeline
     'BACKGROUND_COLOR_PREVIEW': string;
-    // Elección final del color de fondo — VA al timeline via commitLayerAction
     'BACKGROUND_COLOR_CHANGED': string;
-
     'BACKGROUND_TOOL_ACTIVE': boolean;
-    'LAYER_SELECT': number;
-    'LAYER_VISIBILITY': { id: number; visible: boolean };
-    'LAYER_OPACITY': { id: number; opacity: number };
-    'LAYER_CREATE': number;
+
+    // Acciones de capa
+    'LAYER_ACTION_CREATE': void;
+    'LAYER_ACTION_SELECT': number;
+    'LAYER_ACTION_TOGGLE_VISIBILITY': number;
+    'LAYER_ACTION_DELETE': number;
+    'LAYER_ACTION_REORDER': number[]; // Ahora recibe un array con el nuevo orden
+    'LAYER_ACTION_OPACITY': { layerIndex: number; opacity: number };
     'LAYER_ACTION_LOCK': number;
     'LAYER_ACTION_DUPLICATE': number;
     'LAYER_ACTION_MERGE': number;
-    'LAYER_ACTION_DELETE': number;
+
     'DOWNLOAD_PNG': void;
     'DOWNLOAD_VIDEO': void;
     'REQUEST_UNDO': void;

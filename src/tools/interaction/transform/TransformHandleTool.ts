@@ -1,21 +1,6 @@
 // src/tools/interaction/transform/TransformHandleTool.ts
 //
-// Orquestador principal del TransformHandle.
-// Responsabilidades que QUEDAN aquí (y solo aquí):
-//   - State machine: IDLE / FOCUSED / DRAGGING / SCALING / ROTATING
-//   - Ciclo de vida ITool: onActivate / onDeactivate / onPointerDown/Move/Up
-//   - IUndoInterceptor: beforeUndo / beforeRedo
-//   - Conexión con EventBus (REQUEST_TRANSFORM_HANDLE_REFRESH, acciones UI)
-//   - Teclado: Enter / Escape / Delete / Shift
-//   - Coordinar TransformSandbox, TransformHandleRenderer, TransformGestureHandler,
-//     TransformContextActions
-//
-// LO QUE YA NO ESTÁ AQUÍ (delegado):
-//   - Cálculo de matrices           → TransformGestureHandler
-//   - Hit testing de esquinas       → TransformGestureHandler
-//   - Renderizado del handle        → TransformHandleRenderer
-//   - Canvas offscreen de selección → TransformSandbox
-//   - Acciones DELETE/FLIP/DUP      → TransformContextActions
+// MÁQUINA DE ESTADOS PARA UNDO/REDO (Foco -> Viaje -> Salida)
 
 import type { ITool, ToolContext } from '../../core/ITool';
 import type { PointerData } from '../../../input/InputManager';
@@ -30,7 +15,6 @@ import { TransformGestureHandler } from './TransformGestureHandler';
 import { TransformSandbox } from './TransformSandbox';
 import { TransformContextActions } from './TransformContextActions';
 
-// ─── Estado de la máquina ────────────────────────────────────────────────────
 const TransformState = {
     IDLE: 'IDLE',
     FOCUSED: 'FOCUSED',
@@ -40,26 +24,21 @@ const TransformState = {
 } as const;
 type TransformState = typeof TransformState[keyof typeof TransformState];
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 export class TransformHandleTool implements ITool, IUndoInterceptor {
     public readonly id = 'transform-handle';
 
     private ctx: ToolContext;
     private state: TransformState = TransformState.IDLE;
 
-    // Módulos delegados
     private renderer: TransformHandleRenderer;
     private gesture: TransformGestureHandler;
     private sandbox: TransformSandbox;
     private actions: TransformContextActions;
 
-    // Estado de frame actual (la matriz viva durante un gesto)
     private currentMatrix: number[] = [1, 0, 0, 1, 0, 0];
-
-    // Tracking para Diagnostics
-    private lastAction: 'move' | 'scale' | 'none' = 'none';
+    private lastAction: 'move' | 'scale' | 'rotate' | 'none' = 'none';
     private isShiftDown = false;
+    private _ignoreHistoryRestored = false;
 
     constructor(ctx: ToolContext) {
         this.ctx = ctx;
@@ -69,7 +48,6 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         this.sandbox = new TransformSandbox(ctx.engine.width, ctx.engine.height);
 
         this.actions = new TransformContextActions(ctx);
-        // El Tool conecta el callback de regeneración del sandbox
         this.actions.onSandboxNeedsRegen = async () => {
             await this.sandbox.generate(this.ctx);
             this._renderLivePreview();
@@ -77,31 +55,30 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
 
         ctx.undoRedoController.registerInterceptor(this);
 
-        // ── EventBus: refresh externo (undo/redo de TRANSFORM) ────────────
-        ctx.eventBus.on('REQUEST_TRANSFORM_HANDLE_REFRESH', async ({ targetIds }) => {
+        // Actualización post-viaje de Undo/Redo
+        ctx.eventBus.on('HISTORY_RESTORED', async ({ event, action }) => {
+            if (this._ignoreHistoryRestored) return;
             if (this.state !== TransformState.FOCUSED) return;
+            if (event.type !== 'TRANSFORM') return;
+            if (!event.targetIds) return;
 
-            // Solo actuamos si los IDs coinciden con la selección actual
-            const currentIds = Array.from(this.ctx.selection.selectedIds).sort().join(',');
-            const incomingIds = [...targetIds].sort().join(',');
-            if (currentIds !== incomingIds) return;
+            const ourIds = this._selectedIdsStr();
+            const eventIds = [...event.targetIds].sort().join(',');
+            if (ourIds !== eventIds) return;
 
-            const newBbox = this.ctx.history.getBboxForIds(targetIds);
-            if (newBbox) this.ctx.selection.setBbox(newBbox);
+            const freshBbox = this.ctx.history.getBboxForIds(event.targetIds);
+            if (freshBbox) this.ctx.selection.setBbox(freshBbox);
 
             await this.sandbox.generate(this.ctx);
             this.currentMatrix = [1, 0, 0, 1, 0, 0];
             this._renderLivePreview();
         });
 
-        // ── EventBus: acciones de la barra contextual ─────────────────────
         ctx.eventBus.on('SELECTION_DELETE', () => this._handleDelete());
         ctx.eventBus.on('SELECTION_FLIP_H', () => this._handleFlipH());
         ctx.eventBus.on('SELECTION_FLIP_V', () => this._handleFlipV());
         ctx.eventBus.on('SELECTION_DUPLICATE', () => this._handleDuplicate());
     }
-
-    // ── ITool lifecycle ───────────────────────────────────────────────────
 
     public isBusy(): boolean {
         return (
@@ -135,6 +112,89 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         }
     }
 
+    // ── MÁQUINA DE ESTADOS UNDO/REDO ──────────────────────────────────────
+
+    public async beforeUndo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
+        if (this.isBusy()) return { handled: true };
+
+        // [FOCO]
+        if (this.state === TransformState.IDLE) {
+            if (nextEvent?.type === 'TRANSFORM' && nextEvent.targetIds) {
+                const bboxPostTransform = this.ctx.history.getBboxForIds(nextEvent.targetIds);
+                if (bboxPostTransform) {
+                    this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bboxPostTransform);
+                    this.lastAction = 'none';
+                    this.currentMatrix = [1, 0, 0, 1, 0, 0];
+                    this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
+                    DiagnosticsService.logTransformState('resurrect_undo', 'none');
+                }
+                return { handled: true }; // Intercepta (No aplica historial aún)
+            }
+            return { handled: false };
+        }
+
+        // FOCUSED
+        if (this.state === TransformState.FOCUSED) {
+            // [VIAJE]
+            if (
+                nextEvent?.type === 'TRANSFORM' &&
+                nextEvent.targetIds &&
+                this._selectedIdsStr() === [...nextEvent.targetIds].sort().join(',')
+            ) {
+                DiagnosticsService.logTransformState('travel_undo', this.lastAction);
+                return { handled: false }; // Deja que el historial actúe
+            }
+
+            // [SALIDA]
+            DiagnosticsService.logTransformState('undo_exit', this.lastAction);
+            await this._exitToLasso();
+            return { handled: true }; // Intercepta actuando como Escape
+        }
+
+        return { handled: false };
+    }
+
+    public async beforeRedo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
+        if (this.isBusy()) return { handled: true };
+
+        // [FOCO]
+        if (this.state === TransformState.IDLE) {
+            if (nextEvent?.type === 'TRANSFORM' && nextEvent.targetIds) {
+                // Al rehacer, el evento aún no se aplica. Obtenemos bbox en Posición A.
+                const bboxPreTransform = this.ctx.history.getBboxForIds(nextEvent.targetIds);
+                if (bboxPreTransform) {
+                    this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bboxPreTransform);
+                    this.lastAction = 'none';
+                    this.currentMatrix = [1, 0, 0, 1, 0, 0];
+                    this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
+                    DiagnosticsService.logTransformState('resurrect_redo', 'none');
+                }
+                return { handled: true }; // Intercepta
+            }
+            return { handled: false };
+        }
+
+        // FOCUSED
+        if (this.state === TransformState.FOCUSED) {
+            // [VIAJE]
+            if (
+                nextEvent?.type === 'TRANSFORM' &&
+                nextEvent.targetIds &&
+                this._selectedIdsStr() === [...nextEvent.targetIds].sort().join(',')
+            ) {
+                DiagnosticsService.logTransformState('travel_redo', this.lastAction);
+                return { handled: false }; // Deja que el historial actúe
+            }
+
+            // [SALIDA]
+            DiagnosticsService.logTransformState('redo_exit', this.lastAction);
+            await this._exitToLasso();
+            return { handled: true }; // Intercepta cerrando la herramienta
+        }
+
+        return { handled: false };
+    }
+
     // ── Pointer events ────────────────────────────────────────────────────
 
     public onPointerDown(data: PointerData): void {
@@ -162,7 +222,6 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
             this.ctx.engine.container.style.cursor = 'move';
         }
         else {
-            // Click fuera → salir
             DiagnosticsService.logTransformState('click_outside', this.lastAction);
             this._exitToLasso();
         }
@@ -188,22 +247,20 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
 
         const IDENTITY = '1,0,0,1,0,0';
         if (this.currentMatrix.join(',') !== IDENTITY) {
-            this.lastAction = gestureType === 'scale' ? 'scale' : 'move';
+            this.lastAction = gestureType === 'scale' ? 'scale' : gestureType === 'rotate' ? 'rotate' : 'move';
 
             const targetIds = Array.from(this.ctx.selection.selectedIds);
+
+            this._ignoreHistoryRestored = true;
             const event = await this.ctx.history.commitTransform(targetIds, this.currentMatrix);
             await this.ctx.storage.saveEvent(event);
-            event.isSaved = true;
+            (event as any).isSaved = true;
             this.ctx.history.enforceRamLimit();
 
-            // ── Actualizar bbox ───────────────────────────────────────────
-            // Para drag y scale: projectBbox es suficiente (transformación afín simple).
-            // Para rotate: projectBbox daría un AABB inflado (el envolvente axis-aligned
-            // de un rectángulo rotado siempre es mayor). En su lugar recalculamos el
-            // bbox real desde los puntos transformados via getBboxForIds(), que lee las
-            // matrices acumuladas en computeTimelineState y devuelve el bbox exacto.
-            // Usamos getBboxForIds para todos los casos: es más robusto y preciso.
+            // === FIX APLICADO AQUÍ (this.ctx.rebuilder y this.ctx.activeBrush) ===
             await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
+            this._ignoreHistoryRestored = false;
+
             if (this.state !== TransformState.FOCUSED) return;
 
             const freshBbox = this.ctx.history.getBboxForIds(targetIds);
@@ -217,76 +274,6 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
             this._renderLivePreview();
         }
     }
-
-    // ── IUndoInterceptor ──────────────────────────────────────────────────
-
-    public async beforeUndo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
-        if (this.isBusy()) return { handled: true };
-
-        if (this.state === TransformState.IDLE) {
-            if (nextEvent?.type === 'TRANSFORM') {
-                const bbox = this.ctx.history.getBboxForIds(nextEvent.targetIds!);
-                if (bbox) {
-                    this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bbox);
-                    this.lastAction = 'none';
-                    this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
-                    DiagnosticsService.logTransformState('resurrect_undo', 'none');
-                }
-                return { handled: true };
-            }
-            return { handled: false };
-        }
-
-        if (this.state === TransformState.FOCUSED) {
-            if (
-                !nextEvent ||
-                nextEvent.type !== 'TRANSFORM' ||
-                this._selectedIdsStr() !== [...nextEvent.targetIds!].sort().join(',')
-            ) {
-                DiagnosticsService.logTransformState('undo_exit', this.lastAction);
-                await this._exitToLasso();
-                return { handled: true };
-            }
-            return { handled: false };
-        }
-
-        return { handled: false };
-    }
-
-    public async beforeRedo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
-        if (this.isBusy()) return { handled: true };
-
-        if (this.state === TransformState.IDLE) {
-            if (nextEvent?.type === 'TRANSFORM') {
-                const bbox = this.ctx.history.getBboxForIds(nextEvent.targetIds!);
-                if (bbox) {
-                    this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bbox);
-                    this.lastAction = 'none';
-                    this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
-                    DiagnosticsService.logTransformState('resurrect_redo', 'none');
-                }
-                return { handled: true };
-            }
-            return { handled: false };
-        }
-
-        if (this.state === TransformState.FOCUSED) {
-            if (
-                !nextEvent ||
-                nextEvent.type !== 'TRANSFORM' ||
-                this._selectedIdsStr() !== [...nextEvent.targetIds!].sort().join(',')
-            ) {
-                DiagnosticsService.logTransformState('redo_exit', this.lastAction);
-                await this._exitToLasso();
-                return { handled: true };
-            }
-            return { handled: false };
-        }
-
-        return { handled: false };
-    }
-
-    // ── Acciones contextuales (delegadas a TransformContextActions) ───────
 
     private async _handleDelete(): Promise<void> {
         if (this.state !== TransformState.FOCUSED || !this.ctx.selection.hasSelection()) return;
@@ -317,19 +304,16 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         }
     }
 
-    // ── Ciclo de vida interno ─────────────────────────────────────────────
-
-    private async _enterFocused(
-        ids: string[],
-        bbox: BoundingBox,
-        skipRebuild: boolean
-    ): Promise<void> {
+    private async _enterFocused(ids: string[], bbox: BoundingBox, skipRebuild: boolean): Promise<void> {
         this.state = TransformState.FOCUSED;
         this.ctx.selection.setSelection(new Set(ids), bbox);
         this.currentMatrix = [1, 0, 0, 1, 0, 0];
         this.lastAction = 'none';
 
+        this._ignoreHistoryRestored = true;
         if (!skipRebuild) await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
+        this._ignoreHistoryRestored = false;
+
         if (this.state !== TransformState.FOCUSED) return;
 
         await this.sandbox.generate(this.ctx);
@@ -347,7 +331,11 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         this.state = TransformState.IDLE;
         this.gesture.clear();
         this.ctx.selection.clear();
+
+        this._ignoreHistoryRestored = true;
+        // === FIX APLICADO AQUÍ (this.ctx.rebuilder y this.ctx.activeBrush) ===
         await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
+        this._ignoreHistoryRestored = false;
     }
 
     private async _exitToLasso(): Promise<void> {
@@ -370,13 +358,9 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         );
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────
-
     private _selectedIdsStr(): string {
         return Array.from(this.ctx.selection.selectedIds).sort().join(',');
     }
-
-    // ── Keyboard ──────────────────────────────────────────────────────────
 
     private _handleKeyDown = async (e: KeyboardEvent): Promise<void> => {
         if (e.key === 'Shift') {

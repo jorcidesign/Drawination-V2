@@ -3,7 +3,7 @@ import type { TimelineEvent, TimelineState, LayerState } from './TimelineTypes';
 import { isTransformEvent, isHideEvent } from './TimelineTypes';
 
 const MAX_LAYERS = 10;
-export const DEFAULT_BACKGROUND_COLOR = '#FAFAFA'; // blanco mate por defecto
+export const DEFAULT_BACKGROUND_COLOR = '#FAFAFA';
 
 function buildDefaultLayerState(index: number): LayerState {
     return {
@@ -20,9 +20,15 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
 
     for (const event of timeline) {
         if (event.type === 'UNDO') {
-            if (spine.length > 0) undone.push(spine.pop()!);
+            const count = event.undoCount ?? 1;
+            for (let c = 0; c < count; c++) {
+                if (spine.length > 0) undone.push(spine.pop()!);
+            }
         } else if (event.type === 'REDO') {
-            if (undone.length > 0) spine.push(undone.pop()!);
+            const count = event.undoCount ?? 1;
+            for (let c = 0; c < count; c++) {
+                if (undone.length > 0) spine.push(undone.pop()!);
+            }
         } else {
             spine.push(event);
             undone.length = 0;
@@ -35,6 +41,8 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
     const layersState = new Map<number, LayerState>();
     const layerRoute = new Map<number, number>();
 
+    const createdLayers = new Set<number>([0]);
+    let layerOrder = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
     let derivedActiveLayerIndex = 0;
     let backgroundColor = DEFAULT_BACKGROUND_COLOR;
 
@@ -45,11 +53,8 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
 
     for (const ev of spine) {
         switch (ev.type) {
-            case 'STROKE':
-            case 'ERASE':
-            case 'FILL':
-                active.push(ev);
-                break;
+            case 'STROKE': case 'ERASE': case 'FILL':
+                active.push(ev); break;
 
             case 'TRANSFORM':
                 if (isTransformEvent(ev)) {
@@ -62,59 +67,48 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
                 break;
 
             case 'HIDE':
-                if (isHideEvent(ev)) {
-                    for (const id of ev.targetIds) hiddenIds.add(id);
-                }
+                if (isHideEvent(ev)) { for (const id of ev.targetIds) hiddenIds.add(id); }
                 break;
 
-            // ── Color de fondo ────────────────────────────────────────────
             case 'BACKGROUND_COLOR':
-                if (ev.backgroundColor) {
-                    backgroundColor = ev.backgroundColor;
-                }
+                if (ev.backgroundColor) backgroundColor = ev.backgroundColor;
                 break;
 
             case 'LAYER_SELECT':
                 derivedActiveLayerIndex = ev.layerIndex;
                 break;
 
-            case 'DUPLICATE_GROUP':
-                break;
-
             case 'LAYER_CREATE': {
                 const existing = layersState.get(ev.layerIndex) ?? buildDefaultLayerState(ev.layerIndex);
                 layersState.set(ev.layerIndex, {
                     ...existing,
-                    name: ev.layerName ?? existing.name,
+                    name: ev.layerName ?? `Capa ${ev.layerIndex + 1}`,
                     visible: true,
-                    locked: false,
+                    locked: ev.locked ?? false,
+                    opacity: ev.layerOpacity ?? 1.0
                 });
+                createdLayers.add(ev.layerIndex);
                 derivedActiveLayerIndex = ev.layerIndex;
                 break;
             }
 
             case 'LAYER_DELETE': {
-                for (const activeEv of active) {
-                    if (activeEv.layerIndex === ev.layerIndex) {
-                        hiddenIds.add(activeEv.id);
+                createdLayers.delete(ev.layerIndex);
+
+                if (derivedActiveLayerIndex === ev.layerIndex) {
+                    const currentOrder = ev.layerOrder ?? layerOrder;
+                    const currentPos = currentOrder.indexOf(ev.layerIndex);
+                    let newActive = -1;
+                    for (let i = currentPos - 1; i >= 0; i--) {
+                        if (createdLayers.has(currentOrder[i])) { newActive = currentOrder[i]; break; }
                     }
+                    if (newActive === -1) {
+                        for (let i = currentPos + 1; i < currentOrder.length; i++) {
+                            if (createdLayers.has(currentOrder[i])) { newActive = currentOrder[i]; break; }
+                        }
+                    }
+                    derivedActiveLayerIndex = newActive !== -1 ? newActive : 0;
                 }
-                break;
-            }
-
-            case 'LAYER_REORDER': {
-                if (ev.fromIndex != null && ev.toIndex != null) {
-                    const from = layersState.get(ev.fromIndex) ?? buildDefaultLayerState(ev.fromIndex);
-                    const to = layersState.get(ev.toIndex) ?? buildDefaultLayerState(ev.toIndex);
-                    layersState.set(ev.fromIndex, to);
-                    layersState.set(ev.toIndex, from);
-                }
-                break;
-            }
-
-            case 'LAYER_OPACITY': {
-                const layer = layersState.get(ev.layerIndex) ?? buildDefaultLayerState(ev.layerIndex);
-                layersState.set(ev.layerIndex, { ...layer, opacity: ev.layerOpacity ?? layer.opacity });
                 break;
             }
 
@@ -124,44 +118,65 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
                 break;
             }
 
+            case 'LAYER_OPACITY': {
+                const layer = layersState.get(ev.layerIndex) ?? buildDefaultLayerState(ev.layerIndex);
+                layersState.set(ev.layerIndex, { ...layer, opacity: ev.layerOpacity ?? layer.opacity });
+                break;
+            }
+
             case 'LAYER_LOCK': {
                 const layer = layersState.get(ev.layerIndex) ?? buildDefaultLayerState(ev.layerIndex);
                 layersState.set(ev.layerIndex, { ...layer, locked: ev.locked ?? layer.locked });
                 break;
             }
 
+            case 'LAYER_REORDER': {
+                if (ev.layerOrder) {
+                    // === FIX: Confiamos ciegamente en el payload del evento que ahora siempre trae los 10 elementos
+                    layerOrder = [...ev.layerOrder];
+                }
+                break;
+            }
+
             case 'LAYER_MERGE_DOWN': {
                 const source = ev.layerIndex;
-                const target = source - 1;
+                const orderToUse = ev.layerOrder ?? layerOrder;
+                const currentIndexInOrder = orderToUse.indexOf(source);
+                let target = -1;
+
+                for (let i = currentIndexInOrder - 1; i >= 0; i--) {
+                    if (createdLayers.has(orderToUse[i])) {
+                        target = orderToUse[i];
+                        break;
+                    }
+                }
+
                 if (target >= 0) {
                     const finalDest = layerRoute.get(target) ?? target;
                     for (const [key, value] of layerRoute.entries()) {
                         if (value === source) layerRoute.set(key, finalDest);
                     }
                     layerRoute.set(source, finalDest);
-                    const layer = layersState.get(source) ?? buildDefaultLayerState(source);
-                    layersState.set(source, { ...layer, visible: false });
+                    createdLayers.delete(source);
+
+                    if (derivedActiveLayerIndex === source) {
+                        derivedActiveLayerIndex = finalDest;
+                    }
                 }
                 break;
             }
 
+            case 'DUPLICATE_GROUP':
             case 'UNDO':
             case 'REDO':
             case 'FLIP_H':
                 break;
-
-            default: {
-                const _exhaustive: never = ev.type;
-                if (import.meta.env.DEV) {
-                    console.warn(`[computeTimelineState] Tipo no manejado: "${_exhaustive}"`);
-                }
-            }
         }
     }
 
     return {
         spine, active, transforms, hiddenIds,
         layersState, layerRoute, derivedActiveLayerIndex,
-        undone, backgroundColor,
+        undone, backgroundColor, createdLayers, layerOrder
     };
 }
