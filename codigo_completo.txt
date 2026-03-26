@@ -971,6 +971,182 @@ export class StrokeStabilizer {
     }
 }
 
+===== src/core/render/renderers/StylizedRenderer.ts =====
+
+
+
+===== 02:21:08 =====
+
+
+
+===== PM =====
+
+// src/core/render/renderers/StylizedRenderer.ts
+import type { IBrushRenderer, RebuildHelpers } from './IBrushRenderer';
+import type { IBrushProfile } from '../profiles/IBrushProfile';
+import type { BasePoint } from '../../../input/InputManager';
+import type { StrokePoint } from '../../io/BinarySerializer';
+import { CatmullRom } from '../../math/CatmullRom';
+
+export class StylizedRenderer implements IBrushRenderer {
+    private inputBuffer: BasePoint[] = [];
+
+    public beginStroke(profile: IBrushProfile, color: string, startPt: BasePoint): void {
+        this.inputBuffer = [startPt];
+    }
+
+    public transformInput(profile: IBrushProfile, data: BasePoint): BasePoint {
+        const windowSize = profile.physics?.stabilizerWindow ?? 12;
+
+        if (windowSize <= 1) return data;
+
+        this.inputBuffer.push(data);
+        if (this.inputBuffer.length > windowSize) {
+            this.inputBuffer.shift();
+        }
+
+        let totalWeight = 0;
+        let weightedX = 0;
+        let weightedY = 0;
+        let weightedP = 0;
+
+        for (let i = 0; i < this.inputBuffer.length; i++) {
+            const weight = Math.pow(2, i);
+            totalWeight += weight;
+            weightedX += this.inputBuffer[i].x * weight;
+            weightedY += this.inputBuffer[i].y * weight;
+            weightedP += this.inputBuffer[i].pressure * weight;
+        }
+
+        return {
+            x: weightedX / totalWeight,
+            y: weightedY / totalWeight,
+            pressure: weightedP / totalWeight
+        };
+    }
+
+    public stamp() { }
+
+    public drawMoveLive(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: BasePoint[]): void {
+        if (points.length < 2) return;
+
+        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+
+        for (let i = 1; i < points.length; i++) {
+            const xc = (points[i].x + points[i - 1].x) / 2;
+            const yc = (points[i].y + points[i - 1].y) / 2;
+            ctx.quadraticCurveTo(points[i - 1].x, points[i - 1].y, xc, yc);
+        }
+        ctx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = profile.baseSize * 0.65;
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = profile.baseOpacity;
+
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    public endStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: BasePoint[]): void {
+        this.inputBuffer = [];
+        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        this._drawTapered(ctx, profile, color, points);
+    }
+
+    // === FIX CRÍTICO: Aislar la simulación en el offCtx ===
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: RebuildHelpers): void {
+        const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
+
+        // Simular en el entorno aislado (aquí su endStroke hará clearRect sin dañar la capa real)
+        helpers.simulateDrawing(offCtx);
+
+        // Volcar el resultado final limpio
+        ctx.save();
+        ctx.globalAlpha = 1.0;
+        ctx.globalCompositeOperation = profile.blendMode;
+        ctx.drawImage(offCtx.canvas, 0, 0);
+        ctx.restore();
+
+        offCtx.clearRect(0, 0, offCtx.canvas.width, offCtx.canvas.height);
+    }
+
+    private _drawTapered(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: BasePoint[]): void {
+        if (points.length === 0) return;
+        if (points.length === 1) {
+            ctx.fillStyle = color;
+            ctx.globalAlpha = profile.baseOpacity;
+            ctx.beginPath();
+            ctx.arc(points[0].x, points[0].y, profile.baseSize / 2, 0, Math.PI * 2);
+            ctx.fill();
+            return;
+        }
+
+        const spacing = Math.max(1.0, profile.baseSize * 0.05);
+        const smoothPoints: { x: number, y: number }[] = [];
+
+        for (let i = 0; i < points.length - 1; i++) {
+            const p0 = i > 0 ? points[i - 1] : points[i];
+            const p1 = points[i];
+            const p2 = points[i + 1];
+            const p3 = i < points.length - 2 ? points[i + 2] : p2;
+
+            const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+            const steps = Math.max(1, Math.floor(dist / spacing));
+
+            for (let j = 0; j < steps; j++) {
+                const t = j / steps;
+                smoothPoints.push(CatmullRom.evaluate(p0 as any, p1 as any, p2 as any, p3 as any, t));
+            }
+        }
+        smoothPoints.push(points[points.length - 1]);
+
+        const dists = [0];
+        let totalDist = 0;
+        for (let i = 1; i < smoothPoints.length; i++) {
+            const dx = smoothPoints[i].x - smoothPoints[i - 1].x;
+            const dy = smoothPoints[i].y - smoothPoints[i - 1].y;
+            totalDist += Math.sqrt(dx * dx + dy * dy);
+            dists.push(totalDist);
+        }
+
+        const maxTaper = profile.baseSize * 4.5;
+        const startTaper = Math.min(maxTaper, totalDist * 0.35);
+        const endTaper = Math.min(maxTaper, totalDist * 0.45);
+
+        ctx.save();
+        ctx.fillStyle = color;
+        ctx.globalAlpha = profile.baseOpacity;
+        ctx.beginPath();
+
+        for (let i = 0; i < smoothPoints.length; i++) {
+            const pt = smoothPoints[i];
+            const d = dists[i];
+
+            let factor = 1.0;
+            if (d < startTaper) {
+                factor = d / startTaper;
+            } else if (d > totalDist - endTaper) {
+                factor = (totalDist - d) / endTaper;
+            }
+
+            factor = Math.sin(factor * (Math.PI / 2));
+
+            const radius = Math.max(0.5, (profile.baseSize / 2) * factor);
+
+            ctx.moveTo(pt.x + radius, pt.y);
+            ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+        }
+
+        ctx.fill();
+        ctx.restore();
+    }
+}
+
 ===== src/core/render/renderers/IBrushRenderer.ts =====
 
 
@@ -1408,44 +1584,129 @@ export class PaintRenderer implements IBrushRenderer {
 ===== PM =====
 
 // src/core/render/renderers/FillRenderer.ts
-import type { IBrushRenderer } from './IBrushRenderer';
+import type { IBrushRenderer, RebuildHelpers } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
 import type { StrokePoint } from '../../io/BinarySerializer';
+import { CatmullRom } from '../../math/CatmullRom';
 
 export class FillRenderer implements IBrushRenderer {
-    public beginStroke() { }
-    public stamp() { } // El relleno no estampa
+    private inputBuffer: BasePoint[] = [];
+
+    public beginStroke(profile: IBrushProfile, color: string, startPt: BasePoint): void {
+        this.inputBuffer = [startPt];
+    }
+
+    public stamp() { }
+
+    public transformInput(profile: IBrushProfile, data: BasePoint): BasePoint {
+        const windowSize = profile.physics?.stabilizerWindow ?? 6;
+
+        if (windowSize <= 1) return data;
+
+        this.inputBuffer.push(data);
+        if (this.inputBuffer.length > windowSize) {
+            this.inputBuffer.shift();
+        }
+
+        let totalWeight = 0;
+        let weightedX = 0;
+        let weightedY = 0;
+        let weightedP = 0;
+
+        for (let i = 0; i < this.inputBuffer.length; i++) {
+            const weight = Math.pow(2, i);
+            totalWeight += weight;
+            weightedX += this.inputBuffer[i].x * weight;
+            weightedY += this.inputBuffer[i].y * weight;
+            weightedP += this.inputBuffer[i].pressure * weight;
+        }
+
+        return {
+            x: weightedX / totalWeight,
+            y: weightedY / totalWeight,
+            pressure: weightedP / totalWeight
+        };
+    }
+
+    private _buildSmoothPath(points: BasePoint[]): Path2D {
+        const path = new Path2D();
+        if (points.length === 0) return path;
+
+        path.moveTo(points[0].x, points[0].y);
+
+        if (points.length < 3) {
+            for (let i = 1; i < points.length; i++) {
+                path.lineTo(points[i].x, points[i].y);
+            }
+            return path;
+        }
+
+        const spacing = 5;
+
+        for (let i = 0; i < points.length - 1; i++) {
+            const p0 = i > 0 ? points[i - 1] : points[i];
+            const p1 = points[i];
+            const p2 = points[i + 1];
+            const p3 = i < points.length - 2 ? points[i + 2] : p2;
+
+            const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+            const steps = Math.max(1, Math.floor(dist / spacing));
+
+            for (let j = 1; j <= steps; j++) {
+                const t = j / steps;
+                const pt = CatmullRom.evaluate(p0 as any, p1 as any, p2 as any, p3 as any, t);
+                path.lineTo(pt.x, pt.y);
+            }
+        }
+
+        return path;
+    }
 
     public drawMoveLive(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: BasePoint[]): void {
         if (points.length < 2) return;
+
         ctx.save();
         ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
         ctx.fillStyle = color;
         ctx.globalAlpha = profile.baseOpacity;
-        ctx.beginPath();
-        ctx.moveTo(points[0].x, points[0].y);
-        for (const pt of points) ctx.lineTo(pt.x, pt.y);
-        ctx.fill();
+
+        const path = this._buildSmoothPath(points);
+        ctx.fill(path);
+
         ctx.restore();
     }
 
     public endStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: BasePoint[]): void {
+        this.inputBuffer = [];
+
         if (points.length < 3) return;
+
         ctx.save();
         ctx.fillStyle = color;
         ctx.globalAlpha = profile.baseOpacity;
         ctx.globalCompositeOperation = profile.blendMode;
-        ctx.beginPath();
-        ctx.moveTo(points[0].x, points[0].y);
-        for (const pt of points) ctx.lineTo(pt.x, pt.y);
-        ctx.fill();
+
+        const path = this._buildSmoothPath(points);
+        ctx.fill(path);
+
         ctx.restore();
     }
 
-    // El Fill no usa steps ni simulaciones, simplemente dibuja el polígono de golpe
-    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
-        this.endStroke(ctx, profile, color, points);
+    // === FIX CRÍTICO: Aislar la simulación ===
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: RebuildHelpers): void {
+        const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
+
+        helpers.simulateDrawing(offCtx);
+
+        ctx.save();
+        ctx.globalAlpha = 1.0;
+        ctx.globalCompositeOperation = profile.blendMode;
+        ctx.drawImage(offCtx.canvas, 0, 0);
+        ctx.restore();
+
+        offCtx.clearRect(0, 0, offCtx.canvas.width, offCtx.canvas.height);
     }
 }
 
@@ -2085,13 +2346,14 @@ export class BasicRenderer implements IBrushRenderer {
 ===== PM =====
 
 // src/core/render/renderers/AirbrushRenderer.ts
-import type { IBrushRenderer } from './IBrushRenderer';
+import type { IBrushRenderer, RebuildHelpers } from './IBrushRenderer';
 import type { IBrushProfile } from '../profiles/IBrushProfile';
 import type { BasePoint } from '../../../input/InputManager';
 import type { StrokePoint } from '../../io/BinarySerializer';
 import { BezierEasing } from '../../math/BezierEasing';
+
 // ─── PRNG ─────────────────────────────────────────────────────────────────────
-// Usamos el mismo generador determinista del PaintRenderer.
+// Usamos el generador determinista para asegurar que el Ctrl+Z sea idéntico 1:1
 class SimplePRNG {
     private s: number;
     constructor(seed: number) {
@@ -2104,7 +2366,6 @@ class SimplePRNG {
 }
 
 export class AirbrushRenderer implements IBrushRenderer {
-
     private tipCanvas: HTMLCanvasElement;
     private tipCtx: CanvasRenderingContext2D;
 
@@ -2114,24 +2375,10 @@ export class AirbrushRenderer implements IBrushRenderer {
     // === PRNG dedicado para la rotación del trazo ===
     private strokeRng: SimplePRNG;
 
-    // ── DEBUG ─────────────────────────────────────────────────────────────
-    private _debugStrokeId: string = '';
-    private _debugIsFirst: boolean = true;
-    private _debugSamples: Array<{
-        pressure: number;
-        flow: number;
-        baseOpacity: number;
-        pressureCurve: number;
-        finalOpacity: number;
-        ctxAlphaBefore: number;
-        ctxAlphaAfter: number;
-        ctxComposite: string;
-    }> = [];
-
     constructor() {
         this.tipCanvas = document.createElement('canvas');
         this.tipCtx = this.tipCanvas.getContext('2d')!;
-        this.strokeRng = new SimplePRNG(1); // Inicialización segura
+        this.strokeRng = new SimplePRNG(1);
     }
 
     public updateTip(profile: IBrushProfile, color: string): void {
@@ -2150,7 +2397,6 @@ export class AirbrushRenderer implements IBrushRenderer {
         const rng = new SimplePRNG(parseInt(color.replace('#', ''), 16) ^ (size * 1337));
 
         // ── 1. BASE VOLUMÉTRICA SUAVE ──────────────────────────────────────
-        // Esto le da el cuerpo central al aerógrafo para que no quede hueco
         const baseGrad = this.tipCtx.createRadialGradient(cx, cx, 0, cx, cx, cx);
         baseGrad.addColorStop(0.0, `rgba(${rgb}, 0.55)`);
         baseGrad.addColorStop(0.4, `rgba(${rgb}, 0.20)`);
@@ -2161,49 +2407,34 @@ export class AirbrushRenderer implements IBrushRenderer {
         this.tipCtx.fillRect(0, 0, size, size);
 
         // ── 2. TEXTURA NUBOSA (SMOKE PUFFS) ───────────────────────────────
-        // En lugar de pixeles duros, creamos esferas suaves superpuestas.
-        // Al rotar esto de forma estocástica en el stamp, se ve como humo.
         const puffCount = Math.floor(size * 1.5);
         this.tipCtx.fillStyle = `rgb(${rgb})`;
 
         for (let i = 0; i < puffCount; i++) {
             const angle = rng.next() * Math.PI * 2;
-
-            // Distribución un poco más junta hacia el centro
             const radiusFactor = rng.next();
             const r = cx * Math.pow(radiusFactor, 1.2);
-
             const px = cx + Math.cos(angle) * r;
             const py = cx + Math.sin(angle) * r;
-
-            // Los "puffs" son más grandes, simulando pequeñas nubes, no arena
             const puffSize = (1 - radiusFactor) * (size * 0.15) + (size * 0.05);
-
-            // Opacidad microscópica. La acumulación crea la textura.
             const puffAlpha = (1 - radiusFactor) * 0.1 * rng.next() + 0.02;
 
             this.tipCtx.globalAlpha = puffAlpha;
-
             this.tipCtx.beginPath();
             this.tipCtx.arc(px, py, puffSize, 0, Math.PI * 2);
             this.tipCtx.fill();
         }
 
-        this.tipCtx.globalAlpha = 1; // Restauramos para no afectar a futuros renderizados
+        this.tipCtx.globalAlpha = 1;
     }
 
     public beginStroke(_profile: IBrushProfile, _color: string, startPt: BasePoint): void {
-        // === LA MAGIA DEL DETERMINISMO ===
         const qx = Math.round(startPt.x * 100);
         const qy = Math.round(startPt.y * 100);
         const qp = Math.round(startPt.pressure * 1023);
         const seed = qx * 73 + qy * 19 + qp * 11;
 
         this.strokeRng = new SimplePRNG(seed);
-
-        this._debugStrokeId = Math.random().toString(36).slice(2, 7);
-        this._debugIsFirst = true;
-        this._debugSamples = [];
     }
 
     public stamp(
@@ -2220,18 +2451,18 @@ export class AirbrushRenderer implements IBrushRenderer {
         // 1. Curva de presión
         const mappedPressure = BezierEasing.evaluate(rawPressure, p1y, p2y);
 
-        // 2. INTERPOLACIÓN DE TAMAÑO (Constante para Aerógrafo)
+        // 2. INTERPOLACIÓN DE TAMAÑO
         const sizeMin = profile.pressureSizeMin ?? 1.0;
         const sizeMax = profile.pressureSizeMax ?? 1.0;
         const currentSizeMultiplier = sizeMin + (sizeMax - sizeMin) * mappedPressure;
         const finalSize = Math.max(0.5, profile.baseSize * currentSizeMultiplier);
 
-        // 3. INTERPOLACIÓN DE OPACIDAD (Constante para Aerógrafo)
+        // 3. INTERPOLACIÓN DE OPACIDAD
         const opMin = profile.pressureOpacityMin ?? 1.0;
         const opMax = profile.pressureOpacityMax ?? 1.0;
         const currentOpacityMultiplier = opMin + (opMax - opMin) * mappedPressure;
 
-        // 4. INTERPOLACIÓN DE FLUJO (0% a 100%)
+        // 4. INTERPOLACIÓN DE FLUJO
         const flowMin = profile.pressureFlowMin ?? 0.0;
         const flowMax = profile.pressureFlowMax ?? 1.0;
         const baseFlow = profile.baseFlow ?? profile.physics?.flow ?? 0.60;
@@ -2241,46 +2472,19 @@ export class AirbrushRenderer implements IBrushRenderer {
         // 5. OPACIDAD FINAL
         let rawOpacity = profile.baseOpacity * currentOpacityMultiplier * dynamicFlow;
 
-        // ── CAPTURA DEBUG ─────────────────────────────────────────────────
-        const ctxAlphaBefore = ctx.globalAlpha;
-        const ctxComposite = ctx.globalCompositeOperation;
-
-        if (this._debugSamples.length < 5) {
-            this._debugSamples.push({
-                pressure: +rawPressure.toFixed(4),
-                flow: +dynamicFlow.toFixed(4),
-                baseOpacity: +profile.baseOpacity.toFixed(4),
-                pressureCurve: +mappedPressure.toFixed(4),
-                finalOpacity: +rawOpacity.toFixed(4),
-                ctxAlphaBefore: +ctxAlphaBefore.toFixed(4),
-                ctxAlphaAfter: 0,
-                ctxComposite,
-            });
-        }
-
         // === EL ESCUDO ANTI-SOLARIZACIÓN DE 8-BITS ===
-        // 1. Evitamos basura matemática
         if (rawOpacity < 0.005) return;
-
-        // 2. Piso seguro del 2.5%
         const stampOpacity = Math.max(0.025, Math.min(1, rawOpacity));
 
         ctx.globalAlpha = stampOpacity;
 
-        if (this._debugSamples.length > 0) {
-            this._debugSamples[this._debugSamples.length - 1].ctxAlphaAfter = +ctx.globalAlpha.toFixed(4);
-        }
-
         const halfSize = finalSize / 2;
-
-        // === ROTACIÓN NATURAL Y DETERMINISTA ===
         const angle = this.strokeRng.next() * Math.PI * 2;
 
         ctx.save();
         ctx.translate(x, y);
         ctx.rotate(angle);
 
-        // Dibujamos el "cono" del aerógrafo generado procedimentalmente
         ctx.drawImage(
             this.tipCanvas,
             -halfSize,
@@ -2290,67 +2494,13 @@ export class AirbrushRenderer implements IBrushRenderer {
         );
 
         ctx.restore();
-
-        // ── LOG DEBUG (Mantenemos tu log intacto adaptado a las nuevas variables) ──
-        if (this._debugIsFirst) {
-            this._debugIsFirst = false;
-            (window as any).__airbrushDebug = (window as any).__airbrushDebug || [];
-            (window as any).__airbrushDebug.push({
-                strokeId: this._debugStrokeId,
-                firstStamp: {
-                    pressure: +rawPressure.toFixed(4),
-                    flow: +dynamicFlow.toFixed(4),
-                    baseOpacity: +profile.baseOpacity.toFixed(4),
-                    pressureCurve: +mappedPressure.toFixed(4),
-                    finalOpacity: +stampOpacity.toFixed(4),
-                    ctxAlphaBefore: +ctxAlphaBefore.toFixed(4),
-                    ctxComposite,
-                }
-            });
-
-            console.groupCollapsed(
-                `%c🎨 Airbrush stamp [${this._debugStrokeId}]` +
-                ` | opacity final: ${stampOpacity.toFixed(4)}` +
-                ` | ctx.alpha antes: ${ctxAlphaBefore.toFixed(4)}`,
-                `color: ${Math.abs(ctxAlphaBefore - 1.0) > 0.01 ? '#e74c3c' : '#2ecc71'}; font-weight: bold`
-            );
-            console.log('  dynamicFlow    :', dynamicFlow.toFixed(4));
-            console.log('  baseOpacity    :', profile.baseOpacity.toFixed(4));
-            console.log('  rawPressure    :', rawPressure.toFixed(4));
-            console.log('  mappedPressure :', mappedPressure.toFixed(4));
-            console.log('  stampOpacity   :', stampOpacity.toFixed(4));
-            console.log('  ctx.globalAlpha ANTES stamp:', ctxAlphaBefore.toFixed(4),
-                Math.abs(ctxAlphaBefore - 1.0) > 0.01 ? '⚠️  CONTAMINADO' : '✅ limpio');
-            console.log('  ctx.globalCompositeOp:', ctxComposite,
-                ctxComposite !== 'source-over' ? '⚠️  NO es source-over' : '✅');
-            console.groupEnd();
-        }
     }
 
     public endStroke(): void {
-        if (this._debugSamples.length > 0) {
-            const alphasBefore = this._debugSamples.map(s => s.ctxAlphaBefore);
-            const contaminated = alphasBefore.filter(a => Math.abs(a - 1.0) > 0.01);
-
-            if (contaminated.length > 0) {
-                console.warn(
-                    `%c⚠️  Airbrush [${this._debugStrokeId}] — ctx.globalAlpha contaminado en ${contaminated.length}/${this._debugSamples.length} stamps`,
-                    'color:#e74c3c;font-weight:bold',
-                    '\nValores:', contaminated
-                );
-            }
-        }
-        this._debugSamples = [];
+        // Renderizado puro, sin estado residual
     }
 
-    private hexToRgb(hex: string): string {
-        const r = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-        return r
-            ? `${parseInt(r[1], 16)}, ${parseInt(r[2], 16)}, ${parseInt(r[3], 16)}`
-            : '0, 0, 0';
-    }
-
-    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: RebuildHelpers): void {
         const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
 
         helpers.simulateDrawing(offCtx);
@@ -2362,6 +2512,13 @@ export class AirbrushRenderer implements IBrushRenderer {
         ctx.restore();
 
         offCtx.clearRect(0, 0, offCtx.canvas.width, offCtx.canvas.height);
+    }
+
+    private hexToRgb(hex: string): string {
+        const r = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return r
+            ? `${parseInt(r[1], 16)}, ${parseInt(r[2], 16)}, ${parseInt(r[3], 16)}`
+            : '0, 0, 0';
     }
 }
 
@@ -3091,6 +3248,7 @@ import { HardRoundRenderer } from './renderers/HardRoundRenderer';
 import { InkRenderer } from './renderers/InkRenderer';
 import { AirbrushRenderer } from './renderers/AirbrushRenderer';
 import { CharcoalRenderer } from './renderers/CharcoalRenderer';
+import { StylizedRenderer } from './renderers/StylizedRenderer';
 
 export class BrushEngine {
     public color: string = '#2c3e50';
@@ -3122,6 +3280,7 @@ export class BrushEngine {
         this.renderers.set('ink', new InkRenderer());
         this.renderers.set('airbrush', new AirbrushRenderer());
         this.renderers.set('charcoal', new CharcoalRenderer());
+        this.renderers.set('stylized', new StylizedRenderer());
 
         this.getRenderer().updateTip?.(this.profile, this.color);
     }
@@ -3797,6 +3956,53 @@ export const CharcoalProfile: IBrushProfile = {
     }
 };
 
+===== src/core/render/profiles/StylizedProfile.ts =====
+
+
+
+===== 02:21:08 =====
+
+
+
+===== PM =====
+
+// src/core/render/profiles/StylizedProfile.ts
+import type { IBrushProfile } from './IBrushProfile';
+
+export const StylizedProfile: IBrushProfile = {
+    id: 'stylized-brush',
+    name: 'Pincel Estilizado',
+
+    minSize: 2,
+    maxSize: 150,
+    baseSize: 20,
+
+    baseOpacity: 1.0,
+    blendMode: 'source-over',
+
+    renderer: 'stylized', // Nuestro nuevo renderer mágico
+    textureType: 'solid',
+
+    spacing: 0.05,
+    angle: 0,
+    aspectRatio: 1.0,
+
+    // La presión física del usuario se ignora por completo
+    pressureSizeSensitivity: 0.0,
+    pressureOpacitySensitivity: 0.0,
+    pressureSizeMin: 1.0,
+    pressureSizeMax: 1.0,
+    pressureOpacityMin: 1.0,
+    pressureOpacityMax: 1.0,
+
+    // Suavizado alto para que el trazo caligráfico se vea elegante
+    smoothing: 0.7,
+
+    physics: {
+        stabilizerWindow: 12
+    }
+};
+
 ===== src/core/render/profiles/ProfileRegistry.ts =====
 
 
@@ -3814,11 +4020,10 @@ import { InkProfile } from './InkProfile';
 import { HardEraserProfile } from './HardEraserProfile';
 import { FillProfile } from './FillProfile';
 import { PaintProfile } from './PaintProfile';
-import { HardRoundProfile } from './HardRoundProfile'; // <-- IMPORTAR
-
+import { HardRoundProfile } from './HardRoundProfile';
 import { AirbrushProfile } from './AirbrushProfile';
 import { CharcoalProfile } from './CharcoalProfile';
-
+import { StylizedProfile } from './StylizedProfile'; // <--- AÑADIR IMPORT
 
 export const ProfileRegistry: Record<string, IBrushProfile> = {
     [PencilProfile.id]: PencilProfile,
@@ -3826,9 +4031,10 @@ export const ProfileRegistry: Record<string, IBrushProfile> = {
     [HardEraserProfile.id]: HardEraserProfile,
     [FillProfile.id]: FillProfile,
     [PaintProfile.id]: PaintProfile,
-    [HardRoundProfile.id]: HardRoundProfile, // <-- REGISTRAR
+    [HardRoundProfile.id]: HardRoundProfile,
     [AirbrushProfile.id]: AirbrushProfile,
     [CharcoalProfile.id]: CharcoalProfile,
+    [StylizedProfile.id]: StylizedProfile, // <--- AÑADIR REGISTRO
 };
 
 ===== src/core/render/profiles/InkProfile.ts =====
@@ -3910,24 +4116,24 @@ export interface IBrushProfile {
     baseFlow?: number;
     blendMode: GlobalCompositeOperation;
 
-    renderer: 'basic' | 'fill' | 'paint' | 'hard-round' | 'ink' | 'airbrush' | 'charcoal';
+    // === FIX: Añadimos 'stylized' ===
+    renderer: 'basic' | 'fill' | 'paint' | 'hard-round' | 'ink' | 'airbrush' | 'charcoal' | 'stylized';
 
     spacing: number;
     angle: number;
     aspectRatio: number;
 
-    // === CONTROLES DINÁMICOS POR PRESIÓN (ESTILO PROCREATE) ===
-    pressureSizeSensitivity: number; // (Obsoleto, mantenido por compatibilidad)
-    pressureOpacitySensitivity: number; // (Obsoleto)
+    pressureSizeSensitivity: number;
+    pressureOpacitySensitivity: number;
 
-    pressureSizeMin?: number;     // Tamaño a presión 0 (Ej: 0.14)
-    pressureSizeMax?: number;     // Tamaño a máxima presión (Ej: 0.84)
+    pressureSizeMin?: number;
+    pressureSizeMax?: number;
 
-    pressureOpacityMin?: number;  // Opacidad a presión 0 (Ej: 0.30)
-    pressureOpacityMax?: number;  // Opacidad a máxima presión (Ej: 1.0)
+    pressureOpacityMin?: number;
+    pressureOpacityMax?: number;
 
-    pressureFlowMin?: number;     // Flujo a presión 0
-    pressureFlowMax?: number;     // Flujo a máxima presión
+    pressureFlowMin?: number;
+    pressureFlowMax?: number;
 
     smoothing: number;
 
@@ -4415,7 +4621,6 @@ import '../ui/tokens/base.css';
 
 const CANVAS_SIZE_KEY = 'drawination_canvas_size';
 
-// Exportado para que el entry point pueda pasárselo a BrushToolbar.activateDefault()
 export const INITIAL_BRUSH_COLOR = '#2280cf';
 
 function getSavedCanvasSize(): { width: number; height: number } {
@@ -4563,17 +4768,6 @@ export class AppContainer {
         );
     }
 
-    // Llamar desde el entry point DESPUÉS de montar la UI
-    // para sincronizar la BrushToolbar con el estado inicial
-    public initUI(brushToolbar: { activateDefault: (toolId: string, color: string) => void }): void {
-        brushToolbar.activateDefault('pencil-hb', INITIAL_BRUSH_COLOR);
-
-        // Sincronizar cuadradito 7 y ColorPanel con el color inicial
-        requestAnimationFrame(() => {
-            this.eventBus.emit('SET_COLOR', INITIAL_BRUSH_COLOR);
-        });
-    }
-
     public async start() {
         await Promise.all([
             this.storage.init(),
@@ -4631,31 +4825,35 @@ export class AppContainer {
 // src/app/DrawinationApp.ts
 import '../history/commands/index';
 import '../tools/index';
-import { AppContainer } from './AppContainer';
+import { AppContainer, INITIAL_BRUSH_COLOR } from './AppContainer';
 import { DebugToolbar } from '../ui/debug/DebugToolbar';
 import { UIRoot } from '../ui/UIRoot';
-import '../ui/tokens/design-tokens.css'; // Importa variables
-import '../ui/tokens/base.css';          // Importa reset y layout base
+import '../ui/tokens/design-tokens.css';
+import '../ui/tokens/base.css';
 
 export class DrawinationApp {
-    private container: AppContainer;
-    private uiRoot: UIRoot; // <--- AÑADIR ESTO
-    // private debugToolbar: DebugToolbar;
+    public container: AppContainer;
+    private uiRoot: UIRoot;
 
     constructor(containerId: string) {
         const el = document.getElementById(containerId);
         if (!el) throw new Error(`Contenedor ${containerId} no encontrado`);
 
         this.container = new AppContainer(el);
-        // this.debugToolbar = new DebugToolbar(this.container.eventBus);
         this.uiRoot = new UIRoot(this.container.eventBus);
     }
 
     public async init() {
         await this.container.start();
         this.uiRoot.mount(document.body);
+
+        // === FIX: Auto-seleccionar Lápiz al inicio ===
+        requestAnimationFrame(() => {
+            this.container.eventBus.emit('SET_PROFILE_PENCIL');
+            this.container.eventBus.emit('SET_COLOR', INITIAL_BRUSH_COLOR);
+        });
+
         console.log("🚀 Drawination Engine iniciado");
-        // this.debugToolbar.connectBot(this.container.engine.container);
     }
 }
 
@@ -4694,6 +4892,7 @@ import { PaintProfile } from '../core/render/profiles/PaintProfile';
 import { HardRoundProfile } from '../core/render/profiles/HardRoundProfile';
 import { AirbrushProfile } from '../core/render/profiles/AirbrushProfile';
 import { CharcoalProfile } from '../core/render/profiles/CharcoalProfile';
+import { StylizedProfile } from '../core/render/profiles/StylizedProfile';
 import { ExportManager } from '../export/ExportManager';
 import { DEFAULT_BACKGROUND_COLOR } from '../history/computeTimelineState';
 
@@ -4741,7 +4940,7 @@ export class WorkspaceController {
     private bindInputEvents(): void {
         this.input.onPointerDown = (data) => {
             const toolId = this.toolManager.activeTool.id;
-            if (toolId !== 'pan' && toolId !== 'zoom' && toolId !== 'rotate' && toolId !== 'lasso' && toolId !== 'transform-handle') {
+            if (toolId !== 'pan' && toolId !== 'zoom' && toolId !== 'rotate' && toolId !== 'lasso' && toolId !== 'transform-handle' && toolId !== 'background') {
                 const state = this.history.getState();
                 const isLocked = state.layersState.get(state.derivedActiveLayerIndex)?.locked;
                 if (isLocked) {
@@ -4862,10 +5061,12 @@ export class WorkspaceController {
                 opacity: this.activeBrush.profile.baseOpacity,
                 minSize: this.activeBrush.profile.minSize || 1,
                 maxSize: this.activeBrush.profile.maxSize || 100,
+                profileId: this.activeBrush.profile.id // <--- FIX: Enviamos el ID a la UI
             });
         };
 
         this.eventBus.on('SET_PROFILE_INK', () => applyAndSync(InkProfile));
+        this.eventBus.on('SET_PROFILE_STYLIZED', () => applyAndSync(StylizedProfile));
         this.eventBus.on('SET_PROFILE_PENCIL', () => applyAndSync(PencilProfile));
         this.eventBus.on('SET_PROFILE_FILL', () => applyAndSync(FillProfile));
         this.eventBus.on('SET_PROFILE_PAINT', () => applyAndSync(PaintProfile));
@@ -5005,7 +5206,6 @@ export class WorkspaceController {
         this.eventBus.emit('SYNC_LAYERS_CSS');
     }
 
-    // === FIX: Agrupamos todos los eventos generados con un groupId ===
     private async _handleLayerDuplicate(layerIndex: number): Promise<void> {
         const state = this.history.getState();
         const sourceState = state.layersState.get(layerIndex);
@@ -5861,39 +6061,48 @@ export class Logger {
 import type { ITool, ToolContext } from './ITool';
 import { ToolRegistry } from './ToolRegistry';
 import type { ShortcutManager } from '../../input/ShortcutManager';
+import type { EventBus } from '../../input/EventBus';
 
 export class ToolManager {
     private tools: Map<string, ITool> = new Map();
     private _activeTool: ITool | null = null;
     private defaultToolId: string = '';
     private previousToolId: string = '';
+    private eventBus: EventBus | null = null; // Guardamos referencia al bus
 
     public bootstrap(ctx: ToolContext, shortcuts: ShortcutManager) {
+        this.eventBus = ctx.eventBus;
         const configs = ToolRegistry.getAll();
 
         for (const config of configs) {
             const tool = config.factory(ctx);
             this.registerTool(tool);
 
+            // === FIX: Los atajos ahora envían una solicitud al sistema global ===
             if (config.downShortcut) {
                 shortcuts.bindDown(config.downShortcut, (e) => {
                     if (!e.repeat) {
-                        this.switchTool(tool.id);
-                        if (config.isSticky) this.setDefaultTool(tool.id);
+                        ctx.eventBus.emit('REQUEST_TOOL_SWITCH', tool.id);
                     }
                 });
             }
             if (config.upShortcut) {
-                shortcuts.bindUp(config.upShortcut, () => this.revertTool());
+                shortcuts.bindUp(config.upShortcut, () => {
+                    ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.defaultToolId);
+                });
             }
         }
 
         ctx.eventBus.on('REQUEST_TOOL_SWITCH', (toolId: string) => {
             this.switchTool(toolId);
-            this.setDefaultTool(toolId);
+
+            // Evaluamos si la herramienta es permanente (sticky) para hacerla por defecto
+            const toolConfig = configs.find(c => c.id === toolId);
+            if (!toolConfig || toolConfig.isSticky !== false) {
+                this.defaultToolId = toolId;
+            }
         });
 
-        // === ESTRATEGIA DE INTERRUPCIÓN GLOBAL ===
         ctx.eventBus.on('GLOBAL_INTERRUPTION', () => {
             this.switchTool(this.defaultToolId, 'system_interruption');
         });
@@ -5908,7 +6117,6 @@ export class ToolManager {
         this.switchTool(toolId);
     }
 
-    // === FIX: Recibe un reason opcional para pasarlo al onDeactivate ===
     public switchTool(toolId: string, reason?: string) {
         if (this._activeTool && this._activeTool.isBusy() && toolId === this._activeTool.id) return;
 
@@ -5917,12 +6125,14 @@ export class ToolManager {
 
         if (this._activeTool) {
             this.previousToolId = this._activeTool.id;
-            // Le decimos a la herramienta por qué se va (ej: "pencil", "eraser", o "system_interruption")
             this._activeTool.onDeactivate(reason || toolId);
         }
 
         this._activeTool = newTool;
         this._activeTool.onActivate();
+
+        // === FIX: Emitimos la confirmación del cambio a TODA LA UI ===
+        this.eventBus?.emit('ACTIVE_TOOL_CHANGED', toolId);
     }
 
     public switchToolSilent(toolId: string) {
@@ -6091,7 +6301,8 @@ export class EraserTool implements ITool {
             size: this.ctx.activeBrush.profile.baseSize,
             opacity: this.ctx.activeBrush.profile.baseOpacity,
             minSize: this.ctx.activeBrush.profile.minSize || 1,
-            maxSize: this.ctx.activeBrush.profile.maxSize || 100
+            maxSize: this.ctx.activeBrush.profile.maxSize || 100,
+            profileId: 'eraser' // <--- FIX: Indicamos a la UI que es la goma
         });
     }
 
@@ -6167,7 +6378,6 @@ export class PencilTool implements ITool {
     constructor(ctx: ToolContext) {
         this.ctx = ctx;
 
-        // Si desde la UI piden el Lápiz explícitamente, le decimos al ToolManager que nos active
         this.ctx.eventBus.on('SET_TOOL_PENCIL', () => {
             this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
         });
@@ -6178,14 +6388,14 @@ export class PencilTool implements ITool {
     public onActivate() {
         this.ctx.engine.container.style.cursor = 'crosshair';
 
-        // === FIX: Cargamos el perfil cachead o usando la nueva arquitectura ===
         this.ctx.activeBrush.useProfile(this.ctx.activeBrush.lastDrawingProfile);
 
         this.ctx.eventBus.emit('SYNC_UI_SLIDERS', {
             size: this.ctx.activeBrush.profile.baseSize,
             opacity: this.ctx.activeBrush.profile.baseOpacity,
             minSize: this.ctx.activeBrush.profile.minSize || 1,
-            maxSize: this.ctx.activeBrush.profile.maxSize || 100
+            maxSize: this.ctx.activeBrush.profile.maxSize || 100,
+            profileId: this.ctx.activeBrush.profile.id // <--- FIX: Envía el profileId
         });
     }
 
@@ -6386,8 +6596,9 @@ import './interaction/ZoomTool';
 import './interaction/RotateTool';
 import './interaction/MoveTool';
 import './interaction/LassoTool';
-import './interaction/transform/TransformHandleTool'; // <--- NUEVA HERRAMIENTA AÑADIDA
-import './draw/VectorEraserTool'; // <--- NUEVA HERRAMIENTA AÑADIDA
+import './interaction/transform/TransformHandleTool';
+import './draw/VectorEraserTool';
+import './interaction/BackgroundTool'; // <--- AÑADIDO
 
 ===== src/tools/interaction/MoveTool.ts =====
 
@@ -6861,41 +7072,7 @@ export class TransformContextActions {
 
 // src/tools/interaction/transform/TransformHandleTool.ts
 //
-// MÁQUINA DE ESTADOS PARA UNDO/REDO (spec del usuario):
-//
-// ── UNDO ─────────────────────────────────────────────────────────────────
-//
-// Estado IDLE, próximo UNDO es TRANSFORM:
-//   → [FOCO] Abre handle en posición post-transform. NO aplica undo todavía.
-//   → handled = true
-//
-// Estado FOCUSED, próximo UNDO es TRANSFORM sobre el mismo grupo:
-//   → [VIAJE] Deja que el URC aplique el undo. El handle se actualiza a posición pre-transform.
-//   → handled = false  ← CLAVE: el URC hace el rebuild y nosotros escuchamos HISTORY_RESTORED
-//
-// Estado FOCUSED, próximo UNDO NO es TRANSFORM del mismo grupo (o es otro tipo):
-//   → [SALIDA] Cierra el handle. NO aplica undo todavía.
-//   → handled = true
-//
-// ── REDO ─────────────────────────────────────────────────────────────────
-//
-// Estado IDLE, próximo REDO es TRANSFORM:
-//   → [FOCO] Abre handle en posición pre-transform. NO aplica redo todavía.
-//   → handled = true
-//
-// Estado FOCUSED, próximo REDO es TRANSFORM sobre el mismo grupo:
-//   → [VIAJE] Deja que el URC aplique el redo. El handle se actualiza a posición post-transform.
-//   → handled = false
-//
-// Estado FOCUSED, próximo REDO NO es TRANSFORM del mismo grupo:
-//   → [SALIDA] Cierra el handle. NO aplica redo todavía.
-//   → handled = true
-//
-// ── ACTUALIZACIÓN POST-VIAJE ─────────────────────────────────────────────
-//
-// Cuando el URC aplica un undo/redo de TRANSFORM (handled=false),
-// escuchamos el evento HISTORY_RESTORED para actualizar el bbox y el sandbox
-// SIN usar REQUEST_TRANSFORM_HANDLE_REFRESH (que causaba el bug de doble apertura).
+// MÁQUINA DE ESTADOS PARA UNDO/REDO (Foco -> Viaje -> Salida)
 
 import type { ITool, ToolContext } from '../../core/ITool';
 import type { PointerData } from '../../../input/InputManager';
@@ -6910,7 +7087,6 @@ import { TransformGestureHandler } from './TransformGestureHandler';
 import { TransformSandbox } from './TransformSandbox';
 import { TransformContextActions } from './TransformContextActions';
 
-// ─── Estado de la máquina ────────────────────────────────────────────────────
 const TransformState = {
     IDLE: 'IDLE',
     FOCUSED: 'FOCUSED',
@@ -6920,29 +7096,20 @@ const TransformState = {
 } as const;
 type TransformState = typeof TransformState[keyof typeof TransformState];
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 export class TransformHandleTool implements ITool, IUndoInterceptor {
     public readonly id = 'transform-handle';
 
     private ctx: ToolContext;
     private state: TransformState = TransformState.IDLE;
 
-    // Módulos delegados
     private renderer: TransformHandleRenderer;
     private gesture: TransformGestureHandler;
     private sandbox: TransformSandbox;
     private actions: TransformContextActions;
 
-    // Estado de frame actual (la matriz viva durante un gesto)
     private currentMatrix: number[] = [1, 0, 0, 1, 0, 0];
-
-    // Tracking para Diagnostics
     private lastAction: 'move' | 'scale' | 'rotate' | 'none' = 'none';
     private isShiftDown = false;
-
-    // Flag para ignorar HISTORY_RESTORED durante operaciones internas
-    // (evita que el listener reaccione a rebuilds que nosotros mismos iniciamos)
     private _ignoreHistoryRestored = false;
 
     constructor(ctx: ToolContext) {
@@ -6960,24 +7127,17 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
 
         ctx.undoRedoController.registerInterceptor(this);
 
-        // ── Escuchar HISTORY_RESTORED para actualizar el handle después de un VIAJE ──
-        // Esto reemplaza REQUEST_TRANSFORM_HANDLE_REFRESH en el flujo de undo/redo.
-        // Solo actúa cuando estamos en FOCUSED y el evento es un TRANSFORM de nuestro grupo.
+        // Actualización post-viaje de Undo/Redo
         ctx.eventBus.on('HISTORY_RESTORED', async ({ event, action }) => {
-            // Si el flag está activo, somos nosotros los que iniciamos este restore → ignorar
             if (this._ignoreHistoryRestored) return;
-
-            // Solo nos importa si estamos en FOCUSED y el evento es TRANSFORM
             if (this.state !== TransformState.FOCUSED) return;
             if (event.type !== 'TRANSFORM') return;
             if (!event.targetIds) return;
 
-            // Solo si afecta a nuestra selección actual
             const ourIds = this._selectedIdsStr();
             const eventIds = [...event.targetIds].sort().join(',');
             if (ourIds !== eventIds) return;
 
-            // Actualizar bbox y sandbox después del viaje
             const freshBbox = this.ctx.history.getBboxForIds(event.targetIds);
             if (freshBbox) this.ctx.selection.setBbox(freshBbox);
 
@@ -6986,14 +7146,11 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
             this._renderLivePreview();
         });
 
-        // ── EventBus: acciones de la barra contextual ─────────────────────
         ctx.eventBus.on('SELECTION_DELETE', () => this._handleDelete());
         ctx.eventBus.on('SELECTION_FLIP_H', () => this._handleFlipH());
         ctx.eventBus.on('SELECTION_FLIP_V', () => this._handleFlipV());
         ctx.eventBus.on('SELECTION_DUPLICATE', () => this._handleDuplicate());
     }
-
-    // ── ITool lifecycle ───────────────────────────────────────────────────
 
     public isBusy(): boolean {
         return (
@@ -7027,19 +7184,14 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         }
     }
 
-    // ── IUndoInterceptor ──────────────────────────────────────────────────
-    //
-    // IMPLEMENTACIÓN DE LA MÁQUINA DE ESTADOS DE UNDO/REDO
-    // Ver spec al inicio del archivo.
+    // ── MÁQUINA DE ESTADOS UNDO/REDO ──────────────────────────────────────
 
     public async beforeUndo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
         if (this.isBusy()) return { handled: true };
 
-        // ── Estado IDLE ───────────────────────────────────────────────────
+        // [FOCO]
         if (this.state === TransformState.IDLE) {
             if (nextEvent?.type === 'TRANSFORM' && nextEvent.targetIds) {
-                // [FOCO] Calculamos el bbox en la posición ACTUAL (post-transform)
-                // y abrimos el handle. NO aplicamos el undo todavía.
                 const bboxPostTransform = this.ctx.history.getBboxForIds(nextEvent.targetIds);
                 if (bboxPostTransform) {
                     this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bboxPostTransform);
@@ -7048,30 +7200,27 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
                     this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
                     DiagnosticsService.logTransformState('resurrect_undo', 'none');
                 }
-                return { handled: true }; // No aplica el undo
+                return { handled: true }; // Intercepta (No aplica historial aún)
             }
             return { handled: false };
         }
 
-        // ── Estado FOCUSED ────────────────────────────────────────────────
+        // FOCUSED
         if (this.state === TransformState.FOCUSED) {
-
-            // ¿El próximo undo es un TRANSFORM sobre nuestra selección actual?
+            // [VIAJE]
             if (
                 nextEvent?.type === 'TRANSFORM' &&
                 nextEvent.targetIds &&
                 this._selectedIdsStr() === [...nextEvent.targetIds].sort().join(',')
             ) {
-                // [VIAJE] Dejamos que el URC aplique el undo.
-                // HISTORY_RESTORED actualizará el handle con la nueva posición.
                 DiagnosticsService.logTransformState('travel_undo', this.lastAction);
-                return { handled: false };
+                return { handled: false }; // Deja que el historial actúe
             }
 
-            // Cualquier otro caso: [SALIDA] cerramos el handle pero NO aplicamos el undo.
+            // [SALIDA]
             DiagnosticsService.logTransformState('undo_exit', this.lastAction);
             await this._exitToLasso();
-            return { handled: true };
+            return { handled: true }; // Intercepta actuando como Escape
         }
 
         return { handled: false };
@@ -7080,11 +7229,10 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
     public async beforeRedo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
         if (this.isBusy()) return { handled: true };
 
-        // ── Estado IDLE ───────────────────────────────────────────────────
+        // [FOCO]
         if (this.state === TransformState.IDLE) {
             if (nextEvent?.type === 'TRANSFORM' && nextEvent.targetIds) {
-                // [FOCO] Calculamos el bbox en la posición ACTUAL (pre-transform)
-                // y abrimos el handle. NO aplicamos el redo todavía.
+                // Al rehacer, el evento aún no se aplica. Obtenemos bbox en Posición A.
                 const bboxPreTransform = this.ctx.history.getBboxForIds(nextEvent.targetIds);
                 if (bboxPreTransform) {
                     this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bboxPreTransform);
@@ -7093,29 +7241,27 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
                     this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
                     DiagnosticsService.logTransformState('resurrect_redo', 'none');
                 }
-                return { handled: true }; // No aplica el redo
+                return { handled: true }; // Intercepta
             }
             return { handled: false };
         }
 
-        // ── Estado FOCUSED ────────────────────────────────────────────────
+        // FOCUSED
         if (this.state === TransformState.FOCUSED) {
-
-            // ¿El próximo redo es un TRANSFORM sobre nuestra selección actual?
+            // [VIAJE]
             if (
                 nextEvent?.type === 'TRANSFORM' &&
                 nextEvent.targetIds &&
                 this._selectedIdsStr() === [...nextEvent.targetIds].sort().join(',')
             ) {
-                // [VIAJE] Dejamos que el URC aplique el redo.
                 DiagnosticsService.logTransformState('travel_redo', this.lastAction);
-                return { handled: false };
+                return { handled: false }; // Deja que el historial actúe
             }
 
-            // [SALIDA] cerramos el handle pero NO aplicamos el redo.
+            // [SALIDA]
             DiagnosticsService.logTransformState('redo_exit', this.lastAction);
             await this._exitToLasso();
-            return { handled: true };
+            return { handled: true }; // Intercepta cerrando la herramienta
         }
 
         return { handled: false };
@@ -7177,17 +7323,14 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
 
             const targetIds = Array.from(this.ctx.selection.selectedIds);
 
-            // Marcamos que el HISTORY_RESTORED del rebuild interno no debe disparar
-            // el listener de actualización del handle (lo hacemos manualmente abajo)
             this._ignoreHistoryRestored = true;
-
             const event = await this.ctx.history.commitTransform(targetIds, this.currentMatrix);
             await this.ctx.storage.saveEvent(event);
             (event as any).isSaved = true;
             this.ctx.history.enforceRamLimit();
 
-            await this.rebuilder.rebuild(this.ctx.activeBrush);
-
+            // === FIX APLICADO AQUÍ (this.ctx.rebuilder y this.ctx.activeBrush) ===
+            await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
             this._ignoreHistoryRestored = false;
 
             if (this.state !== TransformState.FOCUSED) return;
@@ -7203,8 +7346,6 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
             this._renderLivePreview();
         }
     }
-
-    // ── Acciones contextuales (delegadas a TransformContextActions) ───────
 
     private async _handleDelete(): Promise<void> {
         if (this.state !== TransformState.FOCUSED || !this.ctx.selection.hasSelection()) return;
@@ -7235,13 +7376,7 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         }
     }
 
-    // ── Ciclo de vida interno ─────────────────────────────────────────────
-
-    private async _enterFocused(
-        ids: string[],
-        bbox: BoundingBox,
-        skipRebuild: boolean
-    ): Promise<void> {
+    private async _enterFocused(ids: string[], bbox: BoundingBox, skipRebuild: boolean): Promise<void> {
         this.state = TransformState.FOCUSED;
         this.ctx.selection.setSelection(new Set(ids), bbox);
         this.currentMatrix = [1, 0, 0, 1, 0, 0];
@@ -7270,6 +7405,7 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         this.ctx.selection.clear();
 
         this._ignoreHistoryRestored = true;
+        // === FIX APLICADO AQUÍ (this.ctx.rebuilder y this.ctx.activeBrush) ===
         await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
         this._ignoreHistoryRestored = false;
     }
@@ -7294,15 +7430,9 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         );
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────
-
-    private get rebuilder() { return this.ctx.rebuilder; }
-
     private _selectedIdsStr(): string {
         return Array.from(this.ctx.selection.selectedIds).sort().join(',');
     }
-
-    // ── Keyboard ──────────────────────────────────────────────────────────
 
     private _handleKeyDown = async (e: KeyboardEvent): Promise<void> => {
         if (e.key === 'Shift') {
@@ -7807,6 +7937,44 @@ export class LassoTool implements ITool {
 
 ToolRegistry.register({ id: 'lasso', factory: (ctx) => new LassoTool(ctx), downShortcut: 'l', isSticky: true });
 
+===== src/tools/interaction/BackgroundTool.ts =====
+
+
+
+===== 02:21:08 =====
+
+
+
+===== PM =====
+
+// src/tools/interaction/BackgroundTool.ts
+import type { ITool, ToolContext } from '../core/ITool';
+import { ToolRegistry } from '../core/ToolRegistry';
+
+export class BackgroundTool implements ITool {
+    public readonly id = 'background';
+    private ctx: ToolContext;
+
+    constructor(ctx: ToolContext) {
+        this.ctx = ctx;
+    }
+
+    public isBusy() { return false; }
+
+    public onActivate() {
+        // Cursor normal mientras editamos el fondo
+        this.ctx.engine.container.style.cursor = 'default';
+    }
+
+    public onDeactivate() { }
+    public onPointerDown() { }
+    public onPointerMove() { }
+    public onPointerUp() { }
+}
+
+// Lo registramos
+ToolRegistry.register({ id: 'background', factory: (ctx) => new BackgroundTool(ctx) });
+
 ===== src/tools/interaction/PanTool.ts =====
 
 
@@ -8141,14 +8309,19 @@ function expToLinear(val: number, min: number, max: number, power: number = 3): 
     return Math.pow((val - min) / (max - min), 1 / power);
 }
 
+// === FIX: Agrupamos la configuración tanto por Profile ID como por Tool ID ===
 const TOOL_SLIDER_CONFIG: Record<string, { size: boolean; opacity: boolean }> = {
+    // Perfiles (Pinceles)
     'pencil-hb': { size: true, opacity: true },
     'ink-pen': { size: true, opacity: true },
+    'stylized-brush': { size: true, opacity: true },
     'oil-brush': { size: true, opacity: true },
     'hard-round': { size: true, opacity: true },
     'airbrush': { size: true, opacity: true },
     'charcoal': { size: true, opacity: true },
     'solid-fill': { size: false, opacity: true },
+
+    // Herramientas (Tool IDs puros)
     'eraser': { size: true, opacity: true },
     'vector-eraser': { size: false, opacity: false },
     'lasso': { size: false, opacity: false },
@@ -8157,6 +8330,7 @@ const TOOL_SLIDER_CONFIG: Record<string, { size: boolean; opacity: boolean }> = 
     'zoom': { size: false, opacity: false },
     'rotate': { size: false, opacity: false },
     'move': { size: false, opacity: false },
+    'background': { size: false, opacity: false },
 };
 
 export class TopCenterBar {
@@ -8232,25 +8406,31 @@ export class TopCenterBar {
 
     private bindEvents() {
         this.eventBus.on('SYNC_UI_SLIDERS', (payload) => {
-            const { size, opacity, minSize, maxSize } = payload;
+            const { size, opacity, minSize, maxSize, profileId } = payload;
             if (minSize !== undefined) this.currentMinSize = minSize;
             if (maxSize !== undefined) this.currentMaxSize = maxSize;
             const t = expToLinear(size, this.currentMinSize, this.currentMaxSize, 3);
             this.sizeSlider.setValue(Math.round(t * 1000), `Tamaño: ${Math.round(size * 10) / 10}px`);
             this.opacitySlider.setValue(Math.round(opacity * 100), `Opacidad: ${Math.round(opacity * 100)}%`);
+
+            // Si vino un profileId, lo usamos para bloquear/desbloquear
+            if (profileId) {
+                this._applySliderConfig(profileId);
+            }
         });
 
+        // Escuchamos el evento real de cambio de herramienta
         this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId: string) => {
-            this._applySliderConfig(toolId);
-        });
-
-        this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId: string) => {
-            this._applySliderConfig(toolId);
+            // El lápiz configura sus sliders por medio del SYNC_UI_SLIDERS (con el profileId),
+            // pero el resto de herramientas genéricas (lazo, pan, background, etc) se configuran aquí mismo.
+            if (toolId !== 'pencil') {
+                this._applySliderConfig(toolId);
+            }
         });
     }
 
-    private _applySliderConfig(toolId: string): void {
-        const config = TOOL_SLIDER_CONFIG[toolId];
+    private _applySliderConfig(id: string): void {
+        const config = TOOL_SLIDER_CONFIG[id];
         if (!config) return;
         this._setSliderEnabled(this.sizeWrap, this.sep1, config.size);
         this._setSliderEnabled(this.opacityWrap, this.sep2, config.opacity);
@@ -8270,7 +8450,6 @@ export class TopCenterBar {
             const dropper = new (window as any).EyeDropper();
             const result = await dropper.open();
             if (result?.sRGBHex) {
-                // Eyedropper = elección explícita del usuario → va al historial
                 this.eventBus.emit('APPLY_COLOR', result.sRGBHex);
                 this.eventBus.emit('SET_COLOR', result.sRGBHex);
             }
@@ -8369,7 +8548,6 @@ export class TopLeftBar {
         const paletteRow = document.createElement('div');
         paletteRow.className = 'palette-row';
 
-        // Paleta rápida — elección explícita → APPLY_COLOR + SET_COLOR
         this.quickColors.forEach(c => {
             const swatch = new ColorSwatch({
                 color: c.hex,
@@ -8382,7 +8560,6 @@ export class TopLeftBar {
             swatch.mount(paletteRow);
         });
 
-        // Cuadradito 7 — abre el panel de color
         this.activeColorSwatch = new ColorSwatch({
             color: this.currentColor,
             title: 'Color activo — abrir paleta',
@@ -8418,19 +8595,18 @@ export class TopLeftBar {
     }
 
     private bindEvents() {
-        // Cuadradito 7 responde a SET_COLOR — siempre, venga de donde venga
         this.eventBus.on('SET_COLOR', (color) => {
             this.currentColor = color;
             this.activeColorSwatch.setColor(color);
         });
 
-        // También actualizar en APPLY_COLOR por si acaso
         this.eventBus.on('APPLY_COLOR', (color) => {
             this.currentColor = color;
             this.activeColorSwatch.setColor(color);
         });
 
-        this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId) => {
+        // === FIX: Escuchamos la fuente oficial de verdad ===
+        this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId) => {
             this.lassoBtn.setActive(toolId === 'lasso');
         });
     }
@@ -8741,8 +8917,6 @@ import { IconButton } from '../atoms/IconButton';
 import type { EventBus } from '../../input/EventBus';
 import type { Icons } from '../atoms/Icons';
 
-// Color inicial del lápiz y color que heredan los demás pinceles
-// la primera vez que se usan
 const DEFAULT_BRUSH_COLOR = '#2280cf';
 
 interface ToolDef {
@@ -8760,18 +8934,14 @@ export class BrushToolbar {
 
     private buttons: Map<string, IconButton> = new Map();
     private activeToolId: string = '';
-
     private currentGlobalColor: string = DEFAULT_BRUSH_COLOR;
-
-    // null = nunca usado → ícono en gris de la UI (sin style.color)
-    // string = color guardado → ícono en ese color
     private toolColors: Map<string, string | null> = new Map();
-
     private _settingColorInternally = false;
 
     private readonly drawingTools: ToolDef[] = [
         { id: 'pencil-hb', icon: 'pencil', title: 'Lápiz (B)', eventToEmit: 'SET_PROFILE_PENCIL', isBrush: true },
         { id: 'ink-pen', icon: 'ink', title: 'Pluma de Tinta', eventToEmit: 'SET_PROFILE_INK', isBrush: true },
+        { id: 'stylized-brush', icon: 'stylized', title: 'Pincel Estilizado', eventToEmit: 'SET_PROFILE_STYLIZED', isBrush: true }, // <--- AÑADIDO AQUÍ
         { id: 'oil-brush', icon: 'oil', title: 'Pincel Óleo', eventToEmit: 'SET_PROFILE_PAINT', isBrush: true },
         { id: 'hard-round', icon: 'hardRound', title: 'Hard Round', eventToEmit: 'SET_PROFILE_HARD_ROUND', isBrush: true },
         { id: 'airbrush', icon: 'airbrush', title: 'Aerógrafo', eventToEmit: 'SET_PROFILE_AIRBRUSH', isBrush: true },
@@ -8787,6 +8957,7 @@ export class BrushToolbar {
     private readonly profileEventToToolId: Record<string, string> = {
         'SET_PROFILE_PENCIL': 'pencil-hb',
         'SET_PROFILE_INK': 'ink-pen',
+        'SET_PROFILE_STYLIZED': 'stylized-brush', // <--- AÑADIDO AQUÍ
         'SET_PROFILE_PAINT': 'oil-brush',
         'SET_PROFILE_HARD_ROUND': 'hard-round',
         'SET_PROFILE_AIRBRUSH': 'airbrush',
@@ -8811,7 +8982,6 @@ export class BrushToolbar {
 
         this.eraserTools.forEach(def => this.createToolButton(def));
 
-        // Todos los pinceles arrancan sin color (null = gris de la UI)
         for (const def of this.drawingTools) {
             this.toolColors.set(def.id, null);
         }
@@ -8830,8 +9000,6 @@ export class BrushToolbar {
         btn.mount(this.element);
     }
 
-    // Llamado desde AppContainer al arrancar para activar el lápiz
-    // con el color correcto sin emitir eventos prematuros
     public activateDefault(toolId: string, color: string): void {
         this.currentGlobalColor = color;
         this.toolColors.set(toolId, color);
@@ -8843,11 +9011,9 @@ export class BrushToolbar {
         }
 
         this.activeToolId = toolId;
-        // No emitimos ACTIVE_TOOL_CHANGED aquí — el sistema todavía no está listo
     }
 
     private bindEvents() {
-
         this.eventBus.on('SET_COLOR', (color: string) => {
             if (this._settingColorInternally) return;
 
@@ -8867,21 +9033,36 @@ export class BrushToolbar {
             });
         }
 
-        this.eventBus.on('REQUEST_TOOL_SWITCH', (toolId: string) => {
-            const isOurButton = this.buttons.has(toolId);
-            if (!isOurButton) {
+        // === FIX: Escuchamos la FUENTE DE LA VERDAD para actualizar la UI ===
+        this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId: string) => {
+            // 1. Es un perfil/herramienta de esta barra (ej: Borrador)
+            if (this.buttons.has(toolId)) {
+                this._activateTool(toolId);
+            }
+            // 2. El motor activó el Lápiz general (atajo de teclado 'b')
+            else if (toolId === 'pencil') {
+                const isCurrentlyABrush = this.drawingTools.some(d => d.id === this.activeToolId);
+                if (!isCurrentlyABrush) {
+                    // Restauramos el último pincel guardado
+                    const lastBrush = Array.from(this.toolColors.keys()).find(k => this.toolColors.get(k) !== null) || 'pencil-hb';
+                    const def = this._findDefById(lastBrush);
+                    if (def) this.eventBus.emit(def.eventToEmit);
+                } else {
+                    this._activateTool(this.activeToolId);
+                }
+            }
+            // 3. Es una herramienta externa (Lazo, Move, Zoom, etc)
+            else {
+                // Apagamos esta barra visualmente, pero conservamos la memoria del pincel
                 const prevBtn = this.buttons.get(this.activeToolId);
                 if (prevBtn) prevBtn.setActive(false);
-                this.activeToolId = toolId;
-                this.eventBus.emit('ACTIVE_TOOL_CHANGED', toolId);
             }
         });
     }
 
     private _activateTool(toolId: string): void {
-        // Quitar activo del anterior — sin tocar su color
         const prevBtn = this.buttons.get(this.activeToolId);
-        if (prevBtn) prevBtn.setActive(false);
+        if (prevBtn && this.activeToolId !== toolId) prevBtn.setActive(false);
 
         const btn = this.buttons.get(toolId);
         const def = this._findDefById(toolId);
@@ -8893,13 +9074,10 @@ export class BrushToolbar {
                 const savedColor = this.toolColors.get(toolId);
 
                 if (savedColor === null || savedColor === undefined) {
-                    // Primera vez que se usa — heredar el color global actual
                     const firstColor = this.currentGlobalColor;
                     this.toolColors.set(toolId, firstColor);
                     btn.element.style.color = firstColor;
-                    // El color global ya es el correcto, no hace falta emitir SET_COLOR
                 } else {
-                    // Ya tiene color guardado — restaurarlo
                     btn.element.style.color = savedColor;
 
                     if (savedColor !== this.currentGlobalColor) {
@@ -8913,7 +9091,6 @@ export class BrushToolbar {
         }
 
         this.activeToolId = toolId;
-        this.eventBus.emit('ACTIVE_TOOL_CHANGED', toolId);
     }
 
     private _findDefById(id: string): ToolDef | undefined {
@@ -9145,7 +9322,6 @@ export class TopRightBar {
     private static stylesInjected = false;
 
     private layersBtn: IconButton;
-    private isLayerPanelOpen = false;
 
     constructor(eventBus: EventBus) {
         TopRightBar.injectStyles();
@@ -9159,10 +9335,7 @@ export class TopRightBar {
             icon: 'layers',
             title: 'Capas',
             onClick: () => {
-                // Toggleamos el estado local visualmente de forma rápida
-                this.isLayerPanelOpen = !this.isLayerPanelOpen;
-                this.layersBtn.setActive(this.isLayerPanelOpen);
-                // Emitimos para que el PanelManager abra/cierre el panel real
+                // Solo emitimos la intención, la UI reaccionará al evento de confirmación
                 this.eventBus.emit('TOGGLE_LAYER_PANEL');
             }
         });
@@ -9194,10 +9367,19 @@ export class TopRightBar {
         const playTimelapseBtn = new IconButton({
             icon: 'play',
             title: 'Reproducir Timelapse',
-            variant: 'accent', // Usamos la variante con el color azul de la paleta
+            variant: 'accent',
             onClick: () => this.eventBus.emit('PLAY_TIMELAPSE')
         });
         playTimelapseBtn.mount(this.element);
+
+        this.bindEvents();
+    }
+
+    private bindEvents() {
+        // === FIX: Escuchamos la "fuente única de verdad" del panel ===
+        this.eventBus.on('LAYER_PANEL_STATE_CHANGED', (isOpen) => {
+            this.layersBtn.setActive(isOpen);
+        });
     }
 
     private createSeparator(): HTMLDivElement {
@@ -11154,7 +11336,6 @@ export class LayerPanel {
 
         const newBottomToTop = [...newVisualOrder].reverse();
 
-        // === FIX: Mantener la longitud exacta de 10 elementos ===
         const uncreated = this.lastPayload!.layerOrder.filter(id => !this.lastPayload!.createdLayers.includes(id));
         const fullOrder = [...uncreated, ...newBottomToTop];
 
@@ -11180,6 +11361,9 @@ export class LayerPanel {
     this.bgWrapper?.classList.add('layer-item--bg-active');
     this.eventBus.emit('BACKGROUND_TOOL_ACTIVE', true);
     this.eventBus.emit('TOGGLE_COLOR_PANEL_FOR_BG');
+
+    // === FIX: Deselecciona visual y lógicamente cualquier otra herramienta ===
+    this.eventBus.emit('REQUEST_TOOL_SWITCH', 'background');
   }
 
   private _deactivateBgTool(): void {
@@ -11209,6 +11393,7 @@ export class LayerPanel {
         this.element.classList.remove('visible');
         this._deactivateBgTool();
       }
+      this.eventBus.emit('LAYER_PANEL_STATE_CHANGED', this.isVisible);
     });
 
     this.eventBus.on('ACTIVE_TOOL_CHANGED', (toolId) => { if (toolId !== 'background') this._deactivateBgTool(); });
@@ -11961,7 +12146,7 @@ export const Icons = {
     fill: `<svg width="100%" height="100%" viewBox="0 0 71 71" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"><rect id="fillBrush" x="0.133" y="0.013" width="70.072" height="70.016" style="fill:none;"/><path d="M19.305,54.691c-6.366,-7.182 -13.942,-28.021 -0.783,-35.462c4.819,-2.725 10.383,12.714 14.521,8.6c0.396,-0.393 6.579,-10.404 9.483,-13.69c5.564,-6.296 24.449,3.886 12.813,11.935c-10.041,6.946 -10.33,6.504 -16.14,11.876c-3.904,3.61 -3.798,14.135 -11.028,18.961c-4.334,2.894 -8.382,-1.673 -8.867,-2.22Z" style="fill:currentColor;"/></svg>`,
     eraser: `<svg width="100%" height="100%" viewBox="0 0 71 71" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"><rect id="HardEraser" x="0.141" y="0.013" width="70.072" height="70.016" style="fill:none;"/><g id="layer1"><path id="path9" d="M15.976,54.926c-4.852,-4.844 -9.007,-9.197 -9.232,-9.672c-0.363,-0.764 -0.365,-0.948 -0.02,-1.598c0.554,-1.045 36.759,-37.101 37.464,-37.31c0.332,-0.098 0.903,-0.004 1.326,0.22c0.408,0.216 4.709,4.372 9.558,9.236l8.816,8.844l0,2.629l-18.23,18.23l-18.23,18.23l-2.629,0l-8.822,-8.808Zm14.924,1.053c2.041,-2.064 3.281,-3.531 3.402,-4.025c0.181,-0.742 -0.16,-1.127 -7.354,-8.321c-7.13,-7.13 -7.585,-7.533 -8.299,-7.354c-0.885,0.222 -6.692,5.842 -7.406,7.168c-0.397,0.737 -0.42,0.998 -0.149,1.653c0.177,0.428 3.335,3.782 7.016,7.453l6.694,6.675l2.885,0l3.212,-3.248Z" style="fill:currentColor;fill-rule:nonzero;"/></g></svg>`,
     vectorEraser: `<svg width="100%" height="100%" viewBox="0 0 71 71" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"><rect id="strokeEraser" x="0.064" y="0.027" width="70.072" height="70.016" style="fill:none;"/><g id="layer1"><path id="path11" d="M23.351,59.066c-1.251,-0.579 -2.741,-1.895 -7.09,-6.26c-6.05,-6.073 -6.808,-7.148 -6.845,-9.715c-0.02,-1.349 0.131,-1.84 0.973,-3.168c1.037,-1.635 7.08,-8.051 7.583,-8.051c0.158,0 4.64,4.352 9.959,9.672l9.672,9.672l-2.366,2.278l-2.366,2.278l13.317,0c14.885,0 14.597,-0.037 14.597,1.888c0,0.608 -0.223,1.215 -0.576,1.567c-0.563,0.563 -0.958,0.576 -17.926,0.573l-17.35,-0.003l-1.584,-0.733Zm7.197,-20.723l-9.645,-9.656l8.495,-8.434c6.615,-6.568 8.842,-8.605 10.063,-9.206c3.744,-1.842 5.779,-0.774 13.421,7.049c4.689,4.799 5.888,6.583 5.888,8.758c0,1.658 -0.596,2.936 -2.362,5.069c-2.037,2.461 -15.503,16.074 -15.899,16.074c-0.174,0 -4.656,-4.345 -9.961,-9.656Z" style="fill:currentColor;fill-rule:nonzero;"/></g></svg>`,
-
+    stylized: `<svg width="100%" height="100%" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.38 3.46L16 2 9 9l-4 9 3-1 2 2-1-3 9-7 2.38-4.54z"/><path d="M14 6l4 4"/></svg>`,
     // Undo / Redo
     undo: `<svg width="100%" height="100%" viewBox="0 0 71 71" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"><rect id="undo" x="0.183" y="0.084" width="70.072" height="70.016" style="fill:none;"/><path d="M43.42,62.917c6.314,0 11.732,-2.05 16.256,-6.151c4.524,-4.101 6.786,-9.21 6.786,-15.328c0,-6.118 -2.262,-11.228 -6.786,-15.328c-4.524,-4.101 -9.942,-6.151 -16.256,-6.151l-24.604,0l10.154,-10.154l-5.467,-5.467l-19.527,19.527l19.527,19.527l5.467,-5.467l-10.154,-10.154l24.604,0c4.101,0 7.664,1.302 10.691,3.905c3.027,2.604 4.54,5.858 4.54,9.763c0,3.905 -1.513,7.16 -4.54,9.763c-3.027,2.604 -6.59,3.905 -10.691,3.905l-27.728,0l0,7.811l27.728,0Z" style="fill:currentColor;fill-rule:nonzero;"/></svg>`,
     redo: `<svg width="100%" height="100%" viewBox="0 0 71 71" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"><rect id="redo" x="0.012" y="0.017" width="70.072" height="70.016" style="fill:none;"/><path d="M26.847,62.849c-6.314,0 -11.732,-2.05 -16.256,-6.151c-4.524,-4.101 -6.786,-9.21 -6.786,-15.328c0,-6.118 2.262,-11.228 6.786,-15.328c4.524,-4.101 9.942,-6.151 16.256,-6.151l24.604,0l-10.154,-10.154l5.467,-5.467l19.527,19.527l-19.527,19.527l-5.467,-5.467l10.154,-10.154l-24.604,0c-4.101,0 -7.664,1.302 -10.691,3.905c-3.027,2.604 -4.54,5.858 -4.54,9.763c0,3.905 1.513,7.16 4.54,9.763c3.027,2.604 6.59,3.905 10.691,3.905l27.728,0l0,7.811l-27.728,0Z" style="fill:currentColor;fill-rule:nonzero;"/></svg>`
@@ -12190,7 +12375,7 @@ export interface LayersStatePayload {
     createdLayers: number[];
     layersState: Map<number, LayerState>;
     activeLayerIndex: number;
-    layerOrder: number[]; // Nuevo: Inyectamos el orden visual real
+    layerOrder: number[];
 }
 
 export interface AppEventMap {
@@ -12199,7 +12384,8 @@ export interface AppEventMap {
     'CLEAR_ALL': void;
     'RESET_ROTATION': void;
     'FLIP_HORIZONTAL': void;
-    'SYNC_UI_SLIDERS': { size: number; opacity: number; minSize?: number; maxSize?: number };
+    // === FIX: Agregamos profileId ===
+    'SYNC_UI_SLIDERS': { size: number; opacity: number; minSize?: number; maxSize?: number; profileId?: string };
     'GLOBAL_INTERRUPTION': void;
     'SYNC_LAYERS_CSS': void;
     'LAYERS_STATE_CHANGED': LayersStatePayload;
@@ -12228,9 +12414,11 @@ export interface AppEventMap {
     'SET_PROFILE_HARD_ROUND': void;
     'SET_PROFILE_AIRBRUSH': void;
     'SET_PROFILE_CHARCOAL': void;
+    'SET_PROFILE_STYLIZED': void;
     'TOGGLE_COLOR_PANEL': void;
     'TOGGLE_COLOR_PANEL_FOR_BG': void;
     'TOGGLE_LAYER_PANEL': void;
+    'LAYER_PANEL_STATE_CHANGED': boolean;
     'TOGGLE_MENU_PANEL': void;
     'SHOW_NEW_PROJECT': void;
     'NEW_PROJECT': { width: number; height: number };
@@ -12238,12 +12426,11 @@ export interface AppEventMap {
     'BACKGROUND_COLOR_CHANGED': string;
     'BACKGROUND_TOOL_ACTIVE': boolean;
 
-    // Acciones de capa
     'LAYER_ACTION_CREATE': void;
     'LAYER_ACTION_SELECT': number;
     'LAYER_ACTION_TOGGLE_VISIBILITY': number;
     'LAYER_ACTION_DELETE': number;
-    'LAYER_ACTION_REORDER': number[]; // Ahora recibe un array con el nuevo orden
+    'LAYER_ACTION_REORDER': number[];
     'LAYER_ACTION_OPACITY': { layerIndex: number; opacity: number };
     'LAYER_ACTION_LOCK': number;
     'LAYER_ACTION_DUPLICATE': number;
@@ -12927,8 +13114,6 @@ export class DiagnosticsService {
         console.log(`%c${icon} ${action}: %c${label}${layerStr}`, 'color:#f39c12;font-weight:bold', 'color:#aaa');
     }
 
-    // Manejo de todos los estados del Transform Handle, incluyendo los nuevos
-    // estados de viaje (travel_undo, travel_redo) de la máquina de estados.
     public static logTransformState(
         reason: string,
         actionType: 'move' | 'scale' | 'rotate' | 'none' | boolean
@@ -12969,8 +13154,6 @@ export class DiagnosticsService {
                 break;
 
             // ── Estados de la máquina de undo/redo ────────────────────────
-
-            // [FOCO]: abre el handle, NO aplica undo/redo todavía
             case 'resurrect_undo':
                 actionText = '⏪ [FOCO] Abriendo handle pre-undo';
                 color = '#9b59b6';
@@ -12979,18 +13162,14 @@ export class DiagnosticsService {
                 actionText = '⏩ [FOCO] Abriendo handle pre-redo';
                 color = '#9b59b6';
                 break;
-
-            // [VIAJE]: deja pasar el undo/redo, handle se actualiza via HISTORY_RESTORED
             case 'travel_undo':
-                actionText = '⏪ [VIAJE] Aplicando undo histórico (handle sigue abierto)';
+                actionText = '⏪ [VIAJE] Aplicando undo histórico (handle abierto)';
                 color = '#3498db';
                 break;
             case 'travel_redo':
-                actionText = '⏩ [VIAJE] Aplicando redo histórico (handle sigue abierto)';
+                actionText = '⏩ [VIAJE] Aplicando redo histórico (handle abierto)';
                 color = '#3498db';
                 break;
-
-            // [SALIDA]: cierra el handle, NO aplica undo/redo todavía
             case 'undo_exit':
                 actionText = '⏪ [SALIDA] Cerrando handle antes del undo';
                 color = '#e67e22';
@@ -13007,15 +13186,11 @@ export class DiagnosticsService {
             }
         }
 
-        // Para acciones instantáneas de UI no necesitamos el texto de movimiento
         const noMoveText = ['duplicate', 'delete', 'DELETE', 'flip_h', 'flip_v',
             'travel_undo', 'travel_redo', 'undo_exit', 'redo_exit'].includes(reason);
 
         if (noMoveText || reason.startsWith('resurrect')) {
-            console.log(
-                `%c⬛ Transform Handle: ${actionText}`,
-                `color:${color}; font-weight:bold;`
-            );
+            console.log(`%c⬛ Transform Handle: ${actionText}`, `color:${color}; font-weight:bold;`);
             return;
         }
 
@@ -13024,10 +13199,7 @@ export class DiagnosticsService {
         else if (actionType === 'rotate') moveText = 'se rotó (genera evento en historial)';
         else if (actionType === 'move' || actionType === true) moveText = 'se movió (genera evento en historial)';
 
-        console.log(
-            `%c⬛ Transform Handle: ${actionText} — ${moveText}`,
-            `color:${color}; font-weight:bold;`
-        );
+        console.log(`%c⬛ Transform Handle: ${actionText} — ${moveText}`, `color:${color}; font-weight:bold;`);
     }
 }
 
@@ -13228,33 +13400,7 @@ export class TimelapsePlayer {
 ===== PM =====
 
 // src/history/UndoRedoController.ts
-//
-// FLUJO CORRECTO DEL TRANSFORM HANDLE (según spec del usuario):
-//
-// UNDO desde estado IDLE + próximo evento es TRANSFORM:
-//   → Abre handle en posición post-transform (handled=true, no se aplica el undo)
-//
-// UNDO desde estado FOCUSED sobre el mismo TRANSFORM:
-//   → Aplica el undo histórico, handle sigue abierto en posición pre-transform (handled=false)
-//
-// UNDO desde estado FOCUSED sobre TRANSFORM diferente o no-TRANSFORM:
-//   → Sale del handle (handled=true), no aplica undo todavía
-//
-// REDO es el espejo exacto de UNDO.
-//
-// FIX DEL BUG: El problema era que applyUndo/applyRedo llamaba a los interceptores,
-// y si el interceptor devolvía handled=true el método terminaba — correcto.
-// Pero si devolvía handled=false, el UndoRedoController aplicaba el undo/redo
-// histórico Y luego llamaba cmd.onAfterUndo() → que emitía
-// REQUEST_TRANSFORM_HANDLE_REFRESH → que disparaba onDeactivate del handle actual
-// via GLOBAL_INTERRUPTION o REQUEST_TOOL_SWITCH, cerrando el handle accidentalmente.
-//
-// SOLUCIÓN:
-//   cmd.onAfterUndo/Redo solo se llama para comandos que NO son TRANSFORM,
-//   porque para TRANSFORM el manejo del handle lo hace TransformHandleTool
-//   directamente via beforeUndo/beforeRedo. No necesita el hook post-undo.
-
-import type { HistoryManager, TimelineEvent } from './HistoryManager';
+import type { HistoryManager, TimelineEvent, ActionType } from './HistoryManager';
 import type { CanvasRebuilder } from '../core/render/CanvasRebuilder';
 import type { BrushEngine } from '../core/render/BrushEngine';
 import type { EventBus } from '../input/EventBus';
@@ -13281,10 +13427,6 @@ export class UndoRedoController {
     private commandContext: CommandContext;
     private storage: StorageManager;
 
-    // Guard para evitar reentrancia: si ya estamos procesando un undo/redo,
-    // ignorar peticiones adicionales que puedan llegar via eventos en cadena.
-    private _isProcessing = false;
-
     constructor(
         history: HistoryManager,
         rebuilder: CanvasRebuilder,
@@ -13310,103 +13452,98 @@ export class UndoRedoController {
         if (idx !== -1) this.interceptors.splice(idx, 1);
     }
 
+    // ── SMART REBUILDING: Identifica si un evento requiere repintar el canvas ──
+    private _requiresCanvasRebuild(eventType: ActionType): boolean {
+        const cssOnlyEvents: ActionType[] = [
+            'BACKGROUND_COLOR',
+            'LAYER_OPACITY',
+            'LAYER_VISIBILITY',
+            'LAYER_REORDER',
+            'LAYER_LOCK',
+            'LAYER_SELECT'
+        ];
+        return !cssOnlyEvents.includes(eventType);
+    }
+
     public async applyUndo(): Promise<void> {
-        // Guard de reentrancia: evita que eventos en cadena llamen applyUndo de nuevo
-        if (this._isProcessing) return;
-        this._isProcessing = true;
+        const nextEvent = this.history.peekUndo();
 
-        try {
-            const nextEvent = this.history.peekUndo();
-
-            // Fase 1: dar a los interceptores la oportunidad de manejar el undo
-            // antes de que el historial se modifique.
-            for (const interceptor of this.interceptors) {
-                const result = await interceptor.beforeUndo(nextEvent);
-                if (result.handled) return;
-                // Si handled=false, el interceptor decidió no manejarlo
-                // pero puede haber cambiado el estado visual (ej: abrió el handle).
-                // Continuamos con el undo histórico normalmente.
-            }
-
-            // Fase 2: aplicar el undo en el historial
-            const undoneEvent = this.history.applyUndo();
-            if (!undoneEvent) return;
-
-            DiagnosticsService.logUndoRedo('UNDO', undoneEvent);
-
-            // FIX: persistir el evento UNDO en IDB
-            const undoControlEvent = this.history.timeline[this.history.timeline.length - 1];
-            if (undoControlEvent?.type === 'UNDO') {
-                undoControlEvent.isSaved = false;
-                await this.storage.saveEvent(undoControlEvent);
-                undoControlEvent.isSaved = true;
-            }
-
-            this.history.rebuildSpatialGrid();
-            await this.rebuilder.rebuild(this.activeBrush);
-            this.history.enforceRamLimit();
-
-            // Fase 3: notificar side-effects post-undo.
-            // EXCEPCIÓN: TRANSFORM no necesita onAfterUndo porque TransformHandleTool
-            // ya manejó todo en beforeUndo (abrió el handle, actualizó posición, etc.)
-            // Si llamáramos onAfterUndo en TRANSFORM, emitiría REQUEST_TRANSFORM_HANDLE_REFRESH
-            // que causaría un segundo ciclo de apertura/cierre del handle.
-            const cmd = CommandFactory.create(undoneEvent, this.activeBrush);
-            if (cmd.onAfterUndo && undoneEvent.type !== 'TRANSFORM') {
-                await cmd.onAfterUndo(this.commandContext);
-            }
-
-            this.eventBus.emit('HISTORY_RESTORED', { event: undoneEvent, action: 'UNDO' });
-
-        } finally {
-            this._isProcessing = false;
+        for (const interceptor of this.interceptors) {
+            const result = await interceptor.beforeUndo(nextEvent);
+            if (result.handled) return;
         }
+
+        const undoneEvent = this.history.applyUndo();
+        if (!undoneEvent) return;
+
+        DiagnosticsService.logUndoRedo('UNDO', undoneEvent);
+
+        // Persistir el evento de control UNDO en IDB
+        const undoControlEvent = this.history.timeline[this.history.timeline.length - 1];
+        if (undoControlEvent?.type === 'UNDO') {
+            undoControlEvent.isSaved = false;
+            await this.storage.saveEvent(undoControlEvent);
+            undoControlEvent.isSaved = true;
+        }
+
+        this.history.rebuildSpatialGrid();
+
+        // === OPTIMIZACIÓN: Solo reconstruimos si alteró píxeles ===
+        if (this._requiresCanvasRebuild(undoneEvent.type)) {
+            await this.rebuilder.rebuild(this.activeBrush);
+        } else {
+            // Si es CSS puro (fondo, opacidad de capa, etc), solo sincronizamos el DOM
+            this.eventBus.emit('SYNC_LAYERS_CSS');
+        }
+
+        this.history.enforceRamLimit();
+
+        const cmd = CommandFactory.create(undoneEvent, this.activeBrush);
+        if (cmd.onAfterUndo) {
+            await cmd.onAfterUndo(this.commandContext);
+        }
+
+        this.eventBus.emit('HISTORY_RESTORED', { event: undoneEvent, action: 'UNDO' });
     }
 
     public async applyRedo(): Promise<void> {
-        // Guard de reentrancia
-        if (this._isProcessing) return;
-        this._isProcessing = true;
+        const nextEvent = this.history.peekRedo();
 
-        try {
-            const nextEvent = this.history.peekRedo();
-
-            // Fase 1: dar a los interceptores la oportunidad de manejar el redo
-            for (const interceptor of this.interceptors) {
-                const result = await interceptor.beforeRedo(nextEvent);
-                if (result.handled) return;
-            }
-
-            // Fase 2: aplicar el redo en el historial
-            const redoneEvent = this.history.applyRedo();
-            if (!redoneEvent) return;
-
-            DiagnosticsService.logUndoRedo('REDO', redoneEvent);
-
-            // FIX: persistir el evento REDO en IDB
-            const redoControlEvent = this.history.timeline[this.history.timeline.length - 1];
-            if (redoControlEvent?.type === 'REDO') {
-                redoControlEvent.isSaved = false;
-                await this.storage.saveEvent(redoControlEvent);
-                redoControlEvent.isSaved = true;
-            }
-
-            this.history.rebuildSpatialGrid();
-            await this.rebuilder.rebuild(this.activeBrush);
-            this.history.enforceRamLimit();
-
-            // Fase 3: notificar side-effects post-redo.
-            // Misma excepción que en applyUndo: TRANSFORM lo maneja TransformHandleTool.
-            const cmd = CommandFactory.create(redoneEvent, this.activeBrush);
-            if (cmd.onAfterRedo && redoneEvent.type !== 'TRANSFORM') {
-                await cmd.onAfterRedo(this.commandContext);
-            }
-
-            this.eventBus.emit('HISTORY_RESTORED', { event: redoneEvent, action: 'REDO' });
-
-        } finally {
-            this._isProcessing = false;
+        for (const interceptor of this.interceptors) {
+            const result = await interceptor.beforeRedo(nextEvent);
+            if (result.handled) return;
         }
+
+        const redoneEvent = this.history.applyRedo();
+        if (!redoneEvent) return;
+
+        DiagnosticsService.logUndoRedo('REDO', redoneEvent);
+
+        // Persistir el evento de control REDO en IDB
+        const redoControlEvent = this.history.timeline[this.history.timeline.length - 1];
+        if (redoControlEvent?.type === 'REDO') {
+            redoControlEvent.isSaved = false;
+            await this.storage.saveEvent(redoControlEvent);
+            redoControlEvent.isSaved = true;
+        }
+
+        this.history.rebuildSpatialGrid();
+
+        // === OPTIMIZACIÓN: Solo reconstruimos si alteró píxeles ===
+        if (this._requiresCanvasRebuild(redoneEvent.type)) {
+            await this.rebuilder.rebuild(this.activeBrush);
+        } else {
+            this.eventBus.emit('SYNC_LAYERS_CSS');
+        }
+
+        this.history.enforceRamLimit();
+
+        const cmd = CommandFactory.create(redoneEvent, this.activeBrush);
+        if (cmd.onAfterRedo) {
+            await cmd.onAfterRedo(this.commandContext);
+        }
+
+        this.eventBus.emit('HISTORY_RESTORED', { event: redoneEvent, action: 'REDO' });
     }
 }
 
@@ -13675,6 +13812,14 @@ export class HistoryManager {
         const allIds = this.timeline.map(e => e.id);
         this.cacheManager.invalidateFrom(firstEventInGroup.id, allIds);
 
+        // === FIX DE CACHÉ ENVENENADA ===
+        // Si deshicimos un evento que alteró un trazo (Transform, Hide, etc),
+        // borramos todas las fotos de caché para que el Rebuilder lo pinte
+        // desde cero en su posición original, evitando "saltos fantasma".
+        if (firstEventInGroup.type !== 'STROKE' && firstEventInGroup.type !== 'ERASE' && firstEventInGroup.type !== 'FILL') {
+            this.cacheManager.clearAll();
+        }
+
         return firstEventInGroup;
     }
 
@@ -13706,6 +13851,11 @@ export class HistoryManager {
         const firstEventToRedo = undone[undone.length - redoCount];
         const allIds = this.timeline.map(e => e.id);
         this.cacheManager.invalidateFrom(firstEventToRedo.id, allIds);
+
+        // === FIX DE CACHÉ ENVENENADA ===
+        if (firstEventToRedo.type !== 'STROKE' && firstEventToRedo.type !== 'ERASE' && firstEventToRedo.type !== 'FILL') {
+            this.cacheManager.clearAll();
+        }
 
         return eventToRedo;
     }
@@ -13827,7 +13977,6 @@ export class HistoryManager {
         for (const event of active) {
             if (!event.bbox || (event.type !== 'STROKE' && event.type !== 'ERASE')) continue;
 
-            // === FIX: Si la capa está eliminada, no la metemos en el grid espacial ===
             const routedLayer = layerRoute.get(event.layerIndex) ?? event.layerIndex;
             if (!createdLayers.has(routedLayer)) continue;
 
@@ -13859,8 +14008,6 @@ export class HistoryManager {
         return active
             .filter(ev => {
                 if (hiddenIds.has(ev.id)) return false;
-
-                // === FIX: Filtrar trazos fantasma comprobando si la capa sigue viva ===
                 const routedLayer = layerRoute.get(ev.layerIndex) ?? ev.layerIndex;
                 return createdLayers.has(routedLayer);
             })
@@ -13881,7 +14028,6 @@ export class HistoryManager {
             const ev = active.find(e => e.id === id);
             if (!ev?.bbox) continue;
 
-            // === FIX: Prevenir calcular BBOX de trazos en capas eliminadas ===
             const routedLayer = layerRoute.get(ev.layerIndex) ?? ev.layerIndex;
             if (!createdLayers.has(routedLayer)) continue;
 
