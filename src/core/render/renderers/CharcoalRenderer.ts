@@ -213,7 +213,7 @@ export class CharcoalRenderer implements IBrushRenderer {
     public stamp(
         ctx: CanvasRenderingContext2D,
         profile: IBrushProfile,
-        color: string,
+        _color: string,
         x: number,
         y: number,
         rawPressure: number // Cambiado a rawPressure por claridad
@@ -317,7 +317,7 @@ export class CharcoalRenderer implements IBrushRenderer {
         ctx.closePath();
     }
 
-    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+    public rebuildStroke(ctx: CanvasRenderingContext2D, _profile: IBrushProfile, _color: string, _points: StrokePoint[], helpers: any): void {
         const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
 
         helpers.simulateDrawing(offCtx);

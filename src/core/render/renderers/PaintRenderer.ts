@@ -127,7 +127,7 @@ export class PaintRenderer implements IBrushRenderer {
     // ── beginStroke ───────────────────────────────────────────────────────
     // Idéntico a Gemini en lógica de seed y reservorio.
     // AÑADIDO: generación de noiseTexture UNA vez por stroke.
-    public beginStroke(profile: IBrushProfile, color: string, startPt: BasePoint): void {
+    public beginStroke(profile: IBrushProfile, _color: string, startPt: BasePoint): void {
         // FIX DETERMINISMO — igual que Gemini: cuantizar como el BinarySerializer
         const qx = Math.round(startPt.x * 100);
         const qy = Math.round(startPt.y * 100);
@@ -358,7 +358,7 @@ export class PaintRenderer implements IBrushRenderer {
     }
 
     // Reconstrucción Two-Pass: evita que la opacidad del trazo se contamine con los píxeles del lienzo
-    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+    public rebuildStroke(ctx: CanvasRenderingContext2D, _profile: IBrushProfile, _color: string, _points: StrokePoint[], helpers: any): void {
         const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
 
         helpers.simulateDrawing(offCtx);

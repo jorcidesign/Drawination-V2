@@ -44,7 +44,7 @@ export class RotateTool implements ITool {
         this.ctx.viewport.setAngle(this.initialViewportAngle + deltaDeg, this.pivotX, this.pivotY);
     }
 
-    public onPointerUp(data: PointerData) {
+    public onPointerUp(_data: PointerData) {
         this.rotating = false;
         this.ctx.engine.container.style.cursor = 'alias';
     }

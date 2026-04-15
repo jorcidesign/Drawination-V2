@@ -2,7 +2,6 @@
 import '../history/commands/index';
 import '../tools/index';
 import { AppContainer, INITIAL_BRUSH_COLOR } from './AppContainer';
-import { DebugToolbar } from '../ui/debug/DebugToolbar';
 import { UIRoot } from '../ui/UIRoot';
 import '../ui/tokens/design-tokens.css';
 import '../ui/tokens/base.css';

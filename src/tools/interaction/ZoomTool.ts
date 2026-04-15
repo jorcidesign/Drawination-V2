@@ -39,7 +39,7 @@ export class ZoomTool implements ITool {
         this.lastX = data.x;
     }
 
-    public onPointerUp(data: PointerData) {
+    public onPointerUp(_data: PointerData) {
         this.zooming = false;
         this.ctx.engine.container.style.cursor = 'zoom-in';
     }

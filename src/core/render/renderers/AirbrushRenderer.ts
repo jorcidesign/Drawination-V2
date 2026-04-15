@@ -93,7 +93,7 @@ export class AirbrushRenderer implements IBrushRenderer {
     public stamp(
         ctx: CanvasRenderingContext2D,
         profile: IBrushProfile,
-        color: string,
+        _color: string,
         x: number,
         y: number,
         rawPressure: number
@@ -153,7 +153,7 @@ export class AirbrushRenderer implements IBrushRenderer {
         // Renderizado puro, sin estado residual
     }
 
-    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: RebuildHelpers): void {
+    public rebuildStroke(ctx: CanvasRenderingContext2D, _profile: IBrushProfile, _color: string, _points: StrokePoint[], helpers: RebuildHelpers): void {
         const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
 
         helpers.simulateDrawing(offCtx);

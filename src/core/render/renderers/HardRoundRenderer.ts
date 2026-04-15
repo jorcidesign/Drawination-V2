@@ -9,7 +9,7 @@ export class HardRoundRenderer implements IBrushRenderer {
     // Buffer para la estabilización del trazo
     private inputBuffer: BasePoint[] = [];
 
-    public beginStroke(profile: IBrushProfile, color: string, startPt: BasePoint): void {
+    public beginStroke(_profile: IBrushProfile, _color: string, startPt: BasePoint): void {
         this.inputBuffer = [startPt];
     }
 
@@ -92,7 +92,7 @@ export class HardRoundRenderer implements IBrushRenderer {
     }
 
     // Reconstrucción Two-Pass (Aísla la superposición de opacidades)
-    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+    public rebuildStroke(ctx: CanvasRenderingContext2D, _profile: IBrushProfile, _color: string, _points: StrokePoint[], helpers: any): void {
         const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
 
         helpers.simulateDrawing(offCtx);

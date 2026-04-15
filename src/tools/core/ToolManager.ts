@@ -8,7 +8,7 @@ export class ToolManager {
     private tools: Map<string, ITool> = new Map();
     private _activeTool: ITool | null = null;
     private defaultToolId: string = '';
-    private previousToolId: string = '';
+
     private eventBus: EventBus | null = null; // Guardamos referencia al bus
 
     public bootstrap(ctx: ToolContext, shortcuts: ShortcutManager) {
@@ -65,7 +65,7 @@ export class ToolManager {
         if (!newTool || newTool === this._activeTool) return;
 
         if (this._activeTool) {
-            this.previousToolId = this._activeTool.id;
+
             this._activeTool.onDeactivate(reason || toolId);
         }
 
@@ -83,7 +83,7 @@ export class ToolManager {
         if (!newTool || newTool === this._activeTool) return;
 
         if (this._activeTool) {
-            this.previousToolId = this._activeTool.id;
+
             this._activeTool.onDeactivate(toolId);
         }
 

@@ -37,7 +37,7 @@ export class PanTool implements ITool {
         this.lastY = data.y;
     }
 
-    public onPointerUp(data: PointerData) {
+    public onPointerUp(_data: PointerData) {
         this.panning = false;
         this.ctx.engine.container.style.cursor = 'grab';
     }

@@ -31,7 +31,7 @@ export class CatmullRom {
     public static evaluate(
         p0: CRPoint, p1: CRPoint, p2: CRPoint, p3: CRPoint,
         t: number,
-        alpha: number = 0.5  // 0=uniform, 0.5=centripetal, 1=chordal
+        _alpha: number = 0.5  // 0=uniform, 0.5=centripetal, 1=chordal
     ): CRPoint {
         // Versión centripetal (alpha=0.5) — evita self-intersections y cusps
         // que aparecen en la versión uniform con puntos muy separados

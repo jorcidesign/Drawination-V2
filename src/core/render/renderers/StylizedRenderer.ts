@@ -8,7 +8,7 @@ import { CatmullRom } from '../../math/CatmullRom';
 export class StylizedRenderer implements IBrushRenderer {
     private inputBuffer: BasePoint[] = [];
 
-    public beginStroke(profile: IBrushProfile, color: string, startPt: BasePoint): void {
+    public beginStroke(_profile: IBrushProfile, _color: string, startPt: BasePoint): void {
         this.inputBuffer = [startPt];
     }
 
@@ -76,7 +76,7 @@ export class StylizedRenderer implements IBrushRenderer {
     }
 
     // === FIX CRÍTICO: Aislar la simulación en el offCtx ===
-    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: RebuildHelpers): void {
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, _color: string, _points: StrokePoint[], helpers: RebuildHelpers): void {
         const offCtx = helpers.getOffscreenCanvas(ctx.canvas.width, ctx.canvas.height);
 
         // Simular en el entorno aislado (aquí su endStroke hará clearRect sin dañar la capa real)

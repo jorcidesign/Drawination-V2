@@ -38,7 +38,7 @@ export class StorageManager {
         if (!this.db) return 0;
 
         const isDataEvent = event.type === 'STROKE' || event.type === 'ERASE' || event.type === 'FILL';
-        const isControlEvent = event.type === 'UNDO' || event.type === 'REDO';
+        // const _isControlEvent = event.type === 'UNDO' || event.type === 'REDO';
 
         if (isDataEvent) {
             const hasPayload = event.data !== null || event.compressedData !== undefined;

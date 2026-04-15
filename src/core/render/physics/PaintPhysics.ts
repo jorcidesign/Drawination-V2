@@ -24,7 +24,7 @@ export class PaintPhysics {
     private lastPos = { x: 0, y: 0 };
     private lastStrokeDir = { x: 1, y: 0 };
 
-    public beginStroke(profile: IBrushProfile, color: string, startX: number, startY: number) {
+    public beginStroke(profile: IBrushProfile, _color: string, startX: number, startY: number) {
         this.brushSeed = Math.random() * 1000;
         this.globalReservoir = 1.0; // Pincel recién mojado en pintura
         this.strokeConsumed = 0.0;

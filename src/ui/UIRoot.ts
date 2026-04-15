@@ -26,7 +26,7 @@ export class UIRoot {
     private colorPanel: ColorPanel; // <-- DECLARAR
     private layerPanel: LayerPanel; // <-- DECLARAR
     private menuPanel: MenuPanel;
-    private panelManager: PanelManager;
+    // private _panelManager: PanelManager;
 
     constructor(eventBus: EventBus) {
         this.eventBus = eventBus;
@@ -45,7 +45,7 @@ export class UIRoot {
         this.colorPanel = new ColorPanel(this.eventBus); // <-- INSTANCIAR
         this.layerPanel = new LayerPanel(this.eventBus); // <-- INSTANCIAR
         this.menuPanel = new MenuPanel(this.eventBus);
-        this.panelManager = new PanelManager(this.menuPanel);
+        new PanelManager(this.menuPanel);
 
         // Montarlos en la capa UI
         this.topCenterBar.mount(this.container);

@@ -97,7 +97,7 @@ export class BasicRenderer implements IBrushRenderer {
     }
 
     // === Inicializamos el buffer al empezar a dibujar ===
-    public beginStroke(profile: IBrushProfile, color: string, startPt: BasePoint): void {
+    public beginStroke(_profile: IBrushProfile, _color: string, startPt: BasePoint): void {
         this.inputBuffer = [startPt];
     }
 
@@ -190,7 +190,7 @@ export class BasicRenderer implements IBrushRenderer {
         this.inputBuffer = [];
     }
 
-    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, _color: string, _points: StrokePoint[], helpers: any): void {
         if (profile.blendMode === 'destination-out') {
             // El borrador debe ir directo al contexto real para "comerse" los píxeles
             ctx.save();

@@ -259,7 +259,7 @@ export class InkRenderer implements IBrushRenderer {
     }
 
     // InkRenderer ya usa un offscreen interno por stamp, por lo que su rebuild es One-Pass directo
-    public rebuildStroke(ctx: CanvasRenderingContext2D, profile: IBrushProfile, color: string, points: StrokePoint[], helpers: any): void {
+    public rebuildStroke(ctx: CanvasRenderingContext2D, _profile: IBrushProfile, _color: string, _points: StrokePoint[], helpers: any): void {
         ctx.save();
         ctx.globalAlpha = 1.0;
         ctx.globalCompositeOperation = 'source-over';

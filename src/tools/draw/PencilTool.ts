@@ -57,7 +57,7 @@ export class PencilTool implements ITool {
         this.ctx.activeBrush.drawMove(this.ctx.engine.paintingContext, cleanData, true);
     }
 
-    public async onPointerUp(data: PointerData) {
+    public async onPointerUp(_data: PointerData) {
         if (!this.drawing) return;
         this.drawing = false;
         if (this.ctx.activeBrush.profile.renderer === 'fill') this.ctx.engine.clearPaintingCanvas();

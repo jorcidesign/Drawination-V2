@@ -62,7 +62,7 @@ export class EraserTool implements ITool {
         this.ctx.activeBrush.drawMove(activeCtx, cleanData);
     }
 
-    public async onPointerUp(data: PointerData) {
+    public async onPointerUp(_data: PointerData) {
         if (!this.drawing) return;
         this.drawing = false;
 

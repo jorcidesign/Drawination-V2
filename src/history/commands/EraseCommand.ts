@@ -1,5 +1,5 @@
 // src/history/commands/EraseCommand.ts
-import type { ICommand, CommandContext } from './ICommand';
+import type { ICommand } from './ICommand';
 import type { TimelineEvent } from '../TimelineTypes';
 import type { StorageManager } from '../../storage/StorageManager';
 import { BinarySerializer } from '../../core/io/BinarySerializer';
