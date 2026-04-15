@@ -1,6 +1,6 @@
 // src/tools/interaction/transform/TransformContextActions.ts
 import type { ToolContext } from '../../core/ITool';
-import type { TimelineEvent } from '../../../history/TimelineTypes';
+import type { ClonePayload } from '../../../history/TimelineTypes';
 import { DiagnosticsService } from '../../../history/DiagnosticsService';
 import { TransformGestureHandler } from './TransformGestureHandler';
 
@@ -57,68 +57,100 @@ export class TransformContextActions {
         await this.onSandboxNeedsRegen?.();
     }
 
-    // === FIX: Agrupamos todos los eventos generados con un groupId ===
+    // ── DUPLICATE atómico ─────────────────────────────────────────────────
+    //
+    // Crea un evento DUPLICATE_GROUP con los datos de todos los clones embebidos.
+    // Cada clon lleva:
+    //   - data:   los mismos bytes del trazo original (puntos sin modificar)
+    //   - matrix: la matriz completa del clon (offset + transform heredado)
+    //   - bbox:   el bbox ORIGINAL (sin proyectar), igual que los eventos STROKE normales.
+    //             getBboxForIds() aplicará la matriz sobre él para calcular
+    //             el bbox final → mismo pipeline que cualquier trazo transformado.
+    //
+    // NO se usa projectBbox() aquí porque computeTimelineState almacena la
+    // matriz en `transforms` y getBboxForIds() la aplica internamente.
+    // Usar projectBbox() aquí causaría doble proyección → handle desplazado.
     public async duplicate(): Promise<string[]> {
         if (!this.ctx.selection.hasSelection()) return [];
 
         const targetIds = Array.from(this.ctx.selection.selectedIds);
         const { active, transforms } = this.ctx.history.getState();
         const newIds: string[] = [];
+        const clonePayloads: ClonePayload[] = [];
 
-        const groupId = crypto.randomUUID();
+        DiagnosticsService.logDuplicate('start', targetIds.length);
 
         for (const id of targetIds) {
             const ev = active.find(e => e.id === id);
             if (!ev) continue;
+
+            // Asegurar que tenemos los datos binarios
             if (!ev.data) ev.data = await this.ctx.storage.loadEventData(id);
-            if (!ev.data) continue;
+            if (!ev.data) {
+                DiagnosticsService.logDuplicate('missing_data', id);
+                continue;
+            }
 
             const newId = crypto.randomUUID();
             newIds.push(newId);
 
-            const clone: TimelineEvent = {
-                ...ev,
-                id: newId,
-                timestamp: Date.now(),
-                isSaved: false,
-                groupId
-            };
-            this.ctx.history.push(clone);
-            await this.ctx.storage.saveEvent(clone);
-            clone.isSaved = true;
-
+            // Matriz del clon = offset (+20,+20) compuesto con la matriz original
             const existingMatrix = transforms.get(id) ?? new DOMMatrix();
-            const offsetMatrix = new DOMMatrix().translate(20, 20).multiply(existingMatrix);
+            const offsetMatrix = new DOMMatrix()
+                .translate(20, 20)
+                .multiply(existingMatrix);
 
-            const m = [
+            const matrix: number[] = [
                 offsetMatrix.a, offsetMatrix.b,
                 offsetMatrix.c, offsetMatrix.d,
                 offsetMatrix.e, offsetMatrix.f,
             ];
-            const transformEv: TimelineEvent = {
-                id: crypto.randomUUID(), type: 'TRANSFORM',
-                toolId: 'transform-handle', profileId: 'system',
-                layerIndex: this.ctx.engine.activeLayerIndex,
-                color: '', size: 0, opacity: 1,
-                timestamp: Date.now(), data: null,
-                targetIds: [newId], transformMatrix: m,
-                isSaved: false,
-                groupId
-            };
-            this.ctx.history.push(transformEv);
-            await this.ctx.storage.saveEvent(transformEv);
-            transformEv.isSaved = true;
+
+            // Pasamos el bbox ORIGINAL (ev.bbox), no el proyectado.
+            // computeTimelineState almacenará esta matrix en `transforms`,
+            // y getBboxForIds() la aplicará sobre ev.bbox para obtener
+            // el bbox correcto del clon — mismo comportamiento que STROKE + TRANSFORM.
+            clonePayloads.push({
+                id: newId,
+                sourceId: id,
+                profileId: ev.profileId,
+                color: ev.color,
+                size: ev.size,
+                opacity: ev.opacity,
+                data: ev.data,
+                matrix,
+                bbox: ev.bbox, // bbox original sin proyectar
+            });
         }
 
-        const groupEv = this.ctx.history.commitLayerAction('DUPLICATE_GROUP' as any, this.ctx.engine.activeLayerIndex, {
-            sourceIds: targetIds,
-            newIds,
-            groupId
-        });
-        await this.ctx.storage.saveEvent(groupEv);
-        groupEv.isSaved = true;
+        if (clonePayloads.length === 0) {
+            DiagnosticsService.logDuplicate('no_payloads', 0);
+            return [];
+        }
 
-        this.ctx.history.rebuildSpatialGrid();
+        // Un solo evento atómico — el único que entra al timeline
+        const groupEvent = this.ctx.history.commitDuplicateGroup(
+            targetIds,
+            newIds,
+            clonePayloads,
+            this.ctx.engine.activeLayerIndex,
+        );
+        await this.ctx.storage.saveEvent(groupEvent);
+        groupEvent.isSaved = true;
+        this.ctx.history.enforceRamLimit();
+
+        // Actualizar la spatial grid usando el bbox proyectado del clon
+        // (para que el lazo y el borrador vectorial lo encuentren en su posición real).
+        for (const payload of clonePayloads) {
+            if (payload.bbox && payload.matrix) {
+                const projectedBbox = TransformGestureHandler.projectBbox(payload.bbox, payload.matrix);
+                this.ctx.history.spatialGrid.insert(payload.id, projectedBbox);
+            } else if (payload.bbox) {
+                this.ctx.history.spatialGrid.insert(payload.id, payload.bbox);
+            }
+        }
+
+        DiagnosticsService.logDuplicate('done', newIds.length);
 
         return newIds;
     }

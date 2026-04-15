@@ -1,8 +1,4 @@
 // src/history/TimelapseViewer.ts
-// FIX: _layerCreated, _layerVisible, _layerOrder now initialized from
-// computeTimelineState() instead of hardcoded Set([0]).
-// This ensures layers created before the timelapse are correctly shown from frame 0.
-
 import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { HistoryManager } from '../history/HistoryManager';
 import type { BrushEngine } from '../core/render/BrushEngine';
@@ -15,16 +11,31 @@ import { DEFAULT_BACKGROUND_COLOR } from './computeTimelineState';
 const MS_PER_STROKE_BASE = 40;
 const FADE_STEPS = 16;
 const MAX_LAYERS = 10;
+const SEEK_KEYFRAME_INTERVAL = 25;
+
+interface SeekKeyframe {
+    drawIndex: number;
+    playlistIndex: number;
+    bgColor: string;
+    layerCreated: Set<number>;
+    layerVisible: Map<number, boolean>;
+    layerOrder: number[];
+    currentTransforms: Map<string, number[]>;
+    hiddenIds: Set<string>;
+    layerSnapshots: Map<number, ImageData>;
+}
 
 interface DrawItem { kind: 'draw'; event: TimelineEvent; data: ArrayBuffer }
 interface TransformItem { kind: 'transform'; targetIds: string[]; matrix: number[] }
+interface DuplicateGroupItem { kind: 'duplicate-group'; events: TimelineEvent[] }
 interface HideItem { kind: 'hide'; targetIds: string[] }
 interface BgItem { kind: 'bg'; color: string }
 interface LayerVisibilityItem { kind: 'layer-visibility'; layerIndex: number; visible: boolean }
 interface LayerCreateItem { kind: 'layer-create'; layerIndex: number }
 interface LayerDeleteItem { kind: 'layer-delete'; layerIndex: number }
 interface LayerReorderItem { kind: 'layer-reorder'; layerOrder: number[] }
-type PlaylistItem = DrawItem | TransformItem | HideItem | BgItem | LayerVisibilityItem | LayerCreateItem | LayerDeleteItem | LayerReorderItem;
+
+type PlaylistItem = DrawItem | TransformItem | DuplicateGroupItem | HideItem | BgItem | LayerVisibilityItem | LayerCreateItem | LayerDeleteItem | LayerReorderItem;
 
 export class TimelapseViewer {
     private engine: CanvasEngine;
@@ -53,6 +64,7 @@ export class TimelapseViewer {
     private _layerOrder: number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
     private _resumeResolve: (() => void) | null = null;
+    private _seekKeyframes: SeekKeyframe[] = [];
 
     constructor(engine: CanvasEngine, history: HistoryManager, activeBrush: BrushEngine, storage: StorageManager, rebuilder: CanvasRebuilder) {
         this.engine = engine;
@@ -77,9 +89,10 @@ export class TimelapseViewer {
         this._currentDraw = 0;
         this._seeking = false;
 
-        const { playlist, drawCount } = await this._buildPlaylist(spine);
+        const { playlist, drawCount, seekKeyframes } = await this._buildPlaylist(spine);
         this._playlist = playlist;
         this._drawCount = drawCount;
+        this._seekKeyframes = seekKeyframes;
 
         if (drawCount === 0) { this._playing = false; return; }
 
@@ -99,8 +112,6 @@ export class TimelapseViewer {
             canvasWrap.appendChild(this._recCanvas);
         }
 
-        // FIX: Initialize layer state from the actual current timeline state,
-        // not from a hardcoded Set([0]).
         const currentState = this.history.getState();
         this._layerCreated = new Set(currentState.createdLayers);
         this._layerOrder = [...currentState.layerOrder];
@@ -111,17 +122,13 @@ export class TimelapseViewer {
             const c = document.createElement('canvas');
             c.width = W; c.height = H;
             this._layerCanvases.set(i, c);
-            // Use visibility from current state, default true for untracked layers
             this._layerVisible.set(i, currentState.layersState.get(i)?.visible ?? true);
         }
 
-        // Initial background
         const initialBg = currentState.backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
         this._recCtx.fillStyle = initialBg;
         this._recCtx.fillRect(0, 0, W, H);
 
-        // Reset layer state to replay from the beginning
-        // (the playlist will replay all LAYER_CREATE/LAYER_VISIBILITY events)
         this._layerCreated = new Set([0]);
         this._layerOrder = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         for (let i = 0; i < MAX_LAYERS; i++) {
@@ -136,8 +143,6 @@ export class TimelapseViewer {
         this._hideOverlay();
         await this.rebuilder.rebuild(this.activeBrush);
     }
-
-    // ── Layer composition ─────────────────────────────────────────────────
 
     private _composeLayers(bgColor: string): void {
         const ctx = this._recCtx!;
@@ -159,29 +164,57 @@ export class TimelapseViewer {
         }
     }
 
-    // ── Seek ──────────────────────────────────────────────────────────────
-
     private async _seekTo(targetDrawIndex: number): Promise<void> {
         const W = this._recCanvas!.width;
         const H = this._recCanvas!.height;
 
-        this._layerCreated = new Set([0]);
-        this._layerVisible.clear();
-        this._layerOrder = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-
-        for (let i = 0; i < MAX_LAYERS; i++) {
-            this._layerVisible.set(i, true);
-            const layerCtx = this._layerCanvases.get(i)?.getContext('2d')!;
-            if (layerCtx) layerCtx.clearRect(0, 0, W, H);
+        let bestKeyframe: SeekKeyframe | null = null;
+        for (const kf of this._seekKeyframes) {
+            if (kf.drawIndex <= targetDrawIndex) bestKeyframe = kf;
+            else break;
         }
 
-        let bgColor = DEFAULT_BACKGROUND_COLOR;
-        const currentTransforms = new Map<string, DOMMatrix>();
-        const hiddenIds = new Set<string>();
-        let drawsSeen = 0;
+        if (bestKeyframe) {
+            this._layerCreated = new Set(bestKeyframe.layerCreated);
+            this._layerVisible = new Map(bestKeyframe.layerVisible);
+            this._layerOrder = [...bestKeyframe.layerOrder];
 
-        for (const item of this._playlist) {
+            for (const [li, imageData] of bestKeyframe.layerSnapshots) {
+                const lc = this._layerCanvases.get(li);
+                if (lc) lc.getContext('2d')!.putImageData(imageData, 0, 0);
+            }
+            for (let i = 0; i < MAX_LAYERS; i++) {
+                if (!bestKeyframe.layerSnapshots.has(i)) {
+                    const lc = this._layerCanvases.get(i);
+                    if (lc) lc.getContext('2d')!.clearRect(0, 0, W, H);
+                }
+            }
+        } else {
+            this._layerCreated = new Set([0]);
+            this._layerVisible.clear();
+            this._layerOrder = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+            for (let i = 0; i < MAX_LAYERS; i++) {
+                this._layerVisible.set(i, true);
+                const lc = this._layerCanvases.get(i);
+                if (lc) lc.getContext('2d')!.clearRect(0, 0, W, H);
+            }
+        }
+
+        let bgColor = bestKeyframe?.bgColor ?? DEFAULT_BACKGROUND_COLOR;
+        const currentTransforms = new Map<string, DOMMatrix>();
+        const hiddenIds = new Set<string>(bestKeyframe?.hiddenIds ?? []);
+        let drawsSeen = bestKeyframe?.drawIndex ?? 0;
+
+        if (bestKeyframe) {
+            for (const [id, mat] of bestKeyframe.currentTransforms) {
+                currentTransforms.set(id, new DOMMatrix(mat));
+            }
+        }
+
+        const startIndex = bestKeyframe?.playlistIndex ?? 0;
+        for (let idx = startIndex; idx < this._playlist.length; idx++) {
             if (drawsSeen >= targetDrawIndex) break;
+            const item = this._playlist[idx];
 
             if (item.kind === 'bg') {
                 bgColor = item.color;
@@ -205,6 +238,22 @@ export class TimelapseViewer {
                     layerCtx.restore();
                 }
                 drawsSeen++;
+            } else if (item.kind === 'duplicate-group') {
+                for (const synEv of item.events) {
+                    if (synEv.transformMatrix) {
+                        currentTransforms.set(synEv.id, new DOMMatrix(synEv.transformMatrix));
+                    }
+                    const layerCtx = this._layerCanvases.get(synEv.layerIndex ?? 0)?.getContext('2d');
+                    if (layerCtx && !hiddenIds.has(synEv.id)) {
+                        const cmd = CommandFactory.create(synEv, this.activeBrush);
+                        const t = currentTransforms.get(synEv.id);
+                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                        layerCtx.save();
+                        cmd.execute(layerCtx);
+                        layerCtx.restore();
+                    }
+                }
+                drawsSeen++;
             } else if (item.kind === 'transform') {
                 const newMatrix = new DOMMatrix(item.matrix);
                 for (const id of item.targetIds) {
@@ -224,7 +273,7 @@ export class TimelapseViewer {
     private _findPlaylistIndexForDraw(targetDraw: number): number {
         let drawsSeen = 0;
         for (let i = 0; i < this._playlist.length; i++) {
-            if (this._playlist[i].kind === 'draw') {
+            if (this._playlist[i].kind === 'draw' || this._playlist[i].kind === 'duplicate-group') {
                 if (drawsSeen >= targetDraw) return i;
                 drawsSeen++;
             }
@@ -232,168 +281,253 @@ export class TimelapseViewer {
         return this._playlist.length;
     }
 
-    // ── Main reproduction loop ────────────────────────────────────────────
+    private _reproduce(): Promise<void> {
+        return new Promise<void>((resolveMain) => {
+            const W = this.engine.width;
 
-    private async _reproduce(): Promise<void> {
-        const W = this.engine.width;
-        const H = this.engine.height;
+            const currentTransforms = new Map<string, DOMMatrix>();
+            const hiddenIds = new Set<string>();
+            let currentBg = this.history.getState().backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
+            let playlistIdx = 0;
 
-        const currentTransforms = new Map<string, DOMMatrix>();
-        const hiddenIds = new Set<string>();
-        let currentBg = this.history.getState().backgroundColor ?? DEFAULT_BACKGROUND_COLOR;
+            let lastTimestamp: number | null = null;
+            let accumulated = 0;
 
-        for (let i = 0; i < this._playlist.length; i++) {
-            if (this._cancelled) break;
+            const tick = async (timestamp: number) => {
+                if (this._cancelled) { resolveMain(); return; }
 
-            if (this._seeking) {
-                this._seeking = false;
-                const targetDraw = this._currentDraw;
-                await this._seekTo(targetDraw);
-                i = this._findPlaylistIndexForDraw(targetDraw);
+                if (this._seeking) {
+                    this._seeking = false;
+                    const targetDraw = this._currentDraw;
+                    await this._seekTo(targetDraw);
+                    playlistIdx = this._findPlaylistIndexForDraw(targetDraw);
 
-                currentTransforms.clear();
-                hiddenIds.clear();
-                currentBg = DEFAULT_BACKGROUND_COLOR;
+                    currentTransforms.clear();
+                    hiddenIds.clear();
+                    currentBg = DEFAULT_BACKGROUND_COLOR;
 
-                let drawsSeen = 0;
-                for (const pi of this._playlist.slice(0, i)) {
-                    if (pi.kind === 'bg') currentBg = pi.color;
-                    else if (pi.kind === 'draw') drawsSeen++;
-                    else if (pi.kind === 'transform') {
-                        const m = new DOMMatrix(pi.matrix);
-                        for (const id of pi.targetIds) {
-                            currentTransforms.set(id, m.multiply(currentTransforms.get(id) ?? new DOMMatrix()));
+                    for (const pi of this._playlist.slice(0, playlistIdx)) {
+                        if (pi.kind === 'bg') currentBg = pi.color;
+                        else if (pi.kind === 'duplicate-group') {
+                            for (const synEv of pi.events) {
+                                if (synEv.transformMatrix) {
+                                    currentTransforms.set(synEv.id, new DOMMatrix(synEv.transformMatrix));
+                                }
+                            }
+                        } else if (pi.kind === 'transform') {
+                            const m = new DOMMatrix(pi.matrix);
+                            for (const id of pi.targetIds) {
+                                currentTransforms.set(id, m.multiply(currentTransforms.get(id) ?? new DOMMatrix()));
+                            }
+                        } else if (pi.kind === 'hide') {
+                            for (const id of pi.targetIds) hiddenIds.add(id);
                         }
-                    } else if (pi.kind === 'hide') {
-                        for (const id of pi.targetIds) hiddenIds.add(id);
+                    }
+
+                    lastTimestamp = null;
+                    accumulated = 0;
+                    requestAnimationFrame(tick);
+                    return;
+                }
+
+                if (this._paused) {
+                    await this._waitIfPaused();
+                    if (this._cancelled) { resolveMain(); return; }
+                    lastTimestamp = null;
+                    accumulated = 0;
+                    requestAnimationFrame(tick);
+                    return;
+                }
+
+                if (playlistIdx >= this._playlist.length) { resolveMain(); return; }
+
+                const msPerStroke = MS_PER_STROKE_BASE / this._speed;
+                if (lastTimestamp !== null) {
+                    accumulated += timestamp - lastTimestamp;
+                } else {
+                    accumulated = msPerStroke;
+                }
+                lastTimestamp = timestamp;
+
+                while (playlistIdx < this._playlist.length && accumulated >= msPerStroke) {
+                    if (this._cancelled || this._seeking || this._paused) break;
+
+                    const item = this._playlist[playlistIdx];
+                    playlistIdx++;
+
+                    if (item.kind === 'bg') {
+                        currentBg = item.color;
+                        this._composeLayers(currentBg);
+                        accumulated -= msPerStroke * 2;
+
+                    } else if (item.kind === 'layer-visibility') {
+                        this._layerVisible.set(item.layerIndex, item.visible);
+                        this._composeLayers(currentBg);
+                        accumulated -= msPerStroke;
+
+                    } else if (item.kind === 'layer-create') {
+                        this._layerCreated.add(item.layerIndex);
+                        this._composeLayers(currentBg);
+                        accumulated -= msPerStroke;
+
+                    } else if (item.kind === 'layer-delete') {
+                        this._layerCreated.delete(item.layerIndex);
+                        this._composeLayers(currentBg);
+                        accumulated -= msPerStroke;
+
+                    } else if (item.kind === 'layer-reorder') {
+                        const uncreated = this._layerOrder.filter(id => !this._layerCreated.has(id));
+                        this._layerOrder = [...uncreated, ...item.layerOrder];
+                        this._composeLayers(currentBg);
+                        accumulated -= msPerStroke;
+
+                    } else if (item.kind === 'draw') {
+                        const layerIdx = item.event.layerIndex ?? 0;
+                        const layerCanvas = this._layerCanvases.get(layerIdx);
+                        const layerCtx = layerCanvas?.getContext('2d');
+
+                        if (layerCtx && !hiddenIds.has(item.event.id)) {
+                            const cmd = CommandFactory.create(item.event, this.activeBrush);
+                            const t = currentTransforms.get(item.event.id);
+                            if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                            layerCtx.save();
+                            cmd.execute(layerCtx);
+                            layerCtx.restore();
+                        }
+
+                        this._composeLayers(currentBg);
+                        this._currentDraw++;
+                        this._updateSlider();
+                        accumulated -= msPerStroke;
+
+                    } else if (item.kind === 'duplicate-group') {
+                        // Dibujar instantáneamente todo el grupo
+                        for (const synEv of item.events) {
+                            if (synEv.transformMatrix) {
+                                currentTransforms.set(synEv.id, new DOMMatrix(synEv.transformMatrix));
+                            }
+                            const layerCtx = this._layerCanvases.get(synEv.layerIndex ?? 0)?.getContext('2d');
+                            if (layerCtx && !hiddenIds.has(synEv.id)) {
+                                const cmd = CommandFactory.create(synEv, this.activeBrush);
+                                const t = currentTransforms.get(synEv.id);
+                                if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                                layerCtx.save();
+                                cmd.execute(layerCtx);
+                                layerCtx.restore();
+                            }
+                        }
+
+                        this._composeLayers(currentBg);
+                        this._currentDraw++;
+                        this._updateSlider();
+                        accumulated -= msPerStroke;
+
+                    } else if (item.kind === 'transform') {
+                        const newMatrix = new DOMMatrix(item.matrix);
+                        for (const id of item.targetIds) {
+                            const current = currentTransforms.get(id) ?? new DOMMatrix();
+                            currentTransforms.set(id, newMatrix.multiply(current));
+                        }
+
+                        for (let li = 0; li < MAX_LAYERS; li++) {
+                            const lc = this._layerCanvases.get(li);
+                            if (lc) lc.getContext('2d')!.clearRect(0, 0, W, this._recCanvas!.height);
+                        }
+
+                        let drawsSeen = 0;
+                        for (const pi of this._playlist.slice(0, playlistIdx)) {
+                            if (pi.kind === 'draw') {
+                                if (hiddenIds.has(pi.event.id)) { drawsSeen++; continue; }
+                                if (drawsSeen >= this._currentDraw) break;
+
+                                const li = pi.event.layerIndex ?? 0;
+                                const lctx = this._layerCanvases.get(li)?.getContext('2d');
+                                if (lctx) {
+                                    const cmd = CommandFactory.create(pi.event, this.activeBrush);
+                                    const t = currentTransforms.get(pi.event.id);
+                                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                                    lctx.save();
+                                    cmd.execute(lctx);
+                                    lctx.restore();
+                                }
+                                drawsSeen++;
+                            } else if (pi.kind === 'duplicate-group') {
+                                if (drawsSeen >= this._currentDraw) break;
+                                for (const synEv of pi.events) {
+                                    if (hiddenIds.has(synEv.id)) continue;
+                                    const li = synEv.layerIndex ?? 0;
+                                    const lctx = this._layerCanvases.get(li)?.getContext('2d');
+                                    if (lctx) {
+                                        const cmd = CommandFactory.create(synEv, this.activeBrush);
+                                        const t = currentTransforms.get(synEv.id);
+                                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                                        lctx.save();
+                                        cmd.execute(lctx);
+                                        lctx.restore();
+                                    }
+                                }
+                                drawsSeen++;
+                            }
+                        }
+
+                        this._composeLayers(currentBg);
+                        accumulated -= msPerStroke * 3;
+
+                    } else if (item.kind === 'hide') {
+                        for (const id of item.targetIds) hiddenIds.add(id);
+
+                        for (let li = 0; li < MAX_LAYERS; li++) {
+                            const lc = this._layerCanvases.get(li);
+                            if (lc) lc.getContext('2d')!.clearRect(0, 0, W, this._recCanvas!.height);
+                        }
+
+                        let drawsSeen = 0;
+                        for (const pi of this._playlist.slice(0, playlistIdx)) {
+                            if (pi.kind === 'draw') {
+                                if (drawsSeen >= this._currentDraw) break;
+                                if (hiddenIds.has(pi.event.id)) { drawsSeen++; continue; }
+
+                                const li = pi.event.layerIndex ?? 0;
+                                const lctx = this._layerCanvases.get(li)?.getContext('2d');
+                                if (lctx) {
+                                    const cmd = CommandFactory.create(pi.event, this.activeBrush);
+                                    const t = currentTransforms.get(pi.event.id);
+                                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                                    lctx.save();
+                                    cmd.execute(lctx);
+                                    lctx.restore();
+                                }
+                                drawsSeen++;
+                            } else if (pi.kind === 'duplicate-group') {
+                                if (drawsSeen >= this._currentDraw) break;
+                                for (const synEv of pi.events) {
+                                    if (hiddenIds.has(synEv.id)) continue;
+                                    const li = synEv.layerIndex ?? 0;
+                                    const lctx = this._layerCanvases.get(li)?.getContext('2d');
+                                    if (lctx) {
+                                        const cmd = CommandFactory.create(synEv, this.activeBrush);
+                                        const t = currentTransforms.get(synEv.id);
+                                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+                                        lctx.save();
+                                        cmd.execute(lctx);
+                                        lctx.restore();
+                                    }
+                                }
+                                drawsSeen++;
+                            }
+                        }
+
+                        this._composeLayers(currentBg);
+                        accumulated -= msPerStroke * 2;
                     }
                 }
-                continue;
-            }
 
-            await this._waitIfPaused();
-            if (this._cancelled) break;
-            if (this._seeking) { i--; continue; }
+                requestAnimationFrame(tick);
+            };
 
-            const item = this._playlist[i];
-            const msPerStroke = MS_PER_STROKE_BASE / this._speed;
-
-            if (item.kind === 'bg') {
-                currentBg = item.color;
-                this._composeLayers(currentBg);
-                await this._sleep(msPerStroke * 2);
-
-            } else if (item.kind === 'layer-visibility') {
-                this._layerVisible.set(item.layerIndex, item.visible);
-                this._composeLayers(currentBg);
-                await this._sleep(msPerStroke);
-
-            } else if (item.kind === 'layer-create') {
-                this._layerCreated.add(item.layerIndex);
-                this._composeLayers(currentBg);
-                await this._sleep(msPerStroke);
-
-            } else if (item.kind === 'layer-delete') {
-                this._layerCreated.delete(item.layerIndex);
-                this._composeLayers(currentBg);
-                await this._sleep(msPerStroke);
-
-            } else if (item.kind === 'layer-reorder') {
-                const uncreated = this._layerOrder.filter(id => !this._layerCreated.has(id));
-                this._layerOrder = [...uncreated, ...item.layerOrder];
-                this._composeLayers(currentBg);
-                await this._sleep(msPerStroke);
-
-            } else if (item.kind === 'draw') {
-                const layerIdx = item.event.layerIndex ?? 0;
-                const layerCanvas = this._layerCanvases.get(layerIdx);
-                const layerCtx = layerCanvas?.getContext('2d');
-
-                if (layerCtx && !hiddenIds.has(item.event.id)) {
-                    const cmd = CommandFactory.create(item.event, this.activeBrush);
-                    const t = currentTransforms.get(item.event.id);
-                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-
-                    layerCtx.save();
-                    cmd.execute(layerCtx);
-                    layerCtx.restore();
-                }
-
-                this._composeLayers(currentBg);
-                this._currentDraw++;
-                this._updateSlider();
-                await this._sleep(msPerStroke);
-
-            } else if (item.kind === 'transform') {
-                const newMatrix = new DOMMatrix(item.matrix);
-                for (const id of item.targetIds) {
-                    const current = currentTransforms.get(id) ?? new DOMMatrix();
-                    currentTransforms.set(id, newMatrix.multiply(current));
-                }
-
-                for (let li = 0; li < MAX_LAYERS; li++) {
-                    const lc = this._layerCanvases.get(li);
-                    if (lc) lc.getContext('2d')!.clearRect(0, 0, W, H);
-                }
-
-                let drawsSeen = 0;
-                for (const pi of this._playlist.slice(0, i + 1)) {
-                    if (pi.kind !== 'draw') continue;
-                    if (hiddenIds.has(pi.event.id)) { drawsSeen++; continue; }
-                    if (drawsSeen >= this._currentDraw) break;
-
-                    const li = pi.event.layerIndex ?? 0;
-                    const lc = this._layerCanvases.get(li);
-                    const lctx = lc?.getContext('2d');
-                    if (lctx) {
-                        const cmd = CommandFactory.create(pi.event, this.activeBrush);
-                        const t = currentTransforms.get(pi.event.id);
-                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                        lctx.save();
-                        cmd.execute(lctx);
-                        lctx.restore();
-                    }
-                    drawsSeen++;
-                }
-
-                this._composeLayers(currentBg);
-                await this._sleep(msPerStroke * 3);
-
-            } else if (item.kind === 'hide') {
-                for (const id of item.targetIds) hiddenIds.add(id);
-
-                for (let li = 0; li < MAX_LAYERS; li++) {
-                    const lc = this._layerCanvases.get(li);
-                    if (lc) lc.getContext('2d')!.clearRect(0, 0, W, H);
-                }
-
-                let drawsSeen = 0;
-                for (const pi of this._playlist.slice(0, i + 1)) {
-                    if (pi.kind !== 'draw') continue;
-                    if (drawsSeen >= this._currentDraw) break;
-                    if (hiddenIds.has(pi.event.id)) { drawsSeen++; continue; }
-
-                    const li = pi.event.layerIndex ?? 0;
-                    const lc = this._layerCanvases.get(li);
-                    const lctx = lc?.getContext('2d');
-                    if (lctx) {
-                        const cmd = CommandFactory.create(pi.event, this.activeBrush);
-                        const t = currentTransforms.get(pi.event.id);
-                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                        lctx.save();
-                        cmd.execute(lctx);
-                        lctx.restore();
-                    }
-                    drawsSeen++;
-                }
-
-                this._composeLayers(currentBg);
-                await this._sleep(msPerStroke * 2);
-            }
-        }
+            requestAnimationFrame(tick);
+        });
     }
-
-    // ── Final result fade ─────────────────────────────────────────────────
 
     private async _showFinalResult(): Promise<void> {
         const W = this.engine.width;
@@ -428,8 +562,6 @@ export class TimelapseViewer {
         }
         await this._sleep(1500);
     }
-
-    // ── Overlay UI ────────────────────────────────────────────────────────
 
     private _showOverlay(): void {
         const overlay = document.createElement('div');
@@ -586,41 +718,159 @@ export class TimelapseViewer {
         this._layerCanvases.clear();
     }
 
-    // ── Playlist builder ──────────────────────────────────────────────────
-
-    private async _buildPlaylist(spine: TimelineEvent[]): Promise<{ playlist: PlaylistItem[]; drawCount: number }> {
+    private async _buildPlaylist(spine: TimelineEvent[]): Promise<{ playlist: PlaylistItem[]; drawCount: number; seekKeyframes: SeekKeyframe[] }> {
         const playlist: PlaylistItem[] = [];
         let drawCount = 0;
 
-        const drawingSpine = spine.filter(ev => ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL');
+        const kfLayerCreated: Set<number> = new Set([0]);
+        const kfLayerVisible: Map<number, boolean> = new Map(Array.from({ length: MAX_LAYERS }, (_, i) => [i, true]));
+        const kfLayerOrder: number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        const kfTransforms: Map<string, number[]> = new Map();
+        const kfHiddenIds: Set<string> = new Set();
+        let kfBgColor = DEFAULT_BACKGROUND_COLOR;
+
+        const W = this.engine.width;
+        const H = this.engine.height;
+        const kfLayerCanvases: Map<number, HTMLCanvasElement> = new Map();
+        for (let i = 0; i < MAX_LAYERS; i++) {
+            const c = document.createElement('canvas');
+            c.width = W; c.height = H;
+            kfLayerCanvases.set(i, c);
+        }
+
+        const seekKeyframes: SeekKeyframe[] = [];
+        const drawingSpine = spine.filter(ev => ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL' || ev.type === 'DUPLICATE_GROUP');
         const dataMap = await this._preloadAll(drawingSpine);
 
         let i = 0;
         while (i < spine.length) {
             const ev = spine[i];
 
+            if (ev.type === 'DUPLICATE_GROUP' && ev.clonePayloads) {
+                const syntheticEvents: TimelineEvent[] = [];
+                for (const payload of ev.clonePayloads) {
+                    const syntheticEvent: TimelineEvent = {
+                        id: payload.id,
+                        type: 'STROKE',
+                        toolId: 'duplicate',
+                        profileId: payload.profileId,
+                        layerIndex: ev.layerIndex,
+                        timestamp: ev.timestamp,
+                        color: payload.color,
+                        size: payload.size,
+                        opacity: payload.opacity,
+                        data: payload.data,
+                        bbox: payload.bbox,
+                        transformMatrix: payload.matrix,
+                        isSaved: true,
+                    };
+                    syntheticEvents.push(syntheticEvent);
+
+                    if (payload.matrix) {
+                        kfTransforms.set(payload.id, payload.matrix);
+                    }
+
+                    if (!kfHiddenIds.has(payload.id)) {
+                        const lc = kfLayerCanvases.get(ev.layerIndex ?? 0);
+                        const lctx = lc?.getContext('2d');
+                        if (lctx) {
+                            const cmd = CommandFactory.create(syntheticEvent, this.activeBrush);
+                            if (payload.matrix) cmd.transform = payload.matrix;
+                            lctx.save();
+                            cmd.execute(lctx);
+                            lctx.restore();
+                        }
+                    }
+                }
+
+                playlist.push({ kind: 'duplicate-group', events: syntheticEvents });
+                drawCount++;
+
+                if (drawCount % SEEK_KEYFRAME_INTERVAL === 0) {
+                    const layerSnapshots = new Map<number, ImageData>();
+                    for (const [li, lc] of kfLayerCanvases) {
+                        const lctx = lc.getContext('2d')!;
+                        layerSnapshots.set(li, lctx.getImageData(0, 0, W, H));
+                    }
+                    seekKeyframes.push({
+                        drawIndex: drawCount,
+                        playlistIndex: playlist.length,
+                        bgColor: kfBgColor,
+                        layerCreated: new Set(kfLayerCreated),
+                        layerVisible: new Map(kfLayerVisible),
+                        layerOrder: [...kfLayerOrder],
+                        currentTransforms: new Map(kfTransforms),
+                        hiddenIds: new Set(kfHiddenIds),
+                        layerSnapshots,
+                    });
+                }
+                i++;
+                continue;
+            }
+
             if (ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL') {
                 const data = dataMap.get(ev.id);
-                if (data) { playlist.push({ kind: 'draw', event: { ...ev, data }, data }); drawCount++; }
+                if (data) {
+                    if (!kfHiddenIds.has(ev.id)) {
+                        const lc = kfLayerCanvases.get(ev.layerIndex ?? 0);
+                        const lctx = lc?.getContext('2d');
+                        if (lctx) {
+                            const cmd = CommandFactory.create({ ...ev, data }, this.activeBrush);
+                            const mat = kfTransforms.get(ev.id);
+                            if (mat) cmd.transform = mat;
+                            lctx.save();
+                            cmd.execute(lctx);
+                            lctx.restore();
+                        }
+                    }
+
+                    playlist.push({ kind: 'draw', event: { ...ev, data }, data });
+                    drawCount++;
+
+                    if (drawCount % SEEK_KEYFRAME_INTERVAL === 0) {
+                        const layerSnapshots = new Map<number, ImageData>();
+                        for (const [li, lc] of kfLayerCanvases) {
+                            const lctx = lc.getContext('2d')!;
+                            layerSnapshots.set(li, lctx.getImageData(0, 0, W, H));
+                        }
+                        seekKeyframes.push({
+                            drawIndex: drawCount,
+                            playlistIndex: playlist.length,
+                            bgColor: kfBgColor,
+                            layerCreated: new Set(kfLayerCreated),
+                            layerVisible: new Map(kfLayerVisible),
+                            layerOrder: [...kfLayerOrder],
+                            currentTransforms: new Map(kfTransforms),
+                            hiddenIds: new Set(kfHiddenIds),
+                            layerSnapshots,
+                        });
+                    }
+                }
                 i++;
 
             } else if (ev.type === 'BACKGROUND_COLOR' && ev.backgroundColor) {
+                kfBgColor = ev.backgroundColor;
                 playlist.push({ kind: 'bg', color: ev.backgroundColor });
                 i++;
 
             } else if (ev.type === 'LAYER_VISIBILITY') {
+                kfLayerVisible.set(ev.layerIndex, ev.visible ?? true);
                 playlist.push({ kind: 'layer-visibility', layerIndex: ev.layerIndex, visible: ev.visible ?? true });
                 i++;
 
             } else if (ev.type === 'LAYER_CREATE') {
+                kfLayerCreated.add(ev.layerIndex);
                 playlist.push({ kind: 'layer-create', layerIndex: ev.layerIndex });
                 i++;
 
             } else if (ev.type === 'LAYER_DELETE') {
+                kfLayerCreated.delete(ev.layerIndex);
                 playlist.push({ kind: 'layer-delete', layerIndex: ev.layerIndex });
                 i++;
 
             } else if (ev.type === 'LAYER_REORDER' && ev.layerOrder) {
+                const uncreated = kfLayerOrder.filter(id => !kfLayerCreated.has(id));
+                kfLayerOrder.splice(0, kfLayerOrder.length, ...uncreated, ...ev.layerOrder);
                 playlist.push({ kind: 'layer-reorder', layerOrder: ev.layerOrder });
                 i++;
 
@@ -632,14 +882,13 @@ export class TimelapseViewer {
                     currentMatrix = new DOMMatrix(spine[j].transformMatrix).multiply(currentMatrix);
                     j++;
                 }
-                playlist.push({
-                    kind: 'transform',
-                    targetIds: ev.targetIds,
-                    matrix: [currentMatrix.a, currentMatrix.b, currentMatrix.c, currentMatrix.d, currentMatrix.e, currentMatrix.f]
-                });
+                const matArr = [currentMatrix.a, currentMatrix.b, currentMatrix.c, currentMatrix.d, currentMatrix.e, currentMatrix.f];
+                for (const id of ev.targetIds) kfTransforms.set(id, matArr);
+                playlist.push({ kind: 'transform', targetIds: ev.targetIds, matrix: matArr });
                 i = j;
 
             } else if (ev.type === 'HIDE' && ev.targetIds) {
+                for (const id of ev.targetIds) kfHiddenIds.add(id);
                 playlist.push({ kind: 'hide', targetIds: ev.targetIds });
                 i++;
 
@@ -648,7 +897,7 @@ export class TimelapseViewer {
             }
         }
 
-        return { playlist, drawCount };
+        return { playlist, drawCount, seekKeyframes };
     }
 
     private async _preloadAll(events: TimelineEvent[]): Promise<Map<string, ArrayBuffer>> {
@@ -656,8 +905,15 @@ export class TimelapseViewer {
         const idsNeeded: string[] = [];
 
         for (const ev of events) {
-            if (ev.data) dataMap.set(ev.id, ev.data);
-            else idsNeeded.push(ev.id);
+            if (ev.type === 'DUPLICATE_GROUP' && ev.clonePayloads) {
+                for (const payload of ev.clonePayloads) {
+                    if (payload.data) dataMap.set(payload.id, payload.data);
+                }
+            } else if (ev.data) {
+                dataMap.set(ev.id, ev.data);
+            } else {
+                idsNeeded.push(ev.id);
+            }
         }
 
         if (idsNeeded.length > 0) {

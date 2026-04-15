@@ -30,10 +30,7 @@ export class TimelapsePlayer {
         while (i < spine.length) {
             const ev = spine[i];
 
-            if (ev.type === 'HIDE') {
-                i++;
-                continue;
-            }
+            // Bloque if (ev.type === 'HIDE') ELIMINADO para arreglar el Borrador Vectorial
 
             if (ev.type === 'TRANSFORM' && ev.targetIds && ev.transformMatrix) {
                 let currentMatrix = new DOMMatrix(ev.transformMatrix);

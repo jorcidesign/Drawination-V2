@@ -251,6 +251,46 @@ export class HistoryManager {
         return event;
     }
 
+    public commitDuplicateGroup(
+        sourceIds: string[],
+        newIds: string[],
+        clonePayloads: import('./TimelineTypes').ClonePayload[],
+        layerIndex: number,
+    ): import('./TimelineTypes').TimelineEvent {
+        const startTime = performance.now();
+
+        const event: import('./TimelineTypes').TimelineEvent = {
+            id: crypto.randomUUID(),
+            type: 'DUPLICATE_GROUP',
+            toolId: 'transform-handle',
+            profileId: 'system',
+            layerIndex,
+            color: '',
+            size: 0,
+            opacity: 1,
+            timestamp: Date.now(),
+            data: null,
+            sourceIds,
+            newIds,
+            clonePayloads,
+            isSaved: false,
+        };
+
+        this.push(event);
+        // La caché de snapshots posteriores al duplicado queda invalidada
+        // porque los clones aparecen como nuevos trazos en active[]
+        this.cacheManager.clearAll();
+
+        DiagnosticsService.logEvent(event);
+        DiagnosticsService.printMetrics(
+            performance.now() - startTime,
+            this,
+            this.cacheManager,
+        );
+
+        return event;
+    }
+
     public commitLayerAction(type: LayerAction, layerIndex: number, extraPayload: Partial<TimelineEvent> = {}): TimelineEvent {
         const event: TimelineEvent = {
             id: crypto.randomUUID(), type,

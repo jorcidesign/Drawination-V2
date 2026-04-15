@@ -51,11 +51,14 @@ export class LayerPanel {
     actionsWrap.style.display = 'flex';
     actionsWrap.style.gap = '4px';
 
+    // BETA: botón de nueva capa deshabilitado hasta que capas esté listo
     const addBtn = document.createElement('button');
     addBtn.className = 'panel-add';
-    addBtn.title = 'Nueva capa';
+    addBtn.title = 'Nueva capa (próximamente)';
     addBtn.innerHTML = Icons.add;
-    addBtn.onclick = () => this.eventBus.emit('LAYER_ACTION_CREATE');
+    addBtn.disabled = true;
+    addBtn.style.opacity = '0.3';
+    addBtn.style.cursor = 'not-allowed';
 
     const closeBtn = document.createElement('button');
     closeBtn.className = 'panel-close';
@@ -67,12 +70,34 @@ export class LayerPanel {
     header.appendChild(actionsWrap);
     this.element.appendChild(header);
 
+    // BETA: lista de capas oculta — se muestra el banner "Coming Soon"
     this.listContainer = document.createElement('div');
     this.listContainer.className = 'layer-list';
+    this.listContainer.style.display = 'none';
     this.element.appendChild(this.listContainer);
+
+    // Banner elegante "Coming Soon"
+    this.element.appendChild(this._buildComingSoonBanner());
 
     this.element.appendChild(this._buildBgLayer());
     this.bindEvents();
+  }
+
+  /** Banner de capas Coming Soon — temporal para la beta */
+  private _buildComingSoonBanner(): HTMLDivElement {
+    const banner = document.createElement('div');
+    banner.className = 'layers-coming-soon';
+    banner.innerHTML = `
+      <div class="lcs-lock">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="3"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+      </div>
+      <div class="lcs-title">Múltiples capas</div>
+      <div class="lcs-sub">Coming soon</div>
+    `;
+    return banner;
   }
 
   private _buildBgLayer(): HTMLDivElement {
@@ -361,7 +386,7 @@ export class LayerPanel {
       .layer-ghost { opacity: 0.4; background: var(--surface-pressed); }
       .panel-add { width: 24px; height: 24px; border: none; background: transparent; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 4px; outline: none; transition: background var(--t-fast), color var(--t-fast); }
       .panel-add svg { width: 16px; height: 16px; }
-      .panel-add:hover { background: var(--surface-hover); color: var(--text-primary); }
+      .panel-add:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-primary); }
 
       .layer-item--bg { margin-top: 6px; border-top: 1px solid var(--surface-panel-border); border-radius: 0 0 7px 7px; }
       .layer-item--bg .layer-main { min-height: 40px; }
@@ -379,6 +404,49 @@ export class LayerPanel {
       .bg-swatch-row { display: flex; gap: 5px; padding: 6px 12px 10px; }
       .bg-swatch { width: 24px; height: 24px; border-radius: 5px; border: none; cursor: pointer; flex-shrink: 0; transition: transform 0.12s, box-shadow 0.12s; outline: none; }
       .bg-swatch:hover { transform: scale(1.18); box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+
+      /* ── Coming Soon Banner ────────────────────────────────────────────── */
+      .layers-coming-soon {
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 6px; padding: 20px 12px 18px;
+        margin: 6px 0 4px;
+        background: linear-gradient(135deg, rgba(0,102,204,0.07) 0%, rgba(120,80,240,0.07) 100%);
+        border: 1px solid rgba(0,102,204,0.14);
+        border-radius: 10px;
+        position: relative; overflow: hidden;
+      }
+      .layers-coming-soon::before {
+        content: '';
+        position: absolute; inset: 0;
+        background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, transparent 60%);
+        pointer-events: none;
+      }
+      .lcs-lock {
+        width: 28px; height: 28px;
+        display: flex; align-items: center; justify-content: center;
+        background: linear-gradient(135deg, rgba(0,102,204,0.15), rgba(120,80,240,0.15));
+        border-radius: 8px;
+        color: #0066cc;
+        animation: lcs-float 3s ease-in-out infinite;
+      }
+      .lcs-lock svg { width: 14px; height: 14px; }
+      @keyframes lcs-float {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-3px); }
+      }
+      .lcs-title {
+        font-size: 12px; font-weight: 600;
+        color: var(--text-primary);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        letter-spacing: -0.1px;
+      }
+      .lcs-sub {
+        font-size: 10px; font-weight: 500;
+        color: #0066cc;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        text-transform: uppercase; letter-spacing: 0.8px;
+        opacity: 0.8;
+      }
     `;
     document.head.appendChild(style);
   }

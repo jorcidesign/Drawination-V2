@@ -1,26 +1,11 @@
 // src/export/ExportManager.ts
-//
-// Exportación PNG 2x y video timelapse estilo Procreate.
-//
-// REPRODUCCIÓN CRONOLÓGICA:
-//   El video reproduce los eventos en orden real incluyendo TRANSFORM y HIDE.
-//   Misma lógica que TimelapsePlayer.buildPlaylist() — los TRANSFORM consecutivos
-//   sobre el mismo grupo se colapsan en una sola matriz para evitar micro-saltos.
-//   Los trazos ocultos por HIDE desaparecen en el momento correcto del video.
-//
-// ESTRUCTURA DEL VIDEO:
-//   1. Resultado final   — 2s
-//   2. Fade a blanco     — 0.5s
-//   3. Timelapse         — duración dinámica (5.5s – 25.5s)
-//   4. Fade a blanco     — 0.5s
-//   5. Marca de agua     — 1.5s
-
 import type { CanvasEngine } from '../core/engine/CanvasEngine';
 import type { HistoryManager } from '../history/HistoryManager';
 import type { BrushEngine } from '../core/render/BrushEngine';
 import type { StorageManager } from '../storage/StorageManager';
 import type { TimelineEvent } from '../history/TimelineTypes';
 import { CommandFactory } from '../history/commands/CommandFactory';
+import { ProfileRegistry } from '../core/render/profiles/ProfileRegistry';
 
 const EXPORT_SCALE = 2;
 const INTRO_MS = 2_000;
@@ -34,27 +19,12 @@ const MS_PER_STROKE = 50;
 const VIDEO_FPS = 30;
 const FADE_STEPS = 20;
 
-// Evento interno para transforms colapsados
-interface CollapsedTransform {
-    kind: 'transform';
-    targetIds: string[];
-    matrix: number[];
-}
+interface CollapsedTransform { kind: 'transform'; targetIds: string[]; matrix: number[] }
+interface HideEvent { kind: 'hide'; targetIds: string[] }
+interface DrawEvent { kind: 'draw'; event: TimelineEvent; data: ArrayBuffer }
+interface DuplicateGroupItem { kind: 'duplicate-group'; events: TimelineEvent[] }
 
-// Evento interno para hides
-interface HideEvent {
-    kind: 'hide';
-    targetIds: string[];
-}
-
-// Evento de dibujo enriquecido con data lista
-interface DrawEvent {
-    kind: 'draw';
-    event: TimelineEvent;
-    data: ArrayBuffer;
-}
-
-type PlaylistItem = DrawEvent | CollapsedTransform | HideEvent;
+type PlaylistItem = DrawEvent | CollapsedTransform | DuplicateGroupItem | HideEvent;
 
 export class ExportManager {
     private engine: CanvasEngine;
@@ -77,8 +47,6 @@ export class ExportManager {
         this.storage = storage;
     }
 
-    // ── PNG 2x ────────────────────────────────────────────────────────────
-
     public async exportPNG(): Promise<void> {
         const srcW = this.engine.width;
         const srcH = this.engine.height;
@@ -93,10 +61,9 @@ export class ExportManager {
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
 
-        ctx.fillStyle = '#ffffff';
+        const { layersState, layerRoute, backgroundColor } = this.history.getState();
+        ctx.fillStyle = backgroundColor || '#FAFAFA';
         ctx.fillRect(0, 0, dstW, dstH);
-
-        const { layersState, layerRoute } = this.history.getState();
 
         for (let i = 0; i < 10; i++) {
             const layerState = layersState.get(i);
@@ -113,8 +80,6 @@ export class ExportManager {
         this._downloadCanvas(out, `drawination_${this._timestamp()}.png`, 'image/png');
     }
 
-    // ── Video timelapse ───────────────────────────────────────────────────
-
     public async exportVideo(): Promise<void> {
         if (!this._isMediaRecorderSupported()) {
             alert('Tu navegador no soporta grabación de video (MediaRecorder API). Prueba con Chrome o Edge.');
@@ -129,7 +94,6 @@ export class ExportManager {
 
         this._cancelled = false;
 
-        // Construir playlist cronológica con transforms y hides
         const { playlist, drawCount } = await this._buildPlaylist(spine);
 
         if (drawCount === 0) {
@@ -137,7 +101,6 @@ export class ExportManager {
             return;
         }
 
-        // Calcular duración dinámica basada en trazos de dibujo
         const idealTimelapse = drawCount * MS_PER_STROKE;
         const timelapseMs = Math.max(MIN_TIMELAPSE_MS, Math.min(MAX_TIMELAPSE_MS, idealTimelapse));
         const msPerStroke = timelapseMs / drawCount;
@@ -147,6 +110,8 @@ export class ExportManager {
 
         const W = this.engine.width;
         const H = this.engine.height;
+
+        const bgColor = this.history.getState().backgroundColor || '#FAFAFA';
 
         const recCanvas = document.createElement('canvas');
         recCanvas.width = W;
@@ -182,22 +147,18 @@ export class ExportManager {
 
         recorder.start();
 
-        // ── FASE 1: Resultado final — 2s ──────────────────────────────────
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle = bgColor;
         ctx.fillRect(0, 0, W, H);
         ctx.drawImage(finalSnapshot, 0, 0);
         await this._sleep(INTRO_MS);
         if (this._cancelled) { recorder.stop(); await recordingDone; this._hideOverlay(); return; }
 
-        // ── FASE 2: Fade a blanco — 0.5s ─────────────────────────────────
         await this._fadeToWhite(ctx, W, H, FADE_IN_MS);
         if (this._cancelled) { recorder.stop(); await recordingDone; this._hideOverlay(); return; }
 
-        // ── FASE 3: Timelapse cronológico ─────────────────────────────────
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle = bgColor;
         ctx.fillRect(0, 0, W, H);
 
-        // Estado mutable durante la reproducción
         const currentTransforms = new Map<string, DOMMatrix>();
         const hiddenIds = new Set<string>();
         let strokesDone = 0;
@@ -210,65 +171,146 @@ export class ExportManager {
                 const t = currentTransforms.get(item.event.id);
                 if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
 
-                ctx.save();
-                cmd.execute(ctx);
-                ctx.restore();
+                const isEraser = item.event.type === 'ERASE' || (ProfileRegistry[item.event.profileId]?.blendMode === 'destination-out');
+
+                if (isEraser) {
+                    this._executeEraseOnOpaqueCanvas(ctx, cmd, W, H, bgColor);
+                } else {
+                    ctx.save();
+                    cmd.execute(ctx);
+                    ctx.restore();
+                }
+
+                strokesDone++;
+                this._updateProgress(strokesDone, drawCount);
+                await this._sleep(msPerStroke);
+
+            } else if (item.kind === 'duplicate-group') {
+                for (const synEv of item.events) {
+                    if (synEv.transformMatrix) {
+                        currentTransforms.set(synEv.id, new DOMMatrix(synEv.transformMatrix));
+                    }
+                    if (hiddenIds.has(synEv.id)) continue;
+
+                    const cmd = CommandFactory.create(synEv, this.activeBrush);
+                    const t = currentTransforms.get(synEv.id);
+                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+
+                    const isEraser = synEv.type === 'ERASE' || (ProfileRegistry[synEv.profileId]?.blendMode === 'destination-out');
+
+                    if (isEraser) {
+                        this._executeEraseOnOpaqueCanvas(ctx, cmd, W, H, bgColor);
+                    } else {
+                        ctx.save();
+                        cmd.execute(ctx);
+                        ctx.restore();
+                    }
+                }
 
                 strokesDone++;
                 this._updateProgress(strokesDone, drawCount);
                 await this._sleep(msPerStroke);
 
             } else if (item.kind === 'transform') {
-                // Aplicar transform en vivo: redibujar todo el canvas
                 const newMatrix = new DOMMatrix(item.matrix);
                 for (const id of item.targetIds) {
                     const current = currentTransforms.get(id) ?? new DOMMatrix();
                     currentTransforms.set(id, newMatrix.multiply(current));
                 }
 
-                // Redibujar canvas completo con las nuevas matrices
-                ctx.fillStyle = '#ffffff';
+                ctx.fillStyle = bgColor;
                 ctx.fillRect(0, 0, W, H);
 
                 for (const pItem of playlist) {
-                    if (pItem.kind !== 'draw') continue;
-                    if (hiddenIds.has(pItem.event.id)) continue;
-                    // Solo redibujar los que ya fueron pintados (antes del cursor actual)
-                    const idx = playlist.indexOf(pItem);
-                    const currentIdx = playlist.indexOf(item);
-                    if (idx >= currentIdx) continue;
+                    if (pItem.kind === 'draw') {
+                        if (hiddenIds.has(pItem.event.id)) continue;
+                        const idx = playlist.indexOf(pItem);
+                        const currentIdx = playlist.indexOf(item);
+                        if (idx >= currentIdx) continue;
 
-                    const cmd = CommandFactory.create(pItem.event, this.activeBrush);
-                    const t = currentTransforms.get(pItem.event.id);
-                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                    ctx.save();
-                    cmd.execute(ctx);
-                    ctx.restore();
+                        const cmd = CommandFactory.create(pItem.event, this.activeBrush);
+                        const t = currentTransforms.get(pItem.event.id);
+                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+
+                        const isEraser = pItem.event.type === 'ERASE' || (ProfileRegistry[pItem.event.profileId]?.blendMode === 'destination-out');
+                        if (isEraser) {
+                            this._executeEraseOnOpaqueCanvas(ctx, cmd, W, H, bgColor);
+                        } else {
+                            ctx.save();
+                            cmd.execute(ctx);
+                            ctx.restore();
+                        }
+                    } else if (pItem.kind === 'duplicate-group') {
+                        const idx = playlist.indexOf(pItem);
+                        const currentIdx = playlist.indexOf(item);
+                        if (idx >= currentIdx) continue;
+
+                        for (const synEv of pItem.events) {
+                            if (hiddenIds.has(synEv.id)) continue;
+                            const cmd = CommandFactory.create(synEv, this.activeBrush);
+                            const t = currentTransforms.get(synEv.id);
+                            if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+
+                            const isEraser = synEv.type === 'ERASE' || (ProfileRegistry[synEv.profileId]?.blendMode === 'destination-out');
+                            if (isEraser) {
+                                this._executeEraseOnOpaqueCanvas(ctx, cmd, W, H, bgColor);
+                            } else {
+                                ctx.save();
+                                cmd.execute(ctx);
+                                ctx.restore();
+                            }
+                        }
+                    }
                 }
 
-                // Pausa breve para que el transform sea visible
                 await this._sleep(msPerStroke * 3);
 
             } else if (item.kind === 'hide') {
                 for (const id of item.targetIds) hiddenIds.add(id);
 
-                // Redibujar canvas sin los trazos ocultos
-                ctx.fillStyle = '#ffffff';
+                ctx.fillStyle = bgColor;
                 ctx.fillRect(0, 0, W, H);
 
                 for (const pItem of playlist) {
-                    if (pItem.kind !== 'draw') continue;
-                    if (hiddenIds.has(pItem.event.id)) continue;
-                    const idx = playlist.indexOf(pItem);
-                    const currentIdx = playlist.indexOf(item);
-                    if (idx >= currentIdx) continue;
+                    if (pItem.kind === 'draw') {
+                        if (hiddenIds.has(pItem.event.id)) continue;
+                        const idx = playlist.indexOf(pItem);
+                        const currentIdx = playlist.indexOf(item);
+                        if (idx >= currentIdx) continue;
 
-                    const cmd = CommandFactory.create(pItem.event, this.activeBrush);
-                    const t = currentTransforms.get(pItem.event.id);
-                    if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
-                    ctx.save();
-                    cmd.execute(ctx);
-                    ctx.restore();
+                        const cmd = CommandFactory.create(pItem.event, this.activeBrush);
+                        const t = currentTransforms.get(pItem.event.id);
+                        if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+
+                        const isEraser = pItem.event.type === 'ERASE' || (ProfileRegistry[pItem.event.profileId]?.blendMode === 'destination-out');
+                        if (isEraser) {
+                            this._executeEraseOnOpaqueCanvas(ctx, cmd, W, H, bgColor);
+                        } else {
+                            ctx.save();
+                            cmd.execute(ctx);
+                            ctx.restore();
+                        }
+                    } else if (pItem.kind === 'duplicate-group') {
+                        const idx = playlist.indexOf(pItem);
+                        const currentIdx = playlist.indexOf(item);
+                        if (idx >= currentIdx) continue;
+
+                        for (const synEv of pItem.events) {
+                            if (hiddenIds.has(synEv.id)) continue;
+                            const cmd = CommandFactory.create(synEv, this.activeBrush);
+                            const t = currentTransforms.get(synEv.id);
+                            if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
+
+                            const isEraser = synEv.type === 'ERASE' || (ProfileRegistry[synEv.profileId]?.blendMode === 'destination-out');
+                            if (isEraser) {
+                                this._executeEraseOnOpaqueCanvas(ctx, cmd, W, H, bgColor);
+                            } else {
+                                ctx.save();
+                                cmd.execute(ctx);
+                                ctx.restore();
+                            }
+                        }
+                    }
                 }
 
                 await this._sleep(msPerStroke * 2);
@@ -277,11 +319,9 @@ export class ExportManager {
 
         if (this._cancelled) { recorder.stop(); await recordingDone; this._hideOverlay(); return; }
 
-        // ── FASE 4: Fade a blanco — 0.5s ─────────────────────────────────
         await this._fadeToWhite(ctx, W, H, FADE_OUT_MS);
         if (this._cancelled) { recorder.stop(); await recordingDone; this._hideOverlay(); return; }
 
-        // ── FASE 5: Marca de agua — 1.5s ──────────────────────────────────
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, W, H);
         this._drawWatermark(ctx, W, H);
@@ -295,30 +335,48 @@ export class ExportManager {
         this._hideOverlay();
     }
 
-    // ── Construcción de playlist cronológica ──────────────────────────────
-
     private async _buildPlaylist(spine: TimelineEvent[]): Promise<{ playlist: PlaylistItem[]; drawCount: number }> {
         const playlist: PlaylistItem[] = [];
-        const hiddenByEnd = new Set<string>();
         let drawCount = 0;
 
-        // Pre-calcular qué IDs están ocultos al final (para saber qué precargar)
-        for (const ev of spine) {
-            if (ev.type === 'HIDE' && ev.targetIds) {
-                for (const id of ev.targetIds) hiddenByEnd.add(id);
-            }
-        }
-
-        // Precargar datos de trazos visibles
         const drawingSpine = spine.filter(
-            ev => ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL'
+            ev => ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL' || ev.type === 'DUPLICATE_GROUP'
         );
         const dataMap = await this._preloadAll(drawingSpine);
 
-        // Construir playlist en orden cronológico
         let i = 0;
         while (i < spine.length) {
             const ev = spine[i];
+
+            if (ev.type === 'DUPLICATE_GROUP' && ev.clonePayloads) {
+                const syntheticEvents: TimelineEvent[] = [];
+                for (const payload of ev.clonePayloads) {
+                    const syntheticEvent: TimelineEvent = {
+                        id: payload.id,
+                        type: 'STROKE',
+                        toolId: 'duplicate',
+                        profileId: payload.profileId,
+                        layerIndex: ev.layerIndex,
+                        timestamp: ev.timestamp,
+                        color: payload.color,
+                        size: payload.size,
+                        opacity: payload.opacity,
+                        data: payload.data,
+                        bbox: payload.bbox,
+                        transformMatrix: payload.matrix,
+                        isSaved: true,
+                    };
+                    syntheticEvents.push(syntheticEvent);
+                }
+
+                playlist.push({
+                    kind: 'duplicate-group',
+                    events: syntheticEvents
+                });
+                drawCount++;
+                i++;
+                continue;
+            }
 
             if (ev.type === 'STROKE' || ev.type === 'ERASE' || ev.type === 'FILL') {
                 const data = dataMap.get(ev.id);
@@ -333,7 +391,6 @@ export class ExportManager {
                 i++;
 
             } else if (ev.type === 'TRANSFORM' && ev.targetIds && ev.transformMatrix) {
-                // Colapsar transforms consecutivos sobre el mismo grupo
                 let currentMatrix = new DOMMatrix(ev.transformMatrix);
                 const sortedIds = ev.targetIds.slice().sort().join(',');
 
@@ -375,12 +432,9 @@ export class ExportManager {
         return { playlist, drawCount };
     }
 
-    // ── Overlay de progreso ───────────────────────────────────────────────
-
     private _showOverlay(totalMs: number): void {
         const overlay = document.createElement('div');
         overlay.id = 'export-overlay';
-
         const totalSec = Math.round(totalMs / 1000);
 
         overlay.innerHTML = `
@@ -399,87 +453,17 @@ export class ExportManager {
         const style = document.createElement('style');
         style.id = 'export-overlay-styles';
         style.textContent = `
-            #export-overlay {
-                position: fixed;
-                inset: 0;
-                background: rgba(0,0,0,0.72);
-                backdrop-filter: blur(6px);
-                -webkit-backdrop-filter: blur(6px);
-                z-index: 999999;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }
-            .export-card {
-                background: #1c1c1e;
-                border: 1px solid rgba(255,255,255,0.1);
-                border-radius: 16px;
-                padding: 36px 40px;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                gap: 14px;
-                min-width: 320px;
-                box-shadow: 0 24px 64px rgba(0,0,0,0.6);
-            }
-            .export-spinner {
-                width: 36px;
-                height: 36px;
-                border: 3px solid rgba(255,255,255,0.12);
-                border-top-color: #0066cc;
-                border-radius: 50%;
-                animation: export-spin 0.8s linear infinite;
-            }
+            #export-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.72); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); z-index: 999999; display: flex; align-items: center; justify-content: center; }
+            .export-card { background: #1c1c1e; border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; padding: 36px 40px; display: flex; flex-direction: column; align-items: center; gap: 14px; min-width: 320px; box-shadow: 0 24px 64px rgba(0,0,0,0.6); }
+            .export-spinner { width: 36px; height: 36px; border: 3px solid rgba(255,255,255,0.12); border-top-color: #0066cc; border-radius: 50%; animation: export-spin 0.8s linear infinite; }
             @keyframes export-spin { to { transform: rotate(360deg); } }
-            .export-title {
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                font-size: 17px;
-                font-weight: 600;
-                color: #ffffff;
-                letter-spacing: -0.2px;
-            }
-            .export-sub {
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                font-size: 13px;
-                color: rgba(255,255,255,0.45);
-            }
-            .export-bar-wrap {
-                width: 240px;
-                height: 4px;
-                background: rgba(255,255,255,0.1);
-                border-radius: 2px;
-                overflow: hidden;
-            }
-            .export-bar {
-                height: 100%;
-                width: 0%;
-                background: #0066cc;
-                border-radius: 2px;
-                transition: width 0.1s ease;
-            }
-            .export-pct {
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                font-size: 12px;
-                color: rgba(255,255,255,0.4);
-                font-variant-numeric: tabular-nums;
-            }
-            .export-cancel {
-                margin-top: 6px;
-                padding: 8px 24px;
-                background: rgba(255,255,255,0.07);
-                border: 1px solid rgba(255,255,255,0.12);
-                border-radius: 8px;
-                color: rgba(255,255,255,0.6);
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                font-size: 13px;
-                cursor: pointer;
-                transition: background 0.15s, color 0.15s;
-            }
-            .export-cancel:hover {
-                background: rgba(231,76,60,0.2);
-                border-color: rgba(231,76,60,0.4);
-                color: #e74c3c;
-            }
+            .export-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 17px; font-weight: 600; color: #ffffff; letter-spacing: -0.2px; }
+            .export-sub { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; color: rgba(255,255,255,0.45); }
+            .export-bar-wrap { width: 240px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; }
+            .export-bar { height: 100%; width: 0%; background: #0066cc; border-radius: 2px; transition: width 0.1s ease; }
+            .export-pct { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 12px; color: rgba(255,255,255,0.4); font-variant-numeric: tabular-nums; }
+            .export-cancel { margin-top: 6px; padding: 8px 24px; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; color: rgba(255,255,255,0.6); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; cursor: pointer; transition: background 0.15s, color 0.15s; }
+            .export-cancel:hover { background: rgba(231,76,60,0.2); border-color: rgba(231,76,60,0.4); color: #e74c3c; }
         `;
 
         document.head.appendChild(style);
@@ -507,18 +491,15 @@ export class ExportManager {
         document.getElementById('export-overlay-styles')?.remove();
     }
 
-    // ── Helpers de render ─────────────────────────────────────────────────
-
     private _captureFinalResult(W: number, H: number): HTMLCanvasElement {
         const snap = document.createElement('canvas');
         snap.width = W;
         snap.height = H;
         const ctx = snap.getContext('2d')!;
 
-        ctx.fillStyle = '#ffffff';
+        const { layersState, layerRoute, backgroundColor } = this.history.getState();
+        ctx.fillStyle = backgroundColor || '#FAFAFA';
         ctx.fillRect(0, 0, W, H);
-
-        const { layersState, layerRoute } = this.history.getState();
 
         for (let i = 0; i < 10; i++) {
             const layerState = layersState.get(i);
@@ -531,19 +512,39 @@ export class ExportManager {
             ctx.drawImage(srcCanvas, 0, 0);
             ctx.restore();
         }
-
         return snap;
     }
 
-    private async _fadeToWhite(
-        ctx: CanvasRenderingContext2D,
+    private _executeEraseOnOpaqueCanvas(
+        targetCtx: CanvasRenderingContext2D,
+        cmd: { execute(ctx: CanvasRenderingContext2D): void },
         W: number,
         H: number,
-        durationMs: number
-    ): Promise<void> {
+        bgColor: string,
+    ): void {
+        const offscreen = document.createElement('canvas');
+        offscreen.width = W;
+        offscreen.height = H;
+        const offCtx = offscreen.getContext('2d')!;
+
+        offCtx.drawImage(targetCtx.canvas, 0, 0);
+
+        offCtx.save();
+        cmd.execute(offCtx);
+        offCtx.restore();
+
+        offCtx.globalCompositeOperation = 'destination-atop';
+        offCtx.fillStyle = bgColor;
+        offCtx.fillRect(0, 0, W, H);
+        offCtx.globalCompositeOperation = 'source-over';
+
+        targetCtx.clearRect(0, 0, W, H);
+        targetCtx.drawImage(offscreen, 0, 0);
+    }
+
+    private async _fadeToWhite(ctx: CanvasRenderingContext2D, W: number, H: number, durationMs: number): Promise<void> {
         const stepMs = durationMs / FADE_STEPS;
         const alphaStep = 1 / FADE_STEPS;
-
         for (let i = 1; i <= FADE_STEPS; i++) {
             ctx.save();
             ctx.globalAlpha = alphaStep * i;
@@ -557,35 +558,33 @@ export class ExportManager {
     private _drawWatermark(ctx: CanvasRenderingContext2D, W: number, H: number): void {
         const cx = W / 2;
         const cy = H / 2;
-
         ctx.beginPath();
         ctx.arc(cx - 128, cy - 2, 9, 0, Math.PI * 2);
         ctx.fillStyle = '#0066cc';
         ctx.fill();
-
         ctx.font = '500 34px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
         ctx.fillStyle = '#1a1a1a';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('DrawinationV2', cx + 18, cy);
-
         ctx.font = '400 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
         ctx.fillStyle = '#888888';
         ctx.fillText('Built with Drawination V2', cx, cy + 46);
-
         ctx.font = '400 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
         ctx.fillStyle = '#0066cc';
         ctx.fillText('drawinationv2.vercel.app', cx, cy + 70);
     }
-
-    // ── Helpers genéricos ─────────────────────────────────────────────────
 
     private async _preloadAll(events: TimelineEvent[]): Promise<Map<string, ArrayBuffer>> {
         const dataMap = new Map<string, ArrayBuffer>();
         const idsNeeded: string[] = [];
 
         for (const ev of events) {
-            if (ev.data) {
+            if (ev.type === 'DUPLICATE_GROUP' && ev.clonePayloads) {
+                for (const payload of ev.clonePayloads) {
+                    if (payload.data) dataMap.set(payload.id, payload.data);
+                }
+            } else if (ev.data) {
                 dataMap.set(ev.id, ev.data);
             } else {
                 idsNeeded.push(ev.id);
@@ -594,11 +593,8 @@ export class ExportManager {
 
         if (idsNeeded.length > 0) {
             const batch = await this.storage.loadEventDataBatch(idsNeeded);
-            for (const [id, buf] of batch.entries()) {
-                dataMap.set(id, buf);
-            }
+            for (const [id, buf] of batch.entries()) dataMap.set(id, buf);
         }
-
         return dataMap;
     }
 
@@ -644,12 +640,7 @@ export class ExportManager {
     }
 
     private _getSupportedMimeType(): string {
-        const types = [
-            'video/mp4;codecs=avc1',
-            'video/webm;codecs=vp9',
-            'video/webm;codecs=vp8',
-            'video/webm',
-        ];
+        const types = ['video/mp4;codecs=avc1', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
         for (const type of types) {
             if (MediaRecorder.isTypeSupported(type)) return type;
         }

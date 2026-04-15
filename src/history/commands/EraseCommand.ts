@@ -1,5 +1,5 @@
-// src/history/commands/StrokeCommand.ts
-import type { ICommand } from './ICommand';
+// src/history/commands/EraseCommand.ts
+import type { ICommand, CommandContext } from './ICommand';
 import type { TimelineEvent } from '../TimelineTypes';
 import type { StorageManager } from '../../storage/StorageManager';
 import { BinarySerializer } from '../../core/io/BinarySerializer';
@@ -7,7 +7,7 @@ import type { BrushEngine } from '../../core/render/BrushEngine';
 import { CommandFactory } from './CommandFactory';
 import { ProfileRegistry } from '../../core/render/profiles/ProfileRegistry';
 
-export class StrokeCommand implements ICommand {
+export class EraseCommand implements ICommand {
     private event: TimelineEvent;
     private brush: BrushEngine;
     public transform?: number[];
@@ -28,7 +28,7 @@ export class StrokeCommand implements ICommand {
     public execute(ctx: CanvasRenderingContext2D): void {
         if (!this.event.data) return;
 
-        // 🚀 BATALLA 1 (MEMOIZACIÓN): Caché de RAM. 
+        // 🚀 BATALLA 1 (MEMOIZACIÓN): Caché de RAM.
         // Descomprimir un binario toma ~2ms. Cachearlo evita que un Ctrl+Z
         // masivo conmute todo el CPU del hilo principal.
         if (!this.event.decodedPoints) {
@@ -54,4 +54,4 @@ export class StrokeCommand implements ICommand {
     public getRawData(): ArrayBuffer | null { return this.event.data; }
 }
 
-CommandFactory.register('STROKE', StrokeCommand);
+CommandFactory.register('ERASE', EraseCommand);

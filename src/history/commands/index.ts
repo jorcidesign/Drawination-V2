@@ -4,6 +4,7 @@ import './EraseCommand';
 import './HideCommand';
 import './TransformCommand';
 import './LayerCommand';
-import './BackgroundColorCommand'; // ← nuevo
+import './BackgroundColorCommand';
+import './DuplicateGroupCommand'; // ← nuevo comando atómico
 
 export { CommandFactory } from './CommandFactory';

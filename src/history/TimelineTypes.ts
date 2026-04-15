@@ -1,12 +1,32 @@
 // src/history/TimelineTypes.ts
 import type { BoundingBox } from '../core/math/BoundingBox';
-import type { StrokePoint } from '../core/io/BinarySerializer'; // 🚀 IMPORTANTE para la optimización
+import type { StrokePoint } from '../core/io/BinarySerializer';
 
 export type DrawingAction = 'STROKE' | 'ERASE' | 'FILL';
 export type TransformAction = 'TRANSFORM' | 'HIDE' | 'DUPLICATE_GROUP';
 export type LayerAction = 'LAYER_CREATE' | 'LAYER_DELETE' | 'LAYER_REORDER' | 'LAYER_OPACITY' | 'LAYER_VISIBILITY' | 'LAYER_LOCK' | 'LAYER_MERGE_DOWN' | 'LAYER_SELECT' | 'LAYER_DUPLICATE' | 'BACKGROUND_COLOR';
 export type ControlAction = 'UNDO' | 'REDO' | 'FLIP_H';
 export type ActionType = DrawingAction | TransformAction | LayerAction | ControlAction;
+
+// ── Payload atómico para DUPLICATE_GROUP ─────────────────────────────────────
+// Cada entrada describe un clon: sus datos binarios y la matriz heredada del original.
+// Esto permite que DuplicateGroupCommand reproduzca todos los clones en un solo
+// execute(), haciendo que Ctrl+Z deshaga TODO el duplicado en un paso.
+export interface ClonePayload {
+    /** ID del clon — coincide con las entradas de TimelineEvent.newIds */
+    id: string;
+    /** ID del trazo original del que proviene */
+    sourceId: string;
+    profileId: string;
+    color: string;
+    size: number;
+    opacity: number;
+    /** Datos binarios del trazo (ya descomprimidos) */
+    data: ArrayBuffer;
+    /** Matriz afín [a,b,c,d,tx,ty] del clon = offsetMatrix × matrizOriginal */
+    matrix?: number[];
+    bbox?: BoundingBox;
+}
 
 export interface TimelineEvent {
     readonly id: string;
@@ -32,6 +52,12 @@ export interface TimelineEvent {
     readonly sourceIds?: string[];
     readonly newIds?: string[];
 
+    // ── DUPLICATE_GROUP atómico ───────────────────────────────────────────
+    // Contiene los datos de TODOS los clones incrustados.
+    // Cuando este campo está presente, DuplicateGroupCommand lo usa para
+    // reproducir todos los trazos sin necesidad de eventos separados en el timeline.
+    clonePayloads?: ClonePayload[];
+
     readonly layerName?: string;
     readonly fromIndex?: number;
     readonly toIndex?: number;
@@ -42,10 +68,8 @@ export interface TimelineEvent {
     readonly backgroundColor?: string;
     readonly layerOrder?: number[];
 
-    // Propiedad legacy por la que TypeScript se quejaba
     undoCount?: number;
 
-    // Agrupación de eventos lógicos
     groupId?: string;
 
     // 🚀 BATALLA 1 (MEMOIZACIÓN): Caché de los puntos matemáticos ya decodificados
@@ -81,6 +105,9 @@ export function isTransformEvent(ev: TimelineEvent): ev is TimelineEvent & { tar
 }
 export function isHideEvent(ev: TimelineEvent): ev is TimelineEvent & { targetIds: string[] } {
     return ev.type === 'HIDE' && ev.targetIds != null;
+}
+export function isDuplicateGroupEvent(ev: TimelineEvent): ev is TimelineEvent & { newIds: string[]; clonePayloads: ClonePayload[] } {
+    return ev.type === 'DUPLICATE_GROUP' && ev.newIds != null && ev.clonePayloads != null;
 }
 export function isLayerEvent(ev: TimelineEvent): boolean {
     return ev.type === 'LAYER_CREATE' || ev.type === 'LAYER_DELETE' ||

@@ -63,7 +63,12 @@ export class DiagnosticsService {
                 console.log(`%c${label} %c${layerStr}%c Ocultó ${event.targetIds?.length ?? 0} trazo(s)`, 'color:#fff;background:#8e44ad;padding:1px 4px;border-radius:3px;font-weight:bold', 'color:#f1c40f;font-weight:bold', 'color:#c8a');
                 break;
             case 'DUPLICATE_GROUP':
-                console.log(`%c${label} %c${layerStr}%c Duplicó ${event.sourceIds?.length ?? 0} trazo(s)`, 'color:#fff;background:#2ecc71;padding:1px 4px;border-radius:3px;font-weight:bold', 'color:#f1c40f;font-weight:bold', 'color:#fff');
+                console.log(
+                    `%c${label} %c${layerStr}%c ${(event as any).clonePayloads?.length ?? 0} clon(es) atómicos`,
+                    'color:#fff;background:#2ecc71;padding:1px 4px;border-radius:3px;font-weight:bold',
+                    'color:#f1c40f;font-weight:bold',
+                    'color:#fff',
+                );
                 break;
             case 'LAYER_CREATE': case 'LAYER_DELETE': case 'LAYER_VISIBILITY': case 'LAYER_MERGE_DOWN': case 'LAYER_SELECT': case 'LAYER_DUPLICATE':
                 console.log(`%c${label} %c${layerStr}`, 'color:#fff;background:#27ae60;padding:1px 4px;border-radius:3px;font-weight:bold', 'color:#f1c40f;font-weight:bold');
@@ -91,6 +96,40 @@ export class DiagnosticsService {
         const label = EVENT_LABELS[event.type] ?? event.type;
         const layerStr = event.layerIndex !== undefined ? ` [Capa ${event.layerIndex}]` : '';
         console.log(`%c${icon} ${action}: %c${label}${layerStr}`, 'color:#f39c12;font-weight:bold', 'color:#aaa');
+    }
+
+    public static logDuplicate(
+        phase: 'start' | 'missing_data' | 'no_payloads' | 'done',
+        detail: number | string,
+    ): void {
+        if (!import.meta.env.DEV) return;
+
+        switch (phase) {
+            case 'start':
+                console.log(
+                    `%c📋 Duplicate: inicio — ${detail} trazo(s) seleccionado(s)`,
+                    'color:#2ecc71;font-weight:bold',
+                );
+                break;
+            case 'missing_data':
+                console.warn(
+                    `%c📋 Duplicate: sin datos para id ${detail} — se omite`,
+                    'color:#e67e22',
+                );
+                break;
+            case 'no_payloads':
+                console.warn(
+                    '%c📋 Duplicate: sin payloads — operación cancelada',
+                    'color:#e74c3c',
+                );
+                break;
+            case 'done':
+                console.log(
+                    `%c📋 Duplicate: ✅ evento atómico creado con ${detail} clon(es). Un solo Ctrl+Z lo deshace todo.`,
+                    'color:#2ecc71;font-weight:bold',
+                );
+                break;
+        }
     }
 
     public static logTransformState(

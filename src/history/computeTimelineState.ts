@@ -1,6 +1,6 @@
 // src/history/computeTimelineState.ts
 import type { TimelineEvent, TimelineState, LayerState } from './TimelineTypes';
-import { isTransformEvent, isHideEvent } from './TimelineTypes';
+import { isTransformEvent, isHideEvent, isDuplicateGroupEvent } from './TimelineTypes';
 
 const MAX_LAYERS = 10;
 export const DEFAULT_BACKGROUND_COLOR = '#FAFAFA';
@@ -49,6 +49,50 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
         switch (ev.type) {
             case 'STROKE': case 'ERASE': case 'FILL':
                 active.push(ev); break;
+
+            // ── DUPLICATE_GROUP atómico ───────────────────────────────────
+            // Genera eventos sintéticos en active[] para que el rebuild los dibuje.
+            //
+            // CONTRATO DE BBOX:
+            //   payload.bbox = bbox ORIGINAL sin proyectar (igual que ev.bbox en STROKE).
+            //   payload.matrix se almacena en `transforms` para que:
+            //     1. getActiveCommands() lo inyecte en StrokeCommand.transform
+            //        → execute() aplica ctx.transform(matrix) → dibuja en posición correcta.
+            //     2. getBboxForIds() lo aplique sobre payload.bbox (original)
+            //        → calcula el bbox del clon en posición real, sin doble proyección.
+            //
+            //   Este pipeline es idéntico al de un STROKE seguido de un TRANSFORM.
+            case 'DUPLICATE_GROUP': {
+                if (isDuplicateGroupEvent(ev)) {
+                    for (const payload of ev.clonePayloads) {
+                        // Evento sintético con el bbox original (sin proyectar).
+                        // getBboxForIds() aplicará payload.matrix sobre él.
+                        const syntheticEvent: TimelineEvent = {
+                            id: payload.id,
+                            type: 'STROKE',
+                            toolId: 'duplicate',
+                            profileId: payload.profileId,
+                            layerIndex: ev.layerIndex,
+                            timestamp: ev.timestamp,
+                            color: payload.color,
+                            size: payload.size,
+                            opacity: payload.opacity,
+                            data: payload.data,
+                            bbox: payload.bbox, // bbox original, sin proyectar
+                            isSaved: true,
+                        };
+                        active.push(syntheticEvent);
+
+                        // Almacenar la matriz en transforms para:
+                        // a) que getActiveCommands() la inyecte en StrokeCommand → renderizado correcto
+                        // b) que getBboxForIds() la aplique sobre bbox original → handle correctamente enmarcado
+                        if (payload.matrix) {
+                            transforms.set(payload.id, new DOMMatrix(payload.matrix));
+                        }
+                    }
+                }
+                break;
+            }
 
             case 'TRANSFORM':
                 if (isTransformEvent(ev)) {
@@ -147,7 +191,6 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
                 break;
             }
 
-            case 'DUPLICATE_GROUP':
             case 'UNDO':
             case 'REDO':
             case 'FLIP_H':
