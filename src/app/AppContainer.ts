@@ -1,4 +1,5 @@
 // src/app/AppContainer.ts
+import CompressionWorker from '../workers/CompressionWorker?worker';
 import { CanvasEngine } from '../core/engine/CanvasEngine';
 import { EventBus } from '../input/EventBus';
 import { StorageManager } from '../storage/StorageManager';
@@ -89,8 +90,7 @@ export class AppContainer {
         this.activeBrush = new BrushEngine(PencilProfile);
         this.activeBrush.color = INITIAL_BRUSH_COLOR;
 
-        const workerUrl = new URL('../workers/CompressionWorker.ts', import.meta.url);
-        const worker = new Worker(workerUrl, { type: 'module' });
+        const worker = new CompressionWorker();
 
         this.history = new HistoryManager(this.engine, worker, this.cache);
         (this.history as any).eventBus = this.eventBus;
