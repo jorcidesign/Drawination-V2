@@ -27,19 +27,11 @@ export class UndoRedoController {
     private storage: StorageManager;
 
     constructor(
-        history: HistoryManager,
-        rebuilder: CanvasRebuilder,
-        activeBrush: BrushEngine,
-        eventBus: EventBus,
-        commandContext: CommandContext,
-        storage: StorageManager,
+        history: HistoryManager, rebuilder: CanvasRebuilder, activeBrush: BrushEngine,
+        eventBus: EventBus, commandContext: CommandContext, storage: StorageManager,
     ) {
-        this.history = history;
-        this.rebuilder = rebuilder;
-        this.activeBrush = activeBrush;
-        this.eventBus = eventBus;
-        this.commandContext = commandContext;
-        this.storage = storage;
+        this.history = history; this.rebuilder = rebuilder; this.activeBrush = activeBrush;
+        this.eventBus = eventBus; this.commandContext = commandContext; this.storage = storage;
     }
 
     public registerInterceptor(interceptor: IUndoInterceptor): void {
@@ -51,15 +43,10 @@ export class UndoRedoController {
         if (idx !== -1) this.interceptors.splice(idx, 1);
     }
 
-    // ── SMART REBUILDING: Identifica si un evento requiere repintar el canvas ──
     private _requiresCanvasRebuild(eventType: ActionType): boolean {
         const cssOnlyEvents: ActionType[] = [
-            'BACKGROUND_COLOR',
-            'LAYER_OPACITY',
-            'LAYER_VISIBILITY',
-            'LAYER_REORDER',
-            'LAYER_LOCK',
-            'LAYER_SELECT'
+            'BACKGROUND_COLOR', 'LAYER_OPACITY', 'LAYER_VISIBILITY',
+            'LAYER_REORDER', 'LAYER_LOCK', 'LAYER_SELECT'
         ];
         return !cssOnlyEvents.includes(eventType);
     }
@@ -77,7 +64,6 @@ export class UndoRedoController {
 
         DiagnosticsService.logUndoRedo('UNDO', undoneEvent);
 
-        // Persistir el evento de control UNDO en IDB
         const undoControlEvent = this.history.timeline[this.history.timeline.length - 1];
         if (undoControlEvent?.type === 'UNDO') {
             undoControlEvent.isSaved = false;
@@ -85,22 +71,18 @@ export class UndoRedoController {
             undoControlEvent.isSaved = true;
         }
 
-        this.history.rebuildSpatialGrid();
+        // 🚀 OPTIMIZACIÓN LAZY: Eliminado this.history.rebuildSpatialGrid()
 
-        // === OPTIMIZACIÓN: Solo reconstruimos si alteró píxeles ===
         if (this._requiresCanvasRebuild(undoneEvent.type)) {
             await this.rebuilder.rebuild(this.activeBrush);
         } else {
-            // Si es CSS puro (fondo, opacidad de capa, etc), solo sincronizamos el DOM
             this.eventBus.emit('SYNC_LAYERS_CSS');
         }
 
         this.history.enforceRamLimit();
 
         const cmd = CommandFactory.create(undoneEvent, this.activeBrush);
-        if (cmd.onAfterUndo) {
-            await cmd.onAfterUndo(this.commandContext);
-        }
+        if (cmd.onAfterUndo) await cmd.onAfterUndo(this.commandContext);
 
         this.eventBus.emit('HISTORY_RESTORED', { event: undoneEvent, action: 'UNDO' });
     }
@@ -118,7 +100,6 @@ export class UndoRedoController {
 
         DiagnosticsService.logUndoRedo('REDO', redoneEvent);
 
-        // Persistir el evento de control REDO en IDB
         const redoControlEvent = this.history.timeline[this.history.timeline.length - 1];
         if (redoControlEvent?.type === 'REDO') {
             redoControlEvent.isSaved = false;
@@ -126,9 +107,8 @@ export class UndoRedoController {
             redoControlEvent.isSaved = true;
         }
 
-        this.history.rebuildSpatialGrid();
+        // 🚀 OPTIMIZACIÓN LAZY: Eliminado this.history.rebuildSpatialGrid()
 
-        // === OPTIMIZACIÓN: Solo reconstruimos si alteró píxeles ===
         if (this._requiresCanvasRebuild(redoneEvent.type)) {
             await this.rebuilder.rebuild(this.activeBrush);
         } else {
@@ -138,9 +118,7 @@ export class UndoRedoController {
         this.history.enforceRamLimit();
 
         const cmd = CommandFactory.create(redoneEvent, this.activeBrush);
-        if (cmd.onAfterRedo) {
-            await cmd.onAfterRedo(this.commandContext);
-        }
+        if (cmd.onAfterRedo) await cmd.onAfterRedo(this.commandContext);
 
         this.eventBus.emit('HISTORY_RESTORED', { event: redoneEvent, action: 'REDO' });
     }

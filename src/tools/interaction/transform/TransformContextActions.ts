@@ -1,6 +1,5 @@
 // src/tools/interaction/transform/TransformContextActions.ts
 import type { ToolContext } from '../../core/ITool';
-import type { BoundingBox } from '../../../core/math/BoundingBox';
 import type { TimelineEvent } from '../../../history/TimelineTypes';
 import { DiagnosticsService } from '../../../history/DiagnosticsService';
 import { TransformGestureHandler } from './TransformGestureHandler';

@@ -56,7 +56,8 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         ctx.undoRedoController.registerInterceptor(this);
 
         // Actualización post-viaje de Undo/Redo
-        ctx.eventBus.on('HISTORY_RESTORED', async ({ event, action }) => {
+        ctx.eventBus.on('HISTORY_RESTORED', async ({ event }) => {
+            console.log(`[TransformHandle] HISTORY_RESTORED disparado. state: ${this.state}, ignore: ${this._ignoreHistoryRestored}, event.type: ${event?.type}`);
             if (this._ignoreHistoryRestored) return;
             if (this.state !== TransformState.FOCUSED) return;
             if (event.type !== 'TRANSFORM') return;
@@ -64,6 +65,7 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
 
             const ourIds = this._selectedIdsStr();
             const eventIds = [...event.targetIds].sort().join(',');
+            console.log(`[TransformHandle] Comparando IDs: ourIds=${ourIds} vs eventIds=${eventIds}`);
             if (ourIds !== eventIds) return;
 
             const freshBbox = this.ctx.history.getBboxForIds(event.targetIds);
@@ -71,6 +73,10 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
 
             await this.sandbox.generate(this.ctx);
             this.currentMatrix = [1, 0, 0, 1, 0, 0];
+
+            // Garantizar que la opacidad baje al 30% de nuevo tras el rebuild global del historial
+            this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '0.3';
+
             this._renderLivePreview();
         });
 
@@ -115,12 +121,14 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
     // ── MÁQUINA DE ESTADOS UNDO/REDO ──────────────────────────────────────
 
     public async beforeUndo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
+        console.log(`[TransformHandle] beforeUndo. state: ${this.state}, busy: ${this.isBusy()}, nextEvent.type: ${nextEvent?.type}`);
         if (this.isBusy()) return { handled: true };
 
         // [FOCO]
         if (this.state === TransformState.IDLE) {
             if (nextEvent?.type === 'TRANSFORM' && nextEvent.targetIds) {
                 const bboxPostTransform = this.ctx.history.getBboxForIds(nextEvent.targetIds);
+                console.log(`[TransformHandle] beforeUndo IDLE -> INTERCEPT. bbox:`, bboxPostTransform);
                 if (bboxPostTransform) {
                     this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bboxPostTransform);
                     this.lastAction = 'none';
@@ -141,11 +149,13 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
                 nextEvent.targetIds &&
                 this._selectedIdsStr() === [...nextEvent.targetIds].sort().join(',')
             ) {
+                console.log(`[TransformHandle] beforeUndo FOCUSED -> TRAVEL. Dejando que historial actue.`);
                 DiagnosticsService.logTransformState('travel_undo', this.lastAction);
                 return { handled: false }; // Deja que el historial actúe
             }
 
             // [SALIDA]
+            console.log(`[TransformHandle] beforeUndo FOCUSED -> EXIT. nextEvent.type no es TRANSFORM o IDs cambian. Saliendo...`);
             DiagnosticsService.logTransformState('undo_exit', this.lastAction);
             await this._exitToLasso();
             return { handled: true }; // Intercepta actuando como Escape
@@ -155,6 +165,7 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
     }
 
     public async beforeRedo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
+        console.log(`[TransformHandle] beforeRedo. state: ${this.state}, busy: ${this.isBusy()}, nextEvent.type: ${nextEvent?.type}`);
         if (this.isBusy()) return { handled: true };
 
         // [FOCO]
@@ -162,6 +173,7 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
             if (nextEvent?.type === 'TRANSFORM' && nextEvent.targetIds) {
                 // Al rehacer, el evento aún no se aplica. Obtenemos bbox en Posición A.
                 const bboxPreTransform = this.ctx.history.getBboxForIds(nextEvent.targetIds);
+                console.log(`[TransformHandle] beforeRedo IDLE -> INTERCEPT. bbox pre-transform:`, bboxPreTransform);
                 if (bboxPreTransform) {
                     this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bboxPreTransform);
                     this.lastAction = 'none';
@@ -182,11 +194,13 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
                 nextEvent.targetIds &&
                 this._selectedIdsStr() === [...nextEvent.targetIds].sort().join(',')
             ) {
+                console.log(`[TransformHandle] beforeRedo FOCUSED -> TRAVEL.`);
                 DiagnosticsService.logTransformState('travel_redo', this.lastAction);
                 return { handled: false }; // Deja que el historial actúe
             }
 
             // [SALIDA]
+            console.log(`[TransformHandle] beforeRedo FOCUSED -> EXIT. nextEvent.type no es TRANSFORM o IDs cambian.`);
             DiagnosticsService.logTransformState('redo_exit', this.lastAction);
             await this._exitToLasso();
             return { handled: true }; // Intercepta cerrando la herramienta
@@ -251,26 +265,33 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
 
             const targetIds = Array.from(this.ctx.selection.selectedIds);
 
+            console.log(`[TransformHandle] onPointerUp. Committing transform de ${targetIds.length} trazos. M=`, this.currentMatrix);
+
             this._ignoreHistoryRestored = true;
             const event = await this.ctx.history.commitTransform(targetIds, this.currentMatrix);
             await this.ctx.storage.saveEvent(event);
             (event as any).isSaved = true;
             this.ctx.history.enforceRamLimit();
 
-            // === FIX APLICADO AQUÍ (this.ctx.rebuilder y this.ctx.activeBrush) ===
+            console.log(`[TransformHandle] Evento transform guardado, ID=${event.id}. Generando sandbox...`);
+
+            // Sincronizar el sandbox y variables locales *antes* del rebuild para evitar el race condition
+            const freshBbox = this.ctx.history.getBboxForIds(targetIds);
+            if (freshBbox && this.state === TransformState.FOCUSED) {
+                this.ctx.selection.setBbox(freshBbox);
+            }
+
+            await this.sandbox.generate(this.ctx);
+            this.currentMatrix = [1, 0, 0, 1, 0, 0];
+
             await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
             this._ignoreHistoryRestored = false;
 
             if (this.state !== TransformState.FOCUSED) return;
-
-            const freshBbox = this.ctx.history.getBboxForIds(targetIds);
-            if (freshBbox) this.ctx.selection.setBbox(freshBbox);
-
-            await this.sandbox.generate(this.ctx);
-            this.currentMatrix = [1, 0, 0, 1, 0, 0];
         }
 
         if (this.state === TransformState.FOCUSED) {
+            this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '0.3';
             this._renderLivePreview();
         }
     }

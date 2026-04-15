@@ -42,16 +42,26 @@ export class CanvasRebuilder {
             let snapshotBitmaps: Map<number, ImageBitmap> | null = null;
             let startIndex = 0;
 
-            // === FIX: ELIMINACIÓN DE FANTASMAS ===
-            // Si hay una selección activa (TransformHandle, etc.), NO leemos
-            // ningún snapshot porque los trazos seleccionados ya estarían "horneados"
-            // en esa imagen. Forzamos un rebuild desde 0.
+            // === FIX: Búsqueda basada en el Spine Cronológico ===
+            // Los snapshots ahora se ligan al evento exacto en el root del historial,
+            // garantizando que las modificaciones (TRANSFORM, etc) no reutilicen fotos.
             if (!this.selection.hasSelection()) {
-                for (let i = activeCommands.length - 1; i >= 0; i--) {
-                    snapshotBitmaps = await this.history.cacheManager.getSnapshot(activeCommands[i].id);
+                const spine = this.history.getTimelineSpine();
+                let foundSpineIndex = -1;
+                for (let i = spine.length - 1; i >= 0; i--) {
+                    snapshotBitmaps = await this.history.cacheManager.getSnapshot(spine[i].id);
                     if (snapshotBitmaps) {
-                        startIndex = i + 1;
+                        foundSpineIndex = i;
                         break;
+                    }
+                }
+
+                if (snapshotBitmaps) {
+                    const coveredSpineIds = new Set(spine.slice(0, foundSpineIndex + 1).map(e => e.id));
+                    for (let j = 0; j < activeCommands.length; j++) {
+                        if (coveredSpineIds.has(activeCommands[j].id)) {
+                            startIndex = j + 1;
+                        }
                     }
                 }
             }
@@ -98,12 +108,13 @@ export class CanvasRebuilder {
             // ── Guardado en Caché ─────────────────────────────────────────
             // Ya estaba protegido: solo guardamos si NO hay selección activa
             if (activeCommands.length > 0 && !this.selection.hasSelection()) {
-                const lastCmd = activeCommands[activeCommands.length - 1];
+                const spine = this.history.getTimelineSpine();
+                const lastSpineEnd = spine.length > 0 ? spine[spine.length - 1] : null;
                 const isKeyframe = (activeCommands.length % 50 === 0);
 
-                if (timeTaken > 8 || isKeyframe) {
+                if (lastSpineEnd && (timeTaken > 8 || isKeyframe)) {
                     // Pasamos el engine completo para que tome foto de todas las capas
-                    this.history.cacheManager.bake(lastCmd.id, this.engine, isKeyframe);
+                    this.history.cacheManager.bake(lastSpineEnd.id, this.engine, isKeyframe);
                 }
 
                 if (this.checkpoint && (timeTaken > 8 || isKeyframe)) {

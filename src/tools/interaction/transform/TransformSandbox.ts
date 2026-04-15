@@ -21,6 +21,8 @@ import { CommandFactory } from '../../../history/commands/CommandFactory';
 export class TransformSandbox {
     private _canvas: HTMLCanvasElement;
 
+    private _generationId: number = 0;
+
     constructor(width: number, height: number) {
         this._canvas = document.createElement('canvas');
         this._canvas.width = width;
@@ -36,6 +38,7 @@ export class TransformSandbox {
      * Llama a storage si algún trazo no tiene datos en RAM.
      */
     public async generate(ctx: ToolContext): Promise<void> {
+        const currentGen = ++this._generationId;
         const sCtx = this._canvas.getContext('2d')!;
         sCtx.clearRect(0, 0, this._canvas.width, this._canvas.height);
 
@@ -49,6 +52,8 @@ export class TransformSandbox {
 
             const cmd = CommandFactory.create(ev, ctx.activeBrush);
             await cmd.loadDataIfNeeded(ctx.storage);
+
+            if (this._generationId !== currentGen) return;
 
             const t = transforms.get(eventId);
             if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];

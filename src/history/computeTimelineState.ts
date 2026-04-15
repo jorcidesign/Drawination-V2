@@ -20,15 +20,9 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
 
     for (const event of timeline) {
         if (event.type === 'UNDO') {
-            const count = event.undoCount ?? 1;
-            for (let c = 0; c < count; c++) {
-                if (spine.length > 0) undone.push(spine.pop()!);
-            }
+            if (spine.length > 0) undone.push(spine.pop()!);
         } else if (event.type === 'REDO') {
-            const count = event.undoCount ?? 1;
-            for (let c = 0; c < count; c++) {
-                if (undone.length > 0) spine.push(undone.pop()!);
-            }
+            if (undone.length > 0) spine.push(undone.pop()!);
         } else {
             spine.push(event);
             undone.length = 0;
@@ -94,20 +88,12 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
 
             case 'LAYER_DELETE': {
                 createdLayers.delete(ev.layerIndex);
-
                 if (derivedActiveLayerIndex === ev.layerIndex) {
-                    const currentOrder = ev.layerOrder ?? layerOrder;
-                    const currentPos = currentOrder.indexOf(ev.layerIndex);
-                    let newActive = -1;
-                    for (let i = currentPos - 1; i >= 0; i--) {
-                        if (createdLayers.has(currentOrder[i])) { newActive = currentOrder[i]; break; }
+                    let newActive = 0;
+                    for (let i = ev.layerIndex - 1; i >= 0; i--) {
+                        if (createdLayers.has(i)) { newActive = i; break; }
                     }
-                    if (newActive === -1) {
-                        for (let i = currentPos + 1; i < currentOrder.length; i++) {
-                            if (createdLayers.has(currentOrder[i])) { newActive = currentOrder[i]; break; }
-                        }
-                    }
-                    derivedActiveLayerIndex = newActive !== -1 ? newActive : 0;
+                    derivedActiveLayerIndex = newActive;
                 }
                 break;
             }
@@ -132,23 +118,18 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
 
             case 'LAYER_REORDER': {
                 if (ev.layerOrder) {
-                    // === FIX: Confiamos ciegamente en el payload del evento que ahora siempre trae los 10 elementos
-                    layerOrder = [...ev.layerOrder];
+                    const uncreated = layerOrder.filter(id => !createdLayers.has(id));
+                    layerOrder = [...uncreated, ...ev.layerOrder];
                 }
                 break;
             }
 
             case 'LAYER_MERGE_DOWN': {
                 const source = ev.layerIndex;
-                const orderToUse = ev.layerOrder ?? layerOrder;
-                const currentIndexInOrder = orderToUse.indexOf(source);
+                const currentIndexInOrder = layerOrder.indexOf(source);
                 let target = -1;
-
                 for (let i = currentIndexInOrder - 1; i >= 0; i--) {
-                    if (createdLayers.has(orderToUse[i])) {
-                        target = orderToUse[i];
-                        break;
-                    }
+                    if (createdLayers.has(layerOrder[i])) { target = layerOrder[i]; break; }
                 }
 
                 if (target >= 0) {
@@ -157,11 +138,11 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
                         if (value === source) layerRoute.set(key, finalDest);
                     }
                     layerRoute.set(source, finalDest);
+                    const layer = layersState.get(source) ?? buildDefaultLayerState(source);
+                    layersState.set(source, { ...layer, visible: false });
                     createdLayers.delete(source);
 
-                    if (derivedActiveLayerIndex === source) {
-                        derivedActiveLayerIndex = finalDest;
-                    }
+                    if (derivedActiveLayerIndex === source) derivedActiveLayerIndex = finalDest;
                 }
                 break;
             }

@@ -1,13 +1,13 @@
-// src/history/commands/EraseCommand.ts
+// src/history/commands/StrokeCommand.ts
 import type { ICommand } from './ICommand';
 import type { TimelineEvent } from '../TimelineTypes';
 import type { StorageManager } from '../../storage/StorageManager';
 import { BinarySerializer } from '../../core/io/BinarySerializer';
 import type { BrushEngine } from '../../core/render/BrushEngine';
 import { CommandFactory } from './CommandFactory';
-import { ProfileRegistry } from '../../core/render/profiles/ProfileRegistry'; // <-- AÑADIDO
+import { ProfileRegistry } from '../../core/render/profiles/ProfileRegistry';
 
-export class EraseCommand implements ICommand {
+export class StrokeCommand implements ICommand {
     private event: TimelineEvent;
     private brush: BrushEngine;
     public transform?: number[];
@@ -27,7 +27,14 @@ export class EraseCommand implements ICommand {
 
     public execute(ctx: CanvasRenderingContext2D): void {
         if (!this.event.data) return;
-        const pts = BinarySerializer.decode(this.event.data);
+
+        // 🚀 BATALLA 1 (MEMOIZACIÓN): Caché de RAM. 
+        // Descomprimir un binario toma ~2ms. Cachearlo evita que un Ctrl+Z
+        // masivo conmute todo el CPU del hilo principal.
+        if (!this.event.decodedPoints) {
+            this.event.decodedPoints = BinarySerializer.decode(this.event.data);
+        }
+        const pts = this.event.decodedPoints;
 
         ctx.save();
         if (this.transform) {
@@ -38,7 +45,6 @@ export class EraseCommand implements ICommand {
             );
         }
 
-        // === FIX === 
         const historicalProfile = ProfileRegistry[this.event.profileId] || this.brush.profile;
         this.brush.reproduceStroke(ctx, historicalProfile, this.event.color, this.event.size, this.event.opacity, pts);
 
@@ -48,4 +54,4 @@ export class EraseCommand implements ICommand {
     public getRawData(): ArrayBuffer | null { return this.event.data; }
 }
 
-CommandFactory.register('ERASE', EraseCommand);
+CommandFactory.register('STROKE', StrokeCommand);

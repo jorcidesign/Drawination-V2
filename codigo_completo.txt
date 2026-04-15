@@ -2920,16 +2920,26 @@ export class CanvasRebuilder {
             let snapshotBitmaps: Map<number, ImageBitmap> | null = null;
             let startIndex = 0;
 
-            // === FIX: ELIMINACIÓN DE FANTASMAS ===
-            // Si hay una selección activa (TransformHandle, etc.), NO leemos
-            // ningún snapshot porque los trazos seleccionados ya estarían "horneados"
-            // en esa imagen. Forzamos un rebuild desde 0.
+            // === FIX: Búsqueda basada en el Spine Cronológico ===
+            // Los snapshots ahora se ligan al evento exacto en el root del historial,
+            // garantizando que las modificaciones (TRANSFORM, etc) no reutilicen fotos.
             if (!this.selection.hasSelection()) {
-                for (let i = activeCommands.length - 1; i >= 0; i--) {
-                    snapshotBitmaps = await this.history.cacheManager.getSnapshot(activeCommands[i].id);
+                const spine = this.history.getTimelineSpine();
+                let foundSpineIndex = -1;
+                for (let i = spine.length - 1; i >= 0; i--) {
+                    snapshotBitmaps = await this.history.cacheManager.getSnapshot(spine[i].id);
                     if (snapshotBitmaps) {
-                        startIndex = i + 1;
+                        foundSpineIndex = i;
                         break;
+                    }
+                }
+
+                if (snapshotBitmaps) {
+                    const coveredSpineIds = new Set(spine.slice(0, foundSpineIndex + 1).map(e => e.id));
+                    for (let j = 0; j < activeCommands.length; j++) {
+                        if (coveredSpineIds.has(activeCommands[j].id)) {
+                            startIndex = j + 1;
+                        }
                     }
                 }
             }
@@ -2976,12 +2986,13 @@ export class CanvasRebuilder {
             // ── Guardado en Caché ─────────────────────────────────────────
             // Ya estaba protegido: solo guardamos si NO hay selección activa
             if (activeCommands.length > 0 && !this.selection.hasSelection()) {
-                const lastCmd = activeCommands[activeCommands.length - 1];
+                const spine = this.history.getTimelineSpine();
+                const lastSpineEnd = spine.length > 0 ? spine[spine.length - 1] : null;
                 const isKeyframe = (activeCommands.length % 50 === 0);
 
-                if (timeTaken > 8 || isKeyframe) {
+                if (lastSpineEnd && (timeTaken > 8 || isKeyframe)) {
                     // Pasamos el engine completo para que tome foto de todas las capas
-                    this.history.cacheManager.bake(lastCmd.id, this.engine, isKeyframe);
+                    this.history.cacheManager.bake(lastSpineEnd.id, this.engine, isKeyframe);
                 }
 
                 if (this.checkpoint && (timeTaken > 8 || isKeyframe)) {
@@ -4994,10 +5005,14 @@ export class WorkspaceController {
 
         this.eventBus.on('SHOW_NEW_PROJECT', () => this.newProjectModal.show());
 
+        // Reemplaza el bloque de NEW_PROJECT:
         this.eventBus.on('NEW_PROJECT', async ({ width, height }) => {
             this.eventBus.emit('GLOBAL_INTERRUPTION');
             this.history.timeline = [];
-            this.history.rebuildSpatialGrid();
+
+            // 🚀 OPTIMIZACIÓN LAZY: Vaciar la memoria es O(1)
+            this.history.spatialGrid.clear();
+
             this.history['invalidateCache']?.();
             this.selection.clear();
             this.engine.clearAllLayers();
@@ -5035,10 +5050,14 @@ export class WorkspaceController {
             this.rebuilder.debugDrawPoints(this.activeBrush);
         });
 
+        // Reemplaza el bloque de CLEAR_ALL:
         this.eventBus.on('CLEAR_ALL', async () => {
             this.eventBus.emit('GLOBAL_INTERRUPTION');
             this.history.timeline = [];
-            this.history.rebuildSpatialGrid();
+
+            // 🚀 OPTIMIZACIÓN LAZY: Vaciar la memoria es O(1)
+            this.history.spatialGrid.clear();
+
             this.history['invalidateCache']?.();
             this.selection.clear();
             this.engine.clearAllLayers();
@@ -5296,7 +5315,7 @@ export class WorkspaceController {
         reorderEv.isSaved = true;
 
         this.history.invalidateCache();
-        this.history.rebuildSpatialGrid();
+        // this.history.rebuildSpatialGrid();
 
         await this.rebuilder.rebuild(this.activeBrush);
         this.eventBus.emit('SYNC_LAYERS_CSS');
@@ -6452,7 +6471,6 @@ import type { PointerData } from '../../input/InputManager';
 import { ToolRegistry } from '../core/ToolRegistry';
 import { BinarySerializer } from '../../core/io/BinarySerializer';
 
-// ¡Magia de TypeScript! Extendemos el EventBus sin tocar el archivo original
 declare module '../../input/EventBus' {
     interface AppEventMap {
         'SET_TOOL_VECTOR_ERASER': void;
@@ -6463,12 +6481,10 @@ export class VectorEraserTool implements ITool {
     public readonly id = 'vector-eraser';
     private ctx: ToolContext;
     private erasing = false;
-    private readonly eraserRadius = 15; // Radio de tolerancia (hit-test)
+    private readonly eraserRadius = 15;
 
     constructor(ctx: ToolContext) {
         this.ctx = ctx;
-
-        // La herramienta se auto-gestiona escuchando al EventBus
         this.ctx.eventBus.on('SET_TOOL_VECTOR_ERASER', () => {
             this.ctx.eventBus.emit('REQUEST_TOOL_SWITCH', this.id);
         });
@@ -6486,6 +6502,10 @@ export class VectorEraserTool implements ITool {
 
     public onPointerDown(data: PointerData) {
         this.erasing = true;
+
+        // 🚀 OPTIMIZACIÓN LAZY: Se calcula al disparar la bomba
+        this.ctx.history.rebuildSpatialGrid();
+
         this.performErase(data);
     }
 
@@ -6501,7 +6521,6 @@ export class VectorEraserTool implements ITool {
     private async performErase(data: PointerData) {
         const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
 
-        // 1. Crear BoundingBox de consulta rápida
         const queryBbox = {
             minX: canvasPos.x - this.eraserRadius,
             minY: canvasPos.y - this.eraserRadius,
@@ -6509,27 +6528,32 @@ export class VectorEraserTool implements ITool {
             maxY: canvasPos.y + this.eraserRadius
         };
 
-        // 2. Consulta al SpatialHashGrid (Filtro grueso)
         const candidates = this.ctx.history.spatialGrid.query(queryBbox);
         if (candidates.size === 0) return;
 
         const state = this.ctx.history.getState();
+
+        if (state.layersState.get(state.derivedActiveLayerIndex)?.locked) {
+            return;
+        }
+
         const idsToHide: string[] = [];
         const radiusSq = this.eraserRadius * this.eraserRadius;
 
-        // 3. Filtro fino: Distancia punto-segmento
         for (const id of candidates) {
-            if (state.hiddenIds.has(id)) continue; // Si ya está oculto, ignorar
+            if (state.hiddenIds.has(id)) continue;
 
             const event = state.active.find(e => e.id === id);
             if (!event || !event.data) continue;
+
+            const routedLayer = state.layerRoute.get(event.layerIndex) ?? event.layerIndex;
+            if (routedLayer !== state.derivedActiveLayerIndex) continue;
 
             const t = state.transforms.get(id) ?? new DOMMatrix();
             const pts = BinarySerializer.decode(event.data);
 
             let hit = false;
             for (let i = 0; i < pts.length - 1; i++) {
-                // Aplicar matriz de transformación (por si el trazo fue movido)
                 const ax = pts[i].x * t.a + pts[i].y * t.c + t.e;
                 const ay = pts[i].x * t.b + pts[i].y * t.d + t.f;
                 const bx = pts[i + 1].x * t.a + pts[i + 1].y * t.c + t.e;
@@ -6544,37 +6568,29 @@ export class VectorEraserTool implements ITool {
             if (hit) idsToHide.push(id);
         }
 
-        // 4. Si tocamos algo, despachamos el comando HIDE inmediatamente
         if (idsToHide.length > 0) {
-            // <--- FIX: Le pasamos this.id para que la consola diga "vector-eraser"
             const hideEvent = this.ctx.history.commitHide(idsToHide, this.id);
             await this.ctx.storage.saveEvent(hideEvent);
             hideEvent.isSaved = true;
-
-            // Rebuild instantáneo para dar feedback de que el trazo "explotó"
             await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
         }
     }
 
-    // Matemática pura: Distancia cuadrada de un punto a un segmento de línea
     private distToSegmentSq(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
         const l2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
         if (l2 === 0) return (px - ax) * (px - ax) + (py - ay) * (py - ay);
-
         let t = ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / l2;
-        t = Math.max(0, Math.min(1, t)); // Clamp al segmento
-
+        t = Math.max(0, Math.min(1, t));
         const projX = ax + t * (bx - ax);
         const projY = ay + t * (by - ay);
         return (px - projX) * (px - projX) + (py - projY) * (py - projY);
     }
 }
 
-// Auto-registro en la fábrica
 ToolRegistry.register({
     id: 'vector-eraser',
     factory: (ctx) => new VectorEraserTool(ctx),
-    downShortcut: 'shift+e', // Atajo de teclado directo
+    downShortcut: 'shift+e',
     isSticky: true
 });
 
@@ -6935,7 +6951,6 @@ export class TransformHandleRenderer {
 
 // src/tools/interaction/transform/TransformContextActions.ts
 import type { ToolContext } from '../../core/ITool';
-import type { BoundingBox } from '../../../core/math/BoundingBox';
 import type { TimelineEvent } from '../../../history/TimelineTypes';
 import { DiagnosticsService } from '../../../history/DiagnosticsService';
 import { TransformGestureHandler } from './TransformGestureHandler';
@@ -7128,7 +7143,8 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
         ctx.undoRedoController.registerInterceptor(this);
 
         // Actualización post-viaje de Undo/Redo
-        ctx.eventBus.on('HISTORY_RESTORED', async ({ event, action }) => {
+        ctx.eventBus.on('HISTORY_RESTORED', async ({ event }) => {
+            console.log(`[TransformHandle] HISTORY_RESTORED disparado. state: ${this.state}, ignore: ${this._ignoreHistoryRestored}, event.type: ${event?.type}`);
             if (this._ignoreHistoryRestored) return;
             if (this.state !== TransformState.FOCUSED) return;
             if (event.type !== 'TRANSFORM') return;
@@ -7136,6 +7152,7 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
 
             const ourIds = this._selectedIdsStr();
             const eventIds = [...event.targetIds].sort().join(',');
+            console.log(`[TransformHandle] Comparando IDs: ourIds=${ourIds} vs eventIds=${eventIds}`);
             if (ourIds !== eventIds) return;
 
             const freshBbox = this.ctx.history.getBboxForIds(event.targetIds);
@@ -7143,6 +7160,10 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
 
             await this.sandbox.generate(this.ctx);
             this.currentMatrix = [1, 0, 0, 1, 0, 0];
+
+            // Garantizar que la opacidad baje al 30% de nuevo tras el rebuild global del historial
+            this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '0.3';
+
             this._renderLivePreview();
         });
 
@@ -7187,12 +7208,14 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
     // ── MÁQUINA DE ESTADOS UNDO/REDO ──────────────────────────────────────
 
     public async beforeUndo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
+        console.log(`[TransformHandle] beforeUndo. state: ${this.state}, busy: ${this.isBusy()}, nextEvent.type: ${nextEvent?.type}`);
         if (this.isBusy()) return { handled: true };
 
         // [FOCO]
         if (this.state === TransformState.IDLE) {
             if (nextEvent?.type === 'TRANSFORM' && nextEvent.targetIds) {
                 const bboxPostTransform = this.ctx.history.getBboxForIds(nextEvent.targetIds);
+                console.log(`[TransformHandle] beforeUndo IDLE -> INTERCEPT. bbox:`, bboxPostTransform);
                 if (bboxPostTransform) {
                     this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bboxPostTransform);
                     this.lastAction = 'none';
@@ -7213,11 +7236,13 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
                 nextEvent.targetIds &&
                 this._selectedIdsStr() === [...nextEvent.targetIds].sort().join(',')
             ) {
+                console.log(`[TransformHandle] beforeUndo FOCUSED -> TRAVEL. Dejando que historial actue.`);
                 DiagnosticsService.logTransformState('travel_undo', this.lastAction);
                 return { handled: false }; // Deja que el historial actúe
             }
 
             // [SALIDA]
+            console.log(`[TransformHandle] beforeUndo FOCUSED -> EXIT. nextEvent.type no es TRANSFORM o IDs cambian. Saliendo...`);
             DiagnosticsService.logTransformState('undo_exit', this.lastAction);
             await this._exitToLasso();
             return { handled: true }; // Intercepta actuando como Escape
@@ -7227,6 +7252,7 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
     }
 
     public async beforeRedo(nextEvent: TimelineEvent | null): Promise<InterceptorResult> {
+        console.log(`[TransformHandle] beforeRedo. state: ${this.state}, busy: ${this.isBusy()}, nextEvent.type: ${nextEvent?.type}`);
         if (this.isBusy()) return { handled: true };
 
         // [FOCO]
@@ -7234,6 +7260,7 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
             if (nextEvent?.type === 'TRANSFORM' && nextEvent.targetIds) {
                 // Al rehacer, el evento aún no se aplica. Obtenemos bbox en Posición A.
                 const bboxPreTransform = this.ctx.history.getBboxForIds(nextEvent.targetIds);
+                console.log(`[TransformHandle] beforeRedo IDLE -> INTERCEPT. bbox pre-transform:`, bboxPreTransform);
                 if (bboxPreTransform) {
                     this.ctx.selection.setSelection(new Set(nextEvent.targetIds), bboxPreTransform);
                     this.lastAction = 'none';
@@ -7254,11 +7281,13 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
                 nextEvent.targetIds &&
                 this._selectedIdsStr() === [...nextEvent.targetIds].sort().join(',')
             ) {
+                console.log(`[TransformHandle] beforeRedo FOCUSED -> TRAVEL.`);
                 DiagnosticsService.logTransformState('travel_redo', this.lastAction);
                 return { handled: false }; // Deja que el historial actúe
             }
 
             // [SALIDA]
+            console.log(`[TransformHandle] beforeRedo FOCUSED -> EXIT. nextEvent.type no es TRANSFORM o IDs cambian.`);
             DiagnosticsService.logTransformState('redo_exit', this.lastAction);
             await this._exitToLasso();
             return { handled: true }; // Intercepta cerrando la herramienta
@@ -7323,26 +7352,33 @@ export class TransformHandleTool implements ITool, IUndoInterceptor {
 
             const targetIds = Array.from(this.ctx.selection.selectedIds);
 
+            console.log(`[TransformHandle] onPointerUp. Committing transform de ${targetIds.length} trazos. M=`, this.currentMatrix);
+
             this._ignoreHistoryRestored = true;
             const event = await this.ctx.history.commitTransform(targetIds, this.currentMatrix);
             await this.ctx.storage.saveEvent(event);
             (event as any).isSaved = true;
             this.ctx.history.enforceRamLimit();
 
-            // === FIX APLICADO AQUÍ (this.ctx.rebuilder y this.ctx.activeBrush) ===
+            console.log(`[TransformHandle] Evento transform guardado, ID=${event.id}. Generando sandbox...`);
+
+            // Sincronizar el sandbox y variables locales *antes* del rebuild para evitar el race condition
+            const freshBbox = this.ctx.history.getBboxForIds(targetIds);
+            if (freshBbox && this.state === TransformState.FOCUSED) {
+                this.ctx.selection.setBbox(freshBbox);
+            }
+
+            await this.sandbox.generate(this.ctx);
+            this.currentMatrix = [1, 0, 0, 1, 0, 0];
+
             await this.ctx.rebuilder.rebuild(this.ctx.activeBrush);
             this._ignoreHistoryRestored = false;
 
             if (this.state !== TransformState.FOCUSED) return;
-
-            const freshBbox = this.ctx.history.getBboxForIds(targetIds);
-            if (freshBbox) this.ctx.selection.setBbox(freshBbox);
-
-            await this.sandbox.generate(this.ctx);
-            this.currentMatrix = [1, 0, 0, 1, 0, 0];
         }
 
         if (this.state === TransformState.FOCUSED) {
+            this.ctx.engine.getActiveLayerContext().canvas.style.opacity = '0.3';
             this._renderLivePreview();
         }
     }
@@ -7738,6 +7774,8 @@ import { CommandFactory } from '../../../history/commands/CommandFactory';
 export class TransformSandbox {
     private _canvas: HTMLCanvasElement;
 
+    private _generationId: number = 0;
+
     constructor(width: number, height: number) {
         this._canvas = document.createElement('canvas');
         this._canvas.width = width;
@@ -7753,6 +7791,7 @@ export class TransformSandbox {
      * Llama a storage si algún trazo no tiene datos en RAM.
      */
     public async generate(ctx: ToolContext): Promise<void> {
+        const currentGen = ++this._generationId;
         const sCtx = this._canvas.getContext('2d')!;
         sCtx.clearRect(0, 0, this._canvas.width, this._canvas.height);
 
@@ -7766,6 +7805,8 @@ export class TransformSandbox {
 
             const cmd = CommandFactory.create(ev, ctx.activeBrush);
             await cmd.loadDataIfNeeded(ctx.storage);
+
+            if (this._generationId !== currentGen) return;
 
             const t = transforms.get(eventId);
             if (t) cmd.transform = [t.a, t.b, t.c, t.d, t.e, t.f];
@@ -7832,6 +7873,10 @@ export class LassoTool implements ITool {
         this.mode = 'drawing';
         this.polygon = [];
         this.ctx.selection.clear();
+
+        // 🚀 OPTIMIZACIÓN LAZY: Se calcula solo al tocar el lienzo con el Lazo
+        this.ctx.history.rebuildSpatialGrid();
+
         const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
         this.polygon.push({ x: canvasPos.x, y: canvasPos.y, pressure: 1 });
         this.ctx.engine.clearPaintingCanvas();
@@ -7888,7 +7933,6 @@ export class LassoTool implements ITool {
         const state = this.ctx.history.getState();
         const foundIds = new Set<string>();
 
-        // 🛡️ EL ESCUDO: Si la capa está bloqueada, el Lazo no selecciona nada en ella.
         if (state.layersState.get(state.derivedActiveLayerIndex)?.locked) {
             console.info("🔒 Capa bloqueada. Selección con lazo ignorada.");
             return;
@@ -7899,7 +7943,6 @@ export class LassoTool implements ITool {
             const event = state.active.find(ev => ev.id === eventId);
             if (!event || (event.type !== 'STROKE' && event.type !== 'ERASE')) continue;
 
-            // Solo seleccionamos los trazos que pertenecen a la capa activa real o redirigida
             const routedLayer = state.layerRoute.get(event.layerIndex) ?? event.layerIndex;
             if (routedLayer !== state.derivedActiveLayerIndex) continue;
 
@@ -13428,19 +13471,11 @@ export class UndoRedoController {
     private storage: StorageManager;
 
     constructor(
-        history: HistoryManager,
-        rebuilder: CanvasRebuilder,
-        activeBrush: BrushEngine,
-        eventBus: EventBus,
-        commandContext: CommandContext,
-        storage: StorageManager,
+        history: HistoryManager, rebuilder: CanvasRebuilder, activeBrush: BrushEngine,
+        eventBus: EventBus, commandContext: CommandContext, storage: StorageManager,
     ) {
-        this.history = history;
-        this.rebuilder = rebuilder;
-        this.activeBrush = activeBrush;
-        this.eventBus = eventBus;
-        this.commandContext = commandContext;
-        this.storage = storage;
+        this.history = history; this.rebuilder = rebuilder; this.activeBrush = activeBrush;
+        this.eventBus = eventBus; this.commandContext = commandContext; this.storage = storage;
     }
 
     public registerInterceptor(interceptor: IUndoInterceptor): void {
@@ -13452,15 +13487,10 @@ export class UndoRedoController {
         if (idx !== -1) this.interceptors.splice(idx, 1);
     }
 
-    // ── SMART REBUILDING: Identifica si un evento requiere repintar el canvas ──
     private _requiresCanvasRebuild(eventType: ActionType): boolean {
         const cssOnlyEvents: ActionType[] = [
-            'BACKGROUND_COLOR',
-            'LAYER_OPACITY',
-            'LAYER_VISIBILITY',
-            'LAYER_REORDER',
-            'LAYER_LOCK',
-            'LAYER_SELECT'
+            'BACKGROUND_COLOR', 'LAYER_OPACITY', 'LAYER_VISIBILITY',
+            'LAYER_REORDER', 'LAYER_LOCK', 'LAYER_SELECT'
         ];
         return !cssOnlyEvents.includes(eventType);
     }
@@ -13478,7 +13508,6 @@ export class UndoRedoController {
 
         DiagnosticsService.logUndoRedo('UNDO', undoneEvent);
 
-        // Persistir el evento de control UNDO en IDB
         const undoControlEvent = this.history.timeline[this.history.timeline.length - 1];
         if (undoControlEvent?.type === 'UNDO') {
             undoControlEvent.isSaved = false;
@@ -13486,22 +13515,18 @@ export class UndoRedoController {
             undoControlEvent.isSaved = true;
         }
 
-        this.history.rebuildSpatialGrid();
+        // 🚀 OPTIMIZACIÓN LAZY: Eliminado this.history.rebuildSpatialGrid()
 
-        // === OPTIMIZACIÓN: Solo reconstruimos si alteró píxeles ===
         if (this._requiresCanvasRebuild(undoneEvent.type)) {
             await this.rebuilder.rebuild(this.activeBrush);
         } else {
-            // Si es CSS puro (fondo, opacidad de capa, etc), solo sincronizamos el DOM
             this.eventBus.emit('SYNC_LAYERS_CSS');
         }
 
         this.history.enforceRamLimit();
 
         const cmd = CommandFactory.create(undoneEvent, this.activeBrush);
-        if (cmd.onAfterUndo) {
-            await cmd.onAfterUndo(this.commandContext);
-        }
+        if (cmd.onAfterUndo) await cmd.onAfterUndo(this.commandContext);
 
         this.eventBus.emit('HISTORY_RESTORED', { event: undoneEvent, action: 'UNDO' });
     }
@@ -13519,7 +13544,6 @@ export class UndoRedoController {
 
         DiagnosticsService.logUndoRedo('REDO', redoneEvent);
 
-        // Persistir el evento de control REDO en IDB
         const redoControlEvent = this.history.timeline[this.history.timeline.length - 1];
         if (redoControlEvent?.type === 'REDO') {
             redoControlEvent.isSaved = false;
@@ -13527,9 +13551,8 @@ export class UndoRedoController {
             redoControlEvent.isSaved = true;
         }
 
-        this.history.rebuildSpatialGrid();
+        // 🚀 OPTIMIZACIÓN LAZY: Eliminado this.history.rebuildSpatialGrid()
 
-        // === OPTIMIZACIÓN: Solo reconstruimos si alteró píxeles ===
         if (this._requiresCanvasRebuild(redoneEvent.type)) {
             await this.rebuilder.rebuild(this.activeBrush);
         } else {
@@ -13539,9 +13562,7 @@ export class UndoRedoController {
         this.history.enforceRamLimit();
 
         const cmd = CommandFactory.create(redoneEvent, this.activeBrush);
-        if (cmd.onAfterRedo) {
-            await cmd.onAfterRedo(this.commandContext);
-        }
+        if (cmd.onAfterRedo) await cmd.onAfterRedo(this.commandContext);
 
         this.eventBus.emit('HISTORY_RESTORED', { event: redoneEvent, action: 'REDO' });
     }
@@ -13773,10 +13794,8 @@ export class HistoryManager {
 
     public push(event: TimelineEvent): void {
         const hadUndoneEvents = this.getState().undone.length > 0;
-
         this.timeline.push(event);
         this.invalidateCache();
-
         if (hadUndoneEvents) {
             const allValidIds = this.timeline.map(e => e.id);
             this.cacheManager.garbageCollect(allValidIds);
@@ -13786,17 +13805,7 @@ export class HistoryManager {
     public applyUndo(): TimelineEvent | null {
         const { spine } = this.getState();
         if (spine.length === 0) return null;
-
         const eventToUndo = spine[spine.length - 1];
-        const groupId = eventToUndo.groupId;
-
-        let undoCount = 1;
-        if (groupId) {
-            for (let i = spine.length - 2; i >= 0; i--) {
-                if (spine[i].groupId === groupId) undoCount++;
-                else break;
-            }
-        }
 
         this.push({
             id: crypto.randomUUID(), type: 'UNDO',
@@ -13805,38 +13814,37 @@ export class HistoryManager {
             color: '', size: 0, opacity: 1,
             timestamp: Date.now(), data: null,
             bbox: eventToUndo.bbox, isSaved: false,
-            undoCount
         });
 
-        const firstEventInGroup = spine[spine.length - undoCount];
         const allIds = this.timeline.map(e => e.id);
-        this.cacheManager.invalidateFrom(firstEventInGroup.id, allIds);
+        this.cacheManager.invalidateFrom(eventToUndo.id, allIds);
 
-        // === FIX DE CACHÉ ENVENENADA ===
-        // Si deshicimos un evento que alteró un trazo (Transform, Hide, etc),
-        // borramos todas las fotos de caché para que el Rebuilder lo pinte
-        // desde cero en su posición original, evitando "saltos fantasma".
-        if (firstEventInGroup.type !== 'STROKE' && firstEventInGroup.type !== 'ERASE' && firstEventInGroup.type !== 'FILL') {
-            this.cacheManager.clearAll();
+        // === FIX: Invalidador Retroactivo (Undo) ===
+        // Si deshacemos un TRANSFORM o HIDE, los snapshots creados antes de este evento
+        // pero después de los trazos afectados (ej. snapshots de S5) retienen la imagen transformada
+        // o no transformada incorrectamente. Debemos purgar desde el trazo más antiguo afectado.
+        if ((eventToUndo.type === 'TRANSFORM' || eventToUndo.type === 'HIDE') && eventToUndo.targetIds) {
+            const { active } = this.getState(); // recalculado
+            let oldestIndex = active.length;
+            for (const id of eventToUndo.targetIds) {
+                const idx = active.findIndex(e => e.id === id);
+                if (idx !== -1 && idx < oldestIndex) oldestIndex = idx;
+            }
+            if (oldestIndex < active.length) {
+                const validIds = active.slice(0, oldestIndex).map(e => e.id);
+                this.cacheManager.garbageCollect(validIds);
+            } else {
+                this.cacheManager.clearAll();
+            }
         }
 
-        return firstEventInGroup;
+        return eventToUndo;
     }
 
     public applyRedo(): TimelineEvent | null {
         const { undone } = this.getState();
         if (undone.length === 0) return null;
-
         const eventToRedo = undone[undone.length - 1];
-        const groupId = eventToRedo.groupId;
-
-        let redoCount = 1;
-        if (groupId) {
-            for (let i = undone.length - 2; i >= 0; i--) {
-                if (undone[i].groupId === groupId) redoCount++;
-                else break;
-            }
-        }
 
         this.push({
             id: crypto.randomUUID(), type: 'REDO',
@@ -13845,16 +13853,27 @@ export class HistoryManager {
             color: '', size: 0, opacity: 1,
             timestamp: Date.now(), data: null,
             bbox: eventToRedo.bbox, isSaved: false,
-            undoCount: redoCount
         });
 
-        const firstEventToRedo = undone[undone.length - redoCount];
         const allIds = this.timeline.map(e => e.id);
-        this.cacheManager.invalidateFrom(firstEventToRedo.id, allIds);
+        this.cacheManager.invalidateFrom(eventToRedo.id, allIds);
 
-        // === FIX DE CACHÉ ENVENENADA ===
-        if (firstEventToRedo.type !== 'STROKE' && firstEventToRedo.type !== 'ERASE' && firstEventToRedo.type !== 'FILL') {
-            this.cacheManager.clearAll();
+        // === FIX: Invalidador Retroactivo (Redo) ===
+        // Similar a Undo. Si rehacemos un TRANSFORM, debemos destruir snapshots huérfanos
+        // intermedios de los trazos que han sido envueltos por esta modificación.
+        if ((eventToRedo.type === 'TRANSFORM' || eventToRedo.type === 'HIDE') && eventToRedo.targetIds) {
+            const { active } = this.getState(); // recalculado
+            let oldestIndex = active.length;
+            for (const id of eventToRedo.targetIds) {
+                const idx = active.findIndex(e => e.id === id);
+                if (idx !== -1 && idx < oldestIndex) oldestIndex = idx;
+            }
+            if (oldestIndex < active.length) {
+                const validIds = active.slice(0, oldestIndex).map(e => e.id);
+                this.cacheManager.garbageCollect(validIds);
+            } else {
+                this.cacheManager.clearAll();
+            }
         }
 
         return eventToRedo;
@@ -13898,6 +13917,7 @@ export class HistoryManager {
 
         this.push(event);
 
+        // 🚀 OPTIMIZACIÓN LAZY: Insertar un solo trazo es rápido (O(1)), lo dejamos para mantener precisión a corto plazo
         if (event.bbox && (event.type === 'STROKE' || event.type === 'ERASE')) {
             this.spatialGrid.insert(event.id, event.bbox);
         }
@@ -13933,7 +13953,7 @@ export class HistoryManager {
         };
 
         this.push(event);
-        this.rebuildSpatialGrid();
+        // 🚀 OPTIMIZACIÓN LAZY: Eliminado this.rebuildSpatialGrid()
 
         DiagnosticsService.printMetrics(performance.now() - startTime, this, this.cacheManager);
         return event;
@@ -13972,13 +13992,10 @@ export class HistoryManager {
 
     public rebuildSpatialGrid(): void {
         this.spatialGrid.clear();
-        const { active, transforms, createdLayers, layerRoute } = this.getState();
+        const { active, transforms } = this.getState();
 
         for (const event of active) {
             if (!event.bbox || (event.type !== 'STROKE' && event.type !== 'ERASE')) continue;
-
-            const routedLayer = layerRoute.get(event.layerIndex) ?? event.layerIndex;
-            if (!createdLayers.has(routedLayer)) continue;
 
             const t = transforms.get(event.id);
             if (t && (t.e !== 0 || t.f !== 0 || t.a !== 1 || t.b !== 0)) {
@@ -14002,15 +14019,9 @@ export class HistoryManager {
     }
 
     public getActiveCommands(brush: BrushEngine): ICommand[] {
-        const state = this.getState();
-        const { active, transforms, hiddenIds, createdLayers, layerRoute } = state;
-
+        const { active, transforms, hiddenIds } = this.getState();
         return active
-            .filter(ev => {
-                if (hiddenIds.has(ev.id)) return false;
-                const routedLayer = layerRoute.get(ev.layerIndex) ?? ev.layerIndex;
-                return createdLayers.has(routedLayer);
-            })
+            .filter(ev => !hiddenIds.has(ev.id))
             .map(ev => {
                 const cmd = CommandFactory.create(ev, brush);
                 const t = transforms.get(ev.id);
@@ -14020,16 +14031,12 @@ export class HistoryManager {
     }
 
     public getBboxForIds(ids: string[]): BoundingBox | null {
-        const state = this.getState();
-        const { active, transforms, createdLayers, layerRoute } = state;
+        const { active, transforms } = this.getState();
         let gMinX = Infinity, gMinY = Infinity, gMaxX = -Infinity, gMaxY = -Infinity;
 
         for (const id of ids) {
             const ev = active.find(e => e.id === id);
             if (!ev?.bbox) continue;
-
-            const routedLayer = layerRoute.get(ev.layerIndex) ?? ev.layerIndex;
-            if (!createdLayers.has(routedLayer)) continue;
 
             const t = transforms.get(id) ?? new DOMMatrix();
             const { minX, minY, maxX, maxY } = ev.bbox;
@@ -14790,6 +14797,7 @@ export class TimelapseViewer {
 
 // src/history/TimelineTypes.ts
 import type { BoundingBox } from '../core/math/BoundingBox';
+import type { StrokePoint } from '../core/io/BinarySerializer'; // 🚀 IMPORTANTE para la optimización
 
 export type DrawingAction = 'STROKE' | 'ERASE' | 'FILL';
 export type TransformAction = 'TRANSFORM' | 'HIDE' | 'DUPLICATE_GROUP';
@@ -14804,6 +14812,7 @@ export interface TimelineEvent {
     readonly profileId: string;
     readonly layerIndex: number;
     readonly timestamp: number;
+
     readonly color: string;
     readonly size: number;
     readonly opacity: number;
@@ -14813,22 +14822,31 @@ export interface TimelineEvent {
     isCompressed?: boolean;
     isSaved?: boolean;
     readonly bbox?: BoundingBox;
+
     readonly targetIds?: string[];
     readonly transformMatrix?: number[];
+
     readonly sourceIds?: string[];
     readonly newIds?: string[];
+
     readonly layerName?: string;
     readonly fromIndex?: number;
     readonly toIndex?: number;
     readonly layerOpacity?: number;
     readonly visible?: boolean;
     readonly locked?: boolean;
+
     readonly backgroundColor?: string;
     readonly layerOrder?: number[];
 
-    // === FIX: Agrupación de transacciones ===
-    readonly groupId?: string;
-    readonly undoCount?: number;
+    // Propiedad legacy por la que TypeScript se quejaba
+    undoCount?: number;
+
+    // Agrupación de eventos lógicos
+    groupId?: string;
+
+    // 🚀 BATALLA 1 (MEMOIZACIÓN): Caché de los puntos matemáticos ya decodificados
+    decodedPoints?: StrokePoint[];
 }
 
 export interface LayerState {
@@ -14862,7 +14880,10 @@ export function isHideEvent(ev: TimelineEvent): ev is TimelineEvent & { targetId
     return ev.type === 'HIDE' && ev.targetIds != null;
 }
 export function isLayerEvent(ev: TimelineEvent): boolean {
-    return ev.type === 'LAYER_CREATE' || ev.type === 'LAYER_DELETE' || ev.type === 'LAYER_REORDER' || ev.type === 'LAYER_OPACITY' || ev.type === 'LAYER_VISIBILITY' || ev.type === 'LAYER_LOCK' || ev.type === 'LAYER_MERGE_DOWN';
+    return ev.type === 'LAYER_CREATE' || ev.type === 'LAYER_DELETE' ||
+        ev.type === 'LAYER_REORDER' || ev.type === 'LAYER_OPACITY' ||
+        ev.type === 'LAYER_VISIBILITY' || ev.type === 'LAYER_LOCK' ||
+        ev.type === 'LAYER_MERGE_DOWN';
 }
 export function isControlEvent(ev: TimelineEvent): boolean {
     return ev.type === 'UNDO' || ev.type === 'REDO' || ev.type === 'FLIP_H';
@@ -14900,15 +14921,9 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
 
     for (const event of timeline) {
         if (event.type === 'UNDO') {
-            const count = event.undoCount ?? 1;
-            for (let c = 0; c < count; c++) {
-                if (spine.length > 0) undone.push(spine.pop()!);
-            }
+            if (spine.length > 0) undone.push(spine.pop()!);
         } else if (event.type === 'REDO') {
-            const count = event.undoCount ?? 1;
-            for (let c = 0; c < count; c++) {
-                if (undone.length > 0) spine.push(undone.pop()!);
-            }
+            if (undone.length > 0) spine.push(undone.pop()!);
         } else {
             spine.push(event);
             undone.length = 0;
@@ -14974,20 +14989,12 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
 
             case 'LAYER_DELETE': {
                 createdLayers.delete(ev.layerIndex);
-
                 if (derivedActiveLayerIndex === ev.layerIndex) {
-                    const currentOrder = ev.layerOrder ?? layerOrder;
-                    const currentPos = currentOrder.indexOf(ev.layerIndex);
-                    let newActive = -1;
-                    for (let i = currentPos - 1; i >= 0; i--) {
-                        if (createdLayers.has(currentOrder[i])) { newActive = currentOrder[i]; break; }
+                    let newActive = 0;
+                    for (let i = ev.layerIndex - 1; i >= 0; i--) {
+                        if (createdLayers.has(i)) { newActive = i; break; }
                     }
-                    if (newActive === -1) {
-                        for (let i = currentPos + 1; i < currentOrder.length; i++) {
-                            if (createdLayers.has(currentOrder[i])) { newActive = currentOrder[i]; break; }
-                        }
-                    }
-                    derivedActiveLayerIndex = newActive !== -1 ? newActive : 0;
+                    derivedActiveLayerIndex = newActive;
                 }
                 break;
             }
@@ -15012,23 +15019,18 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
 
             case 'LAYER_REORDER': {
                 if (ev.layerOrder) {
-                    // === FIX: Confiamos ciegamente en el payload del evento que ahora siempre trae los 10 elementos
-                    layerOrder = [...ev.layerOrder];
+                    const uncreated = layerOrder.filter(id => !createdLayers.has(id));
+                    layerOrder = [...uncreated, ...ev.layerOrder];
                 }
                 break;
             }
 
             case 'LAYER_MERGE_DOWN': {
                 const source = ev.layerIndex;
-                const orderToUse = ev.layerOrder ?? layerOrder;
-                const currentIndexInOrder = orderToUse.indexOf(source);
+                const currentIndexInOrder = layerOrder.indexOf(source);
                 let target = -1;
-
                 for (let i = currentIndexInOrder - 1; i >= 0; i--) {
-                    if (createdLayers.has(orderToUse[i])) {
-                        target = orderToUse[i];
-                        break;
-                    }
+                    if (createdLayers.has(layerOrder[i])) { target = layerOrder[i]; break; }
                 }
 
                 if (target >= 0) {
@@ -15037,11 +15039,11 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
                         if (value === source) layerRoute.set(key, finalDest);
                     }
                     layerRoute.set(source, finalDest);
+                    const layer = layersState.get(source) ?? buildDefaultLayerState(source);
+                    layersState.set(source, { ...layer, visible: false });
                     createdLayers.delete(source);
 
-                    if (derivedActiveLayerIndex === source) {
-                        derivedActiveLayerIndex = finalDest;
-                    }
+                    if (derivedActiveLayerIndex === source) derivedActiveLayerIndex = finalDest;
                 }
                 break;
             }
@@ -15071,16 +15073,16 @@ export function computeTimelineState(timeline: TimelineEvent[]): TimelineState {
 
 ===== PM =====
 
-// src/history/commands/EraseCommand.ts
+// src/history/commands/StrokeCommand.ts
 import type { ICommand } from './ICommand';
 import type { TimelineEvent } from '../TimelineTypes';
 import type { StorageManager } from '../../storage/StorageManager';
 import { BinarySerializer } from '../../core/io/BinarySerializer';
 import type { BrushEngine } from '../../core/render/BrushEngine';
 import { CommandFactory } from './CommandFactory';
-import { ProfileRegistry } from '../../core/render/profiles/ProfileRegistry'; // <-- AÑADIDO
+import { ProfileRegistry } from '../../core/render/profiles/ProfileRegistry';
 
-export class EraseCommand implements ICommand {
+export class StrokeCommand implements ICommand {
     private event: TimelineEvent;
     private brush: BrushEngine;
     public transform?: number[];
@@ -15100,7 +15102,14 @@ export class EraseCommand implements ICommand {
 
     public execute(ctx: CanvasRenderingContext2D): void {
         if (!this.event.data) return;
-        const pts = BinarySerializer.decode(this.event.data);
+
+        // 🚀 BATALLA 1 (MEMOIZACIÓN): Caché de RAM. 
+        // Descomprimir un binario toma ~2ms. Cachearlo evita que un Ctrl+Z
+        // masivo conmute todo el CPU del hilo principal.
+        if (!this.event.decodedPoints) {
+            this.event.decodedPoints = BinarySerializer.decode(this.event.data);
+        }
+        const pts = this.event.decodedPoints;
 
         ctx.save();
         if (this.transform) {
@@ -15111,7 +15120,6 @@ export class EraseCommand implements ICommand {
             );
         }
 
-        // === FIX === 
         const historicalProfile = ProfileRegistry[this.event.profileId] || this.brush.profile;
         this.brush.reproduceStroke(ctx, historicalProfile, this.event.color, this.event.size, this.event.opacity, pts);
 
@@ -15121,7 +15129,7 @@ export class EraseCommand implements ICommand {
     public getRawData(): ArrayBuffer | null { return this.event.data; }
 }
 
-CommandFactory.register('ERASE', EraseCommand);
+CommandFactory.register('STROKE', StrokeCommand);
 
 ===== src/history/commands/LayerCommand.ts =====
 
@@ -15220,7 +15228,7 @@ class DummyCommand implements ICommand {
         this.id = ev.id;
         this.type = ev.type;
         this.bbox = ev.bbox;
-        if (import.meta.env.DEV) {
+        if (import.meta.env.DEV && ev.type !== 'DUPLICATE_GROUP') {
             console.warn(`[CommandFactory] No hay comando registrado para tipo: "${ev.type}". Usando DummyCommand.`);
         }
     }
@@ -15574,7 +15582,7 @@ import type { StorageManager } from '../../storage/StorageManager';
 import { BinarySerializer } from '../../core/io/BinarySerializer';
 import type { BrushEngine } from '../../core/render/BrushEngine';
 import { CommandFactory } from './CommandFactory';
-import { ProfileRegistry } from '../../core/render/profiles/ProfileRegistry'; // <-- AÑADIDO
+import { ProfileRegistry } from '../../core/render/profiles/ProfileRegistry';
 
 export class StrokeCommand implements ICommand {
     private event: TimelineEvent;
@@ -15596,7 +15604,14 @@ export class StrokeCommand implements ICommand {
 
     public execute(ctx: CanvasRenderingContext2D): void {
         if (!this.event.data) return;
-        const pts = BinarySerializer.decode(this.event.data);
+
+        // 🚀 BATALLA 1 (MEMOIZACIÓN): Caché de RAM. 
+        // Descomprimir un binario toma ~2ms. Cachearlo evita que un Ctrl+Z
+        // masivo conmute todo el CPU del hilo principal.
+        if (!this.event.decodedPoints) {
+            this.event.decodedPoints = BinarySerializer.decode(this.event.data);
+        }
+        const pts = this.event.decodedPoints;
 
         ctx.save();
         if (this.transform) {
@@ -15607,9 +15622,6 @@ export class StrokeCommand implements ICommand {
             );
         }
 
-        // === FIX === 
-        // Recuperamos el perfil histórico del registro y lo pasamos.
-        // Si por alguna razón no existe (retrocompatibilidad), caemos en el actual.
         const historicalProfile = ProfileRegistry[this.event.profileId] || this.brush.profile;
         this.brush.reproduceStroke(ctx, historicalProfile, this.event.color, this.event.size, this.event.opacity, pts);
 

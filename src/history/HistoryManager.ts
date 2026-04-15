@@ -68,10 +68,8 @@ export class HistoryManager {
 
     public push(event: TimelineEvent): void {
         const hadUndoneEvents = this.getState().undone.length > 0;
-
         this.timeline.push(event);
         this.invalidateCache();
-
         if (hadUndoneEvents) {
             const allValidIds = this.timeline.map(e => e.id);
             this.cacheManager.garbageCollect(allValidIds);
@@ -81,17 +79,7 @@ export class HistoryManager {
     public applyUndo(): TimelineEvent | null {
         const { spine } = this.getState();
         if (spine.length === 0) return null;
-
         const eventToUndo = spine[spine.length - 1];
-        const groupId = eventToUndo.groupId;
-
-        let undoCount = 1;
-        if (groupId) {
-            for (let i = spine.length - 2; i >= 0; i--) {
-                if (spine[i].groupId === groupId) undoCount++;
-                else break;
-            }
-        }
 
         this.push({
             id: crypto.randomUUID(), type: 'UNDO',
@@ -100,38 +88,37 @@ export class HistoryManager {
             color: '', size: 0, opacity: 1,
             timestamp: Date.now(), data: null,
             bbox: eventToUndo.bbox, isSaved: false,
-            undoCount
         });
 
-        const firstEventInGroup = spine[spine.length - undoCount];
         const allIds = this.timeline.map(e => e.id);
-        this.cacheManager.invalidateFrom(firstEventInGroup.id, allIds);
+        this.cacheManager.invalidateFrom(eventToUndo.id, allIds);
 
-        // === FIX DE CACHÉ ENVENENADA ===
-        // Si deshicimos un evento que alteró un trazo (Transform, Hide, etc),
-        // borramos todas las fotos de caché para que el Rebuilder lo pinte
-        // desde cero en su posición original, evitando "saltos fantasma".
-        if (firstEventInGroup.type !== 'STROKE' && firstEventInGroup.type !== 'ERASE' && firstEventInGroup.type !== 'FILL') {
-            this.cacheManager.clearAll();
+        // === FIX: Invalidador Retroactivo (Undo) ===
+        // Si deshacemos un TRANSFORM o HIDE, los snapshots creados antes de este evento
+        // pero después de los trazos afectados (ej. snapshots de S5) retienen la imagen transformada
+        // o no transformada incorrectamente. Debemos purgar desde el trazo más antiguo afectado.
+        if ((eventToUndo.type === 'TRANSFORM' || eventToUndo.type === 'HIDE') && eventToUndo.targetIds) {
+            const { active } = this.getState(); // recalculado
+            let oldestIndex = active.length;
+            for (const id of eventToUndo.targetIds) {
+                const idx = active.findIndex(e => e.id === id);
+                if (idx !== -1 && idx < oldestIndex) oldestIndex = idx;
+            }
+            if (oldestIndex < active.length) {
+                const validIds = active.slice(0, oldestIndex).map(e => e.id);
+                this.cacheManager.garbageCollect(validIds);
+            } else {
+                this.cacheManager.clearAll();
+            }
         }
 
-        return firstEventInGroup;
+        return eventToUndo;
     }
 
     public applyRedo(): TimelineEvent | null {
         const { undone } = this.getState();
         if (undone.length === 0) return null;
-
         const eventToRedo = undone[undone.length - 1];
-        const groupId = eventToRedo.groupId;
-
-        let redoCount = 1;
-        if (groupId) {
-            for (let i = undone.length - 2; i >= 0; i--) {
-                if (undone[i].groupId === groupId) redoCount++;
-                else break;
-            }
-        }
 
         this.push({
             id: crypto.randomUUID(), type: 'REDO',
@@ -140,16 +127,27 @@ export class HistoryManager {
             color: '', size: 0, opacity: 1,
             timestamp: Date.now(), data: null,
             bbox: eventToRedo.bbox, isSaved: false,
-            undoCount: redoCount
         });
 
-        const firstEventToRedo = undone[undone.length - redoCount];
         const allIds = this.timeline.map(e => e.id);
-        this.cacheManager.invalidateFrom(firstEventToRedo.id, allIds);
+        this.cacheManager.invalidateFrom(eventToRedo.id, allIds);
 
-        // === FIX DE CACHÉ ENVENENADA ===
-        if (firstEventToRedo.type !== 'STROKE' && firstEventToRedo.type !== 'ERASE' && firstEventToRedo.type !== 'FILL') {
-            this.cacheManager.clearAll();
+        // === FIX: Invalidador Retroactivo (Redo) ===
+        // Similar a Undo. Si rehacemos un TRANSFORM, debemos destruir snapshots huérfanos
+        // intermedios de los trazos que han sido envueltos por esta modificación.
+        if ((eventToRedo.type === 'TRANSFORM' || eventToRedo.type === 'HIDE') && eventToRedo.targetIds) {
+            const { active } = this.getState(); // recalculado
+            let oldestIndex = active.length;
+            for (const id of eventToRedo.targetIds) {
+                const idx = active.findIndex(e => e.id === id);
+                if (idx !== -1 && idx < oldestIndex) oldestIndex = idx;
+            }
+            if (oldestIndex < active.length) {
+                const validIds = active.slice(0, oldestIndex).map(e => e.id);
+                this.cacheManager.garbageCollect(validIds);
+            } else {
+                this.cacheManager.clearAll();
+            }
         }
 
         return eventToRedo;
@@ -193,6 +191,7 @@ export class HistoryManager {
 
         this.push(event);
 
+        // 🚀 OPTIMIZACIÓN LAZY: Insertar un solo trazo es rápido (O(1)), lo dejamos para mantener precisión a corto plazo
         if (event.bbox && (event.type === 'STROKE' || event.type === 'ERASE')) {
             this.spatialGrid.insert(event.id, event.bbox);
         }
@@ -228,7 +227,7 @@ export class HistoryManager {
         };
 
         this.push(event);
-        this.rebuildSpatialGrid();
+        // 🚀 OPTIMIZACIÓN LAZY: Eliminado this.rebuildSpatialGrid()
 
         DiagnosticsService.printMetrics(performance.now() - startTime, this, this.cacheManager);
         return event;
@@ -267,13 +266,10 @@ export class HistoryManager {
 
     public rebuildSpatialGrid(): void {
         this.spatialGrid.clear();
-        const { active, transforms, createdLayers, layerRoute } = this.getState();
+        const { active, transforms } = this.getState();
 
         for (const event of active) {
             if (!event.bbox || (event.type !== 'STROKE' && event.type !== 'ERASE')) continue;
-
-            const routedLayer = layerRoute.get(event.layerIndex) ?? event.layerIndex;
-            if (!createdLayers.has(routedLayer)) continue;
 
             const t = transforms.get(event.id);
             if (t && (t.e !== 0 || t.f !== 0 || t.a !== 1 || t.b !== 0)) {
@@ -297,15 +293,9 @@ export class HistoryManager {
     }
 
     public getActiveCommands(brush: BrushEngine): ICommand[] {
-        const state = this.getState();
-        const { active, transforms, hiddenIds, createdLayers, layerRoute } = state;
-
+        const { active, transforms, hiddenIds } = this.getState();
         return active
-            .filter(ev => {
-                if (hiddenIds.has(ev.id)) return false;
-                const routedLayer = layerRoute.get(ev.layerIndex) ?? ev.layerIndex;
-                return createdLayers.has(routedLayer);
-            })
+            .filter(ev => !hiddenIds.has(ev.id))
             .map(ev => {
                 const cmd = CommandFactory.create(ev, brush);
                 const t = transforms.get(ev.id);
@@ -315,16 +305,12 @@ export class HistoryManager {
     }
 
     public getBboxForIds(ids: string[]): BoundingBox | null {
-        const state = this.getState();
-        const { active, transforms, createdLayers, layerRoute } = state;
+        const { active, transforms } = this.getState();
         let gMinX = Infinity, gMinY = Infinity, gMaxX = -Infinity, gMaxY = -Infinity;
 
         for (const id of ids) {
             const ev = active.find(e => e.id === id);
             if (!ev?.bbox) continue;
-
-            const routedLayer = layerRoute.get(ev.layerIndex) ?? ev.layerIndex;
-            if (!createdLayers.has(routedLayer)) continue;
 
             const t = transforms.get(id) ?? new DOMMatrix();
             const { minX, minY, maxX, maxY } = ev.bbox;

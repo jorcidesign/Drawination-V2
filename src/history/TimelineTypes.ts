@@ -1,5 +1,6 @@
 // src/history/TimelineTypes.ts
 import type { BoundingBox } from '../core/math/BoundingBox';
+import type { StrokePoint } from '../core/io/BinarySerializer'; // 🚀 IMPORTANTE para la optimización
 
 export type DrawingAction = 'STROKE' | 'ERASE' | 'FILL';
 export type TransformAction = 'TRANSFORM' | 'HIDE' | 'DUPLICATE_GROUP';
@@ -14,6 +15,7 @@ export interface TimelineEvent {
     readonly profileId: string;
     readonly layerIndex: number;
     readonly timestamp: number;
+
     readonly color: string;
     readonly size: number;
     readonly opacity: number;
@@ -23,22 +25,31 @@ export interface TimelineEvent {
     isCompressed?: boolean;
     isSaved?: boolean;
     readonly bbox?: BoundingBox;
+
     readonly targetIds?: string[];
     readonly transformMatrix?: number[];
+
     readonly sourceIds?: string[];
     readonly newIds?: string[];
+
     readonly layerName?: string;
     readonly fromIndex?: number;
     readonly toIndex?: number;
     readonly layerOpacity?: number;
     readonly visible?: boolean;
     readonly locked?: boolean;
+
     readonly backgroundColor?: string;
     readonly layerOrder?: number[];
 
-    // === FIX: Agrupación de transacciones ===
-    readonly groupId?: string;
-    readonly undoCount?: number;
+    // Propiedad legacy por la que TypeScript se quejaba
+    undoCount?: number;
+
+    // Agrupación de eventos lógicos
+    groupId?: string;
+
+    // 🚀 BATALLA 1 (MEMOIZACIÓN): Caché de los puntos matemáticos ya decodificados
+    decodedPoints?: StrokePoint[];
 }
 
 export interface LayerState {
@@ -72,7 +83,10 @@ export function isHideEvent(ev: TimelineEvent): ev is TimelineEvent & { targetId
     return ev.type === 'HIDE' && ev.targetIds != null;
 }
 export function isLayerEvent(ev: TimelineEvent): boolean {
-    return ev.type === 'LAYER_CREATE' || ev.type === 'LAYER_DELETE' || ev.type === 'LAYER_REORDER' || ev.type === 'LAYER_OPACITY' || ev.type === 'LAYER_VISIBILITY' || ev.type === 'LAYER_LOCK' || ev.type === 'LAYER_MERGE_DOWN';
+    return ev.type === 'LAYER_CREATE' || ev.type === 'LAYER_DELETE' ||
+        ev.type === 'LAYER_REORDER' || ev.type === 'LAYER_OPACITY' ||
+        ev.type === 'LAYER_VISIBILITY' || ev.type === 'LAYER_LOCK' ||
+        ev.type === 'LAYER_MERGE_DOWN';
 }
 export function isControlEvent(ev: TimelineEvent): boolean {
     return ev.type === 'UNDO' || ev.type === 'REDO' || ev.type === 'FLIP_H';

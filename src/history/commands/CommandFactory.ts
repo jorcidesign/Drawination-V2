@@ -31,7 +31,7 @@ class DummyCommand implements ICommand {
         this.id = ev.id;
         this.type = ev.type;
         this.bbox = ev.bbox;
-        if (import.meta.env.DEV) {
+        if (import.meta.env.DEV && ev.type !== 'DUPLICATE_GROUP') {
             console.warn(`[CommandFactory] No hay comando registrado para tipo: "${ev.type}". Usando DummyCommand.`);
         }
     }

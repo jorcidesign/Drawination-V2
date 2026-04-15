@@ -45,6 +45,10 @@ export class LassoTool implements ITool {
         this.mode = 'drawing';
         this.polygon = [];
         this.ctx.selection.clear();
+
+        // 🚀 OPTIMIZACIÓN LAZY: Se calcula solo al tocar el lienzo con el Lazo
+        this.ctx.history.rebuildSpatialGrid();
+
         const canvasPos = this.ctx.viewport.screenToCanvas(data.x, data.y);
         this.polygon.push({ x: canvasPos.x, y: canvasPos.y, pressure: 1 });
         this.ctx.engine.clearPaintingCanvas();
@@ -101,7 +105,6 @@ export class LassoTool implements ITool {
         const state = this.ctx.history.getState();
         const foundIds = new Set<string>();
 
-        // 🛡️ EL ESCUDO: Si la capa está bloqueada, el Lazo no selecciona nada en ella.
         if (state.layersState.get(state.derivedActiveLayerIndex)?.locked) {
             console.info("🔒 Capa bloqueada. Selección con lazo ignorada.");
             return;
@@ -112,7 +115,6 @@ export class LassoTool implements ITool {
             const event = state.active.find(ev => ev.id === eventId);
             if (!event || (event.type !== 'STROKE' && event.type !== 'ERASE')) continue;
 
-            // Solo seleccionamos los trazos que pertenecen a la capa activa real o redirigida
             const routedLayer = state.layerRoute.get(event.layerIndex) ?? event.layerIndex;
             if (routedLayer !== state.derivedActiveLayerIndex) continue;
 

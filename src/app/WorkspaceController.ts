@@ -125,10 +125,14 @@ export class WorkspaceController {
 
         this.eventBus.on('SHOW_NEW_PROJECT', () => this.newProjectModal.show());
 
+        // Reemplaza el bloque de NEW_PROJECT:
         this.eventBus.on('NEW_PROJECT', async ({ width, height }) => {
             this.eventBus.emit('GLOBAL_INTERRUPTION');
             this.history.timeline = [];
-            this.history.rebuildSpatialGrid();
+
+            // 🚀 OPTIMIZACIÓN LAZY: Vaciar la memoria es O(1)
+            this.history.spatialGrid.clear();
+
             this.history['invalidateCache']?.();
             this.selection.clear();
             this.engine.clearAllLayers();
@@ -166,10 +170,14 @@ export class WorkspaceController {
             this.rebuilder.debugDrawPoints(this.activeBrush);
         });
 
+        // Reemplaza el bloque de CLEAR_ALL:
         this.eventBus.on('CLEAR_ALL', async () => {
             this.eventBus.emit('GLOBAL_INTERRUPTION');
             this.history.timeline = [];
-            this.history.rebuildSpatialGrid();
+
+            // 🚀 OPTIMIZACIÓN LAZY: Vaciar la memoria es O(1)
+            this.history.spatialGrid.clear();
+
             this.history['invalidateCache']?.();
             this.selection.clear();
             this.engine.clearAllLayers();
@@ -427,7 +435,7 @@ export class WorkspaceController {
         reorderEv.isSaved = true;
 
         this.history.invalidateCache();
-        this.history.rebuildSpatialGrid();
+        // this.history.rebuildSpatialGrid();
 
         await this.rebuilder.rebuild(this.activeBrush);
         this.eventBus.emit('SYNC_LAYERS_CSS');
